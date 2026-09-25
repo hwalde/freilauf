@@ -24,6 +24,10 @@ import openrouter from '../providers/openrouter.mjs'
 import deepseek from '../providers/deepseek.mjs'
 import opencodeZen from '../providers/opencode-zen.mjs'
 import telegram from '../notifiers/telegram.mjs'
+import github from '../review-platforms/github.mjs'
+import gitlab from '../review-platforms/gitlab.mjs'
+import bitbucket from '../review-platforms/bitbucket.mjs'
+import bitbucketServer from '../review-platforms/bitbucket-server.mjs'
 import { validateDescriptor, PLUGIN_ID_RE, PLUGIN_KINDS } from './manifest.mjs'
 
 /** Coding agent plugins, keyed by id. Mutable — external packages join here. */
@@ -46,18 +50,33 @@ export const PROVIDER_PLUGINS = {
  */
 export const NOTIFIER_PLUGINS = { telegram }
 
+/**
+ * Code review platform plugins, keyed by id. Mutable, like the other three.
+ *
+ * A review platform opens a pull/merge request for a run's branch and reports
+ * its state, instead of the hub merging the branch itself. It is only ever
+ * asked when a repo selects it, so registering four of them costs nothing.
+ */
+export const REVIEW_PLUGINS = {
+  github,
+  gitlab,
+  bitbucket,
+  'bitbucket-server': bitbucketServer,
+}
+
 // id -> { kind, source: 'builtin' | 'external', manifest, dir }
 const META = new Map()
 for (const id of Object.keys(HARNESS_PLUGINS)) META.set(id, { kind: 'harness', source: 'builtin', manifest: null, dir: null })
 for (const id of Object.keys(PROVIDER_PLUGINS)) META.set(id, { kind: 'provider', source: 'builtin', manifest: null, dir: null })
 for (const id of Object.keys(NOTIFIER_PLUGINS)) META.set(id, { kind: 'notifier', source: 'builtin', manifest: null, dir: null })
+for (const id of Object.keys(REVIEW_PLUGINS)) META.set(id, { kind: 'review', source: 'builtin', manifest: null, dir: null })
 
 // Load failures, id collisions and broken descriptors. Nothing here stops the
 // hub: one bad package must never cost the operator the other ones, so every
 // failure is collected and shown on the Plugins page instead of thrown.
 const ERRORS = []
 
-const BUCKETS = { harness: HARNESS_PLUGINS, provider: PROVIDER_PLUGINS, notifier: NOTIFIER_PLUGINS }
+const BUCKETS = { harness: HARNESS_PLUGINS, provider: PROVIDER_PLUGINS, notifier: NOTIFIER_PLUGINS, review: REVIEW_PLUGINS }
 
 function bucket(kind) { return BUCKETS[kind] ?? PROVIDER_PLUGINS }
 
@@ -264,3 +283,9 @@ export function notifierLabel(id) { return NOTIFIER_PLUGINS[id]?.label ?? id }
 export function notifiersWithSetup() {
   return notifierIds().filter(id => typeof NOTIFIER_PLUGINS[id]?.setup?.render === 'function')
 }
+
+// ---------------- the review platform half ----------------
+
+export function reviewPlatformIds() { return Object.keys(REVIEW_PLUGINS) }
+export function getReviewPlatform(id) { return REVIEW_PLUGINS[id] ?? null }
+export function reviewPlatformLabel(id) { return REVIEW_PLUGINS[id]?.label ?? id }

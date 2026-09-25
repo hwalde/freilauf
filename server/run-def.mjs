@@ -21,6 +21,7 @@
 //
 // The one place that turns a definition into a running run is
 // startRun() in scheduler.mjs.
+import { REVIEW_TRISTATE, reviewRunField, reviewFromForm } from './review.mjs'
 import db, { getRepo, getSetting, setSetting } from './db.mjs'
 import { escapeHtml as e, toDbUtc } from './util.mjs'
 import { TITLE_MAX } from './title.mjs'
@@ -332,6 +333,7 @@ export function branchFields(a = {}, ctx = {}) {
       <input type="checkbox" name="keep_on_branch" value="1" ${keep ? 'checked' : ''}>
       ${explainHtml('branch.keep', base)}
       <small class="dim">${e(t('branch.keep.hint'))}</small></label>
+    ${reviewRunField(a, { hidden: mergeMode !== 'hub' })}
   </fieldset>`
 }
 
@@ -776,6 +778,11 @@ export function sandboxFromForm(b, problems = []) {
  * this field (a flow step, a test, an older JSON body) simply says `inherit` —
  * which is the value that changes nothing.
  */
+/** The review tri-state of a definition — anything unknown is `inherit`. */
+export function reviewOfDef(def = {}) {
+  return REVIEW_TRISTATE.includes(def.review) ? def.review : 'inherit'
+}
+
 export function sandboxOf(def = {}) {
   return SANDBOX_TRISTATE.includes(def.sandbox) ? def.sandbox : 'inherit'
 }
@@ -956,6 +963,9 @@ export async function runDefFromForm(b, problems = []) {
   // one only notices three runs later.
   const keepOnBranch = b.keep_on_branch === '1' || b.keep_on_branch === 'on' ? 1 : 0
   if (keepOnBranch && branchMode === 'keiner') problems.push(t('form.keep_needs_branch'))
+  // Keeping the work on its branch merges nothing, so there is nothing to review.
+  const review = reviewFromForm(b)
+  if (review === 'on' && keepOnBranch) problems.push(t('review.err_keep_and_review'))
   return {
     ...setup,
     prompt,
@@ -963,6 +973,7 @@ export async function runDefFromForm(b, problems = []) {
     branchMode,
     branchPattern: b.branch_pattern?.trim() || null,
     keepOnBranch,
+    review,
     expectedMinutes: +b.expected_minutes || DEFAULT_EXPECTED_MINUTES,
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
@@ -1046,6 +1057,7 @@ export function defFromAgent(agent) {
     branchMode: agent.branch_mode,
     branchPattern: agent.branch_pattern ?? null,
     keepOnBranch: agent.keep_on_branch ? 1 : 0,
+    review: REVIEW_TRISTATE.includes(agent.review) ? agent.review : 'inherit',
     // The stored word, not a coercion: `agent.sandbox` is a tri-state, and the
     // one value that must never be read as a boolean is the one that says
     // "ask the layer above me".
@@ -1080,25 +1092,25 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
     db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
                 keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_slots=?, schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, or_routing=?, effort=?,
-                skills=?, flows=?, sandbox=?, sandbox_profile_id=?, sandbox_overrides=?,
+                skills=?, flows=?, sandbox=?, sandbox_profile_id=?, sandbox_overrides=?, review=?,
                 active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
       def.keepOnBranch ? 1 : 0,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
       def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
-      sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}',
+      sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', reviewOfDef(def),
       active, id)
     return id
   }
   const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_slots,schedule_weeks,schedule_anchor,run_at,
-              provider,or_provider,or_routing,effort,skills,flows,sandbox,sandbox_profile_id,sandbox_overrides,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              provider,or_provider,or_routing,effort,skills,flows,sandbox,sandbox_profile_id,sandbox_overrides,review,active)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
     def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
-    sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', active)
+    sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', reviewOfDef(def), active)
   return Number(r.lastInsertRowid)
 }
 
@@ -1364,6 +1376,8 @@ export const RUN_DEF_FLOW_FIELDS = [
   { key: 'branchMode', kind: 'select', options: BRANCH_MODES, default: 'keiner' },
   { key: 'branchPattern', kind: 'text', placeholder: 'flow/{date}-{kurz}' },
   { key: 'keepOnBranch', kind: 'checkbox', default: false },
+  // Code review (server/review.mjs): `inherit` lets the repo decide.
+  { key: 'review', kind: 'select', options: REVIEW_TRISTATE, default: 'inherit' },
   // Whether the run happens in a container (SANDBOX.md). Flat,
   // like the routing fields above — the designer has no folding. Only the
   // "start single run" step needs them: "start agent" runs a stored definition
@@ -1495,6 +1509,7 @@ export function defFromFlowProps(props) {
     // Only where there is a branch to keep the work on — the same rule the form
     // enforces, so a flow cannot store a combination the form would refuse.
     keepOnBranch: props.keepOnBranch && props.branchMode !== 'keiner' ? 1 : 0,
+    review: REVIEW_TRISTATE.includes(props.review) ? props.review : 'inherit',
     // The sandbox, through the same reading and the same baseline the form
     // applies. An unknown tri-state means `inherit` — the value that changes
     // nothing, like the routing above. An overrides document this hub would

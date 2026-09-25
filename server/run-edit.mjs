@@ -42,6 +42,7 @@
 // deliberately only offered on a `scheduled` run, not a `deferred` one: a
 // deferred run waits on quota, and `retryDeferred` starts it the moment the
 // gate opens regardless of `start_at` — a start-time edit there would be a lie.
+import { REVIEW_TRISTATE } from './review.mjs'
 import db, { getRepo, getRun, addEvent } from './db.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
 import {
@@ -133,7 +134,7 @@ function sandboxYesNo(v) {
 export async function editRun(runId, {
   expectedMinutes = null, prompt = null, repoId = null,
   startMode = null, startAt = null, startInMinutes = null,
-  branchMode = null, branchPattern = null, keepOnBranch = null,
+  branchMode = null, branchPattern = null, keepOnBranch = null, review = null,
   sandbox = null, sandboxOverrides = null,
 } = {}, problems = []) {
   const run = getRun(runId)
@@ -232,6 +233,9 @@ export async function editRun(runId, {
         ? (run.keep_on_branch ? 1 : 0)
         : (keepOnBranch ? 1 : 0)
       if (keep && mode === 'keiner') problems.push(t('form.keep_needs_branch'))
+      // The code-review choice sits in the same fieldset and is read at launch too.
+      const rev = REVIEW_TRISTATE.includes(review) ? review : (run.review ?? 'inherit')
+      if (rev === 'on' && keep) problems.push(t('review.err_keep_and_review'))
       if (mode === 'fest' && pattern && !pattern.includes('{')) {
         const effRepoId = (repoId !== null && repoId !== undefined && repoId !== '') ? Number(repoId) : run.repo_id
         const effRepo = getRepo(effRepoId)
@@ -242,11 +246,13 @@ export async function editRun(runId, {
       }
       const changed = mode !== run.branch_mode ||
         pattern !== (run.branch_pattern ?? null) ||
-        keep !== (run.keep_on_branch ? 1 : 0)
+        keep !== (run.keep_on_branch ? 1 : 0) ||
+        rev !== (run.review ?? 'inherit')
       if (changed) {
         sets.push('branch_mode=?'); vals.push(mode)
         sets.push('branch_pattern=?'); vals.push(pattern)
         sets.push('keep_on_branch=?'); vals.push(keep)
+        sets.push('review=?'); vals.push(rev)
         geaendert.push('branch')
       }
     }

@@ -23,7 +23,7 @@ import {
   repoEdit, repoSave, settingsSave,
   codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
-  pageMergeSettings, mergeSettingsSave,
+  pageMergeSettings, mergeSettingsSave, pageReviews,
   pageCleanupSettings, cleanupSettingsSave,
   pageSkillSettings, skillSettingsSave, skillSettingsSync,
   repoToggle, repoDelete,
@@ -102,6 +102,8 @@ function pickQuickFields(b) {
     // forms use — so it has to be on the allowlist, or a ticked box would be
     // dropped here and nowhere else.
     keep_on_branch: b.keep_on_branch,
+    // The code-review choice sits in the same fieldset, for the same reason.
+    review: b.review,
   }
 }
 
@@ -299,6 +301,7 @@ async function dispatch(req, res, url, path, formBody) {
   // Merge (Settings → Merge) — the conflict resolver's setup. Its own page for
   // the same reason the favorites have one: the provider/model/effort block is
   // driven through #prov, #model and #effort, and those ids exist once per page.
+  if (req.method === 'GET' && path === '/reviews') return pageReviews(req, res, url)
   if (req.method === 'GET' && path === '/settings/merge') return pageMergeSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/merge') return mergeSettingsSave(req, res, url, formBody)
   // tmux cleanup (Settings → tmux cleanup) — the memory-freeing agent's setup.
@@ -913,6 +916,7 @@ async function api(req, res, url) {
       branchMode: branchFelt ? b.branch_mode : null,
       branchPattern: branchFelt ? b.branch_pattern : null,
       keepOnBranch: branchFelt ? (b.keep_on_branch === '1' || b.keep_on_branch === 'on' ? 1 : 0) : null,
+      review: branchFelt && b.review !== undefined ? String(b.review) : null,
       // The two sandbox fields the card offers while a run has not started.
       // Handed over RAW: `editRun()` compares them against the values that mean
       // yes and runs the overrides through `validateSandboxOverrides()` — a
@@ -983,6 +987,21 @@ async function api(req, res, url) {
     // click had done nothing at all.
     if (!r.ok && wantsHtml(req)) return problemPage(req, res, t('merge.section'), [r.error], `/runs/${run.id}`)
     return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}`)
+  }
+  // Code review (server/review.mjs): the reviewer's buttons on the detail page.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/review\/(approve|changes|reject|forward|refresh)$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const review = await import('./review.mjs')
+    const comment = String(b.comment ?? '')
+    const r = m[2] === 'approve' ? await review.approveReview(run.id, comment)
+      : m[2] === 'changes' ? await review.requestChanges(run.id, comment)
+        : m[2] === 'reject' ? await review.rejectReview(run.id, comment)
+          : m[2] === 'forward' ? await review.forwardComments(run.id)
+            : await review.pollOne(run)
+    if (!r.ok && wantsHtml(req)) return problemPage(req, res, t('review.title'), [r.error], `/runs/${run.id}#review`)
+    return answer(req, res, r.ok ? 200 : 400, r, `/runs/${run.id}#review`)
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/merge-skip$/))) {
     const run = getRun(m[1])

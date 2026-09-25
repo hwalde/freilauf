@@ -18,9 +18,12 @@ and into the changelog.
 
 ## Planned
 
-**Nothing at the moment**, and that is the honest state rather than an oversight.
-The last item on this page was running agents in a sandbox; it landed, so it
-left — the reference is [SANDBOX.md](SANDBOX.md), and what arrived is in
+- **Code review, the second step.** Comments on single lines on Freilauf's own
+  review page, and a change request that reaches a run whose session is
+  already closed (today it is refused there, with a sentence saying so).
+
+The last big item on this page was running agents in a sandbox; it landed, so
+it left — the reference is [SANDBOX.md](SANDBOX.md), and what arrived is in
 [CHANGELOG.md](CHANGELOG.md).
 
 Work carries on regardless; it is simply the smaller kind that appears in the

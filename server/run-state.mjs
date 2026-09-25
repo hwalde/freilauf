@@ -361,11 +361,14 @@ export function anomaliesSettled(run) {
 
 /**
  * The merge statuses that mean: the hub ITSELF put this run's work on `origin`.
- * `merged` pushed it into the base branch, `kept_on_branch` pushed the branch —
+ * `merged` pushed it into the base branch, `kept_on_branch` and the review
+ * states pushed the branch —
  * integrate.mjs knows no purely local merge, so either word is proof that
  * nothing of this run lives only on this machine.
  */
-export const WORK_ON_ORIGIN = ['merged', 'kept_on_branch']
+export const WORK_ON_ORIGIN = ['merged', 'kept_on_branch',
+  // A submitted code review pushed the branch before it opened (review.mjs).
+  'in_review', 'changes_requested', 'approved', 'review_rejected']
 
 /** …as a question about one run. */
 export function workOnOrigin(run) {

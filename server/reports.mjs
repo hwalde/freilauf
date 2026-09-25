@@ -695,8 +695,11 @@ export async function handleReport(runId, body, via = 'http') {
                   report_detail_md=COALESCE(report_detail_md, ?) WHERE id=?`)
         .run(text || null, detail || null, runId)
       addEvent(runId, 'done')
-      await notifyRun(runId, 'done', doneText(run, text, gate?.mergeLine ?? null),
+      await notifyRun(runId, 'done', doneText(db.prepare('SELECT * FROM runs WHERE id=?').get(runId) ?? run, text, gate?.mergeLine ?? null),
         { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: detail || text })
+      // Closed, and the agent still has something to read: a submitted code
+      // review says where its work went (server/review.mjs).
+      if (gate?.message) return { ok: true, message: gate.message }
       break
     }
     case 'failed': {

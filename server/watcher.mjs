@@ -1,6 +1,7 @@
 // Freilauf — watcher (planning 4.4, 4.5, 4.7): observes runs via tmux, the harnesses'
 // transcript/DB and the inbox fallback; anomalies (traffic light), budget retry,
 // cost estimation, auto-close of finished sessions (server/sessions.mjs), worktree cleanup.
+import { inOpenReview } from './review.mjs'
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import db, { getRepo, getRun, addEvent, announceRun, allSettings } from './db.mjs'
@@ -2055,6 +2056,9 @@ async function cleanupWorktrees() {
     // The hub merged this run itself — there is nothing left the branch could
     // still be needed for. The dirt guard below still applies.
     let removable = run.merge_status === 'merged'
+    // An open code review still needs its worktree: change requests go back to
+    // this agent, and an approval merges from here (review.mjs).
+    if (inOpenReview(run)) continue
     if (branch && !removable) {
       const { synced } = await branchSyncState(repo.path, branch)
       if (synced) removable = true      // upstream exists AND nothing outstanding

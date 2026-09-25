@@ -13,7 +13,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 [Scheduling](#scheduling) · [Quota and gates](#quota-and-gates) ·
 [Plugins](#plugins) · [LLM layer](#llm-layer) ·
 [Pages and live channel](#pages-and-live-channel) · [Panels](#panels) ·
-[Integration](#integration) · [Reports and follow-ups](#reports-and-follow-ups) ·
+[Integration](#integration) · [Code review](#code-review) ·
+[Reports and follow-ups](#reports-and-follow-ups) ·
 [Attention](#attention) · [Watcher and incidents](#watcher-and-incidents) ·
 [Sessions](#sessions) · [Repos and archive](#repos-and-archive) ·
 [Skills](#skills) · [Tests](#tests)
@@ -143,8 +144,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - Favorites store the setup half only (harness, provider, model, serving
   provider, effort, skills, flows) and round-trip through
   `runSetupFromForm()`/`favoriteToFormBody()` — no second definition builder.
-  Quick Run takes exactly repo, prompt, branch mode and pattern from the
-  request (allowlist), answers JSON, closes at once (`detached`), announces the
+  Quick Run takes exactly repo, prompt and the branch fieldset (mode,
+  pattern, keep, review) from the request (allowlist), answers JSON, closes at once (`detached`), announces the
   row on creation, and the toast polls the run record until the session
   stands; `failRun()` publishes `start_failed`.
 - A run page rendered before the session exists says the start is pending
@@ -385,6 +386,36 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   `run/<short id>` where a name is needed; `keep_on_branch` (hub mode only,
   refused with no branch) keeps the dirt check, skips the merge, pushes the
   branch, fires no `run_merged`, and "Merge now" still works.
+
+## Code review
+
+- Optional and off by default; it only exists under `merge_mode='hub'`, and
+  a repo or run without it behaves byte for byte as before.
+- Three levels, nearest wins: run/agent `review` → repo `review_mode` →
+  Settings → Merge `review_default`; the platform comes from the repo, else
+  the global setting. `decideReview()` is the one decision, and `launchRun()`
+  freezes it into `runs.review_platform` (`NULL` = legacy, not reviewed), so
+  the prompt sentence and the end of the run agree.
+- `keep_on_branch` and review exclude each other (the form refuses both), and
+  a conflict run of a reviewed run is reviewed too.
+- The finish gate is unchanged (clean, mergeable); where it would enqueue the
+  merge, `submitForReview()` pushes the branch (`run/<short id>` when
+  detached), opens or updates the review and closes the run as `done` with
+  `merge_status='in_review'`; `run_merged` fires only on the real merge.
+- An approval binds to `review_sha`: `integrateOne()` merges exactly
+  `review_approved_sha`, and every path that reaches it unapproved submits
+  instead; a later commit goes back to review.
+- Change requests (internal comment or forwarded platform comments) are typed
+  into the live session as a follow-up commission; the follow-up report
+  re-submits the same review; with no session the request is refused, never
+  dropped.
+- External platforms are `review` plugins (`docs/plugins.md`): the platform
+  approves and merges under its own rules, the hub polls `status()` once a
+  minute from the integrator tick and records a platform merge through the
+  same `finishMerged()`; the token stays in the hub process.
+- The reviewer's diff is computed in `repo.path` with `--no-ext-diff
+  --no-textconv`, never in the agent's working copy; an open review keeps its
+  worktree (`inOpenReview()`), and the review states are in `WORK_ON_ORIGIN`.
 
 ## Reports and follow-ups
 

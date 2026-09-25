@@ -1,6 +1,7 @@
 // Freilauf — run creation: run directory, worktree, prompt suffix, start via
 // fl-start (the single start path, so CLI and UI produce identical runs —
 // planning §5).
+import { decideReview, reviewPlatformOf, REVIEW_PLATFORM_RULE, REVIEW_TRISTATE } from './review.mjs'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, symlinkSync, existsSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
@@ -195,8 +196,10 @@ export function platformSuffix(run, branchRule, settings, repo = null, sandboxFa
   // and MERGE_RULE would promise the opposite two lines above. Two rules about
   // the same thing is one too many — that is the lesson the whole branch table
   // was written from.
+  // Code review (server/review.mjs) adds one sentence: the merge waits for a reviewer.
+  const reviewed = hubMerges && reviewPlatformOf(run) ? `\n- ${REVIEW_PLATFORM_RULE}` : ''
   const rules = hubMerges && !run.keep_on_branch
-    ? PLATFORM_RULES.replace('- Expected maximum working time', `${MERGE_RULE}\n- Expected maximum working time`)
+    ? PLATFORM_RULES.replace('- Expected maximum working time', `${MERGE_RULE}${reviewed}\n- Expected maximum working time`)
     : PLATFORM_RULES
   const finish = hubMerges
     ? FINISH_RULES.replace('  3. Only then stop.', `${MERGE_FINISH_LINE}\n  3. Only then stop.`)
@@ -723,20 +726,21 @@ export function splitEnvArgs(args) {
  */
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
   orProvider = null, orRouting = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
-  keepOnBranch = 0, expectedMinutes, skills = null, flows = null, title = null,
+  keepOnBranch = 0, review = 'inherit', expectedMinutes, skills = null, flows = null, title = null,
   sandbox = 0, sandboxProfileId = null, sandboxOverrides = '{}', sandboxSpec = null }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
   const id = randomUUID()
   db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider, or_routing,
-              effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, keep_on_branch,
+              effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, keep_on_branch, review,
               expected_minutes, skills, flows, title,
               sandbox, sandbox_profile_id, sandbox_overrides, sandbox_spec, worktree_kind, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,? , datetime('now'))`)
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,? , datetime('now'))`)
     .run(id, repoId, agentId, harness, model, provider, orProvider,
       orRouting ? JSON.stringify(orRouting) : null, effort, prompt, promptExtra,
-      goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, expectedMinutes, skills, flows, title,
+      goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, REVIEW_TRISTATE.includes(review) ? review : 'inherit',
+      expectedMinutes, skills, flows, title,
       sandbox ? 1 : 0, sandboxProfileId,
       typeof sandboxOverrides === 'string' ? sandboxOverrides : JSON.stringify(sandboxOverrides ?? {}),
       sandboxSpec ? (typeof sandboxSpec === 'string' ? sandboxSpec : JSON.stringify(sandboxSpec)) : null,
@@ -1178,6 +1182,12 @@ export async function launchRun(runId) {
   }
 
   const mainSha = await sh('git', ['-C', repo.path, 'rev-parse', 'HEAD'])
+  // Code review is decided once, here, and frozen: the prompt below and the
+  // finish gate at the end read the same answer. A resume keeps it.
+  if (!run.review_platform) {
+    run.review_platform = decideReview(run, repo)
+    db.prepare('UPDATE runs SET review_platform=? WHERE id=?').run(run.review_platform, runId)
+  }
   const settings = Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map(r => [r.key, r.value]))
   // What the agent is told about its branch comes out of BRANCH_MODE_INFO
   // (run-def.mjs) — the same table the form's explanations come from, so the

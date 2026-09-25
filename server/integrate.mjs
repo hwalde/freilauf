@@ -784,6 +784,15 @@ async function applyCheckResult(run, repo, result, via) {
       return { hold: false, mergeLine: 'Nothing to merge (no commits)' }
     }
     default: {
+      // Code review (server/review.mjs): a reviewed run is SUBMITTED here where
+      // it would be merged — unless this very commit was approved.
+      const review = await import('./review.mjs')
+      if (review.wantsReview(run, result.tip)) {
+        addEvent(run.id, 'finish_clean', { review: true })
+        const r = await review.submitForReview(run, repo, result.tip)
+        if (r.message) await deliver(run, r.message, via, `review:${result.tip}`)
+        return r
+      }
       setFinishState(run.id, 'merging')
       addEvent(run.id, 'finish_clean', {})
       const message = await messageFor(run, repo, result)
@@ -864,7 +873,9 @@ export async function integrateTick(nowMs = Date.now()) {
           return
         }
         const result = await runFinishCheck(run)
-        await applyCheckResult(run, repo, result, 'internal')
+        const r = await applyCheckResult(run, repo, result, 'internal')
+        // Submitted for review from the loop: close it the way the report path would.
+        if (r?.review && !r.hold) await closeKept(run.id, repo, r.mergeLine)
       } catch (err) {
         console.error('[integrate]', run.id, err.message)
       }
@@ -903,6 +914,8 @@ export async function integrateTick(nowMs = Date.now()) {
     await resolverEnded(r)
   }
   await startWaitingResolvers()
+  // External reviews are asked for their state here — once a minute per run.
+  try { await (await import('./review.mjs')).pollReviews(nowMs) } catch (err) { console.error('[review]', err.message) }
 }
 
 let timer = null
@@ -1282,7 +1295,22 @@ async function integrateOne(runId, opts = {}) {
     return escalate(runId, 'blocked_no_remote')
   }
 
-  const tip = await tipOf(run)
+  // A reviewed run merges exactly the commit its approval binds to — never a
+  // tip that moved after the reviewer looked (server/review.mjs).
+  const reviewed = run.review_platform && run.review_platform !== 'none'
+  // Nothing approved yet — every path that reaches this point ("Merge now",
+  // an escalation whose conflict dissolved, a restart) submits instead.
+  if (reviewed && !run.review_approved_sha) {
+    const cur = await tipOf(run)
+    if (!cur) {
+      addEvent(runId, 'merge_error', { reason: 'worktree gone' })
+      return escalate(runId, 'merge_error')
+    }
+    const r = await (await import('./review.mjs')).submitForReview(run, repo, cur)
+    if (!r.hold && run.status === 'running') await closeKept(runId, repo, r.mergeLine)
+    return
+  }
+  const tip = reviewed ? run.review_approved_sha : await tipOf(run)
   if (!tip) {
     addEvent(runId, 'merge_error', { reason: 'worktree gone' })
     return escalate(runId, 'merge_error')
@@ -1424,6 +1452,16 @@ async function backToConflict(runId, repo, reason) {
  * point of this module — and only now does the operator hear about it, the other
  * agents of the repo learn that the base branch moved, and the flows fire.
  */
+/**
+ * A reviewed run whose review was merged ON ITS PLATFORM (server/review.mjs).
+ * The same bookkeeping as the hub's own merge, read in the operator's
+ * repository: what the merge commit changed, and who has to hear about it.
+ */
+export async function finishMergedExternally(runId, repo, { tip, mergedSha = null }) {
+  if (!mergedSha) return finishMerged(runId, tip, repo, { already: true })
+  return finishMerged(runId, tip, repo, { mergedSha, beforeSha: `${mergedSha}^1`, dir: repo.path })
+}
+
 async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = null, dir = null, already = false } = {}) {
   const sha = mergedSha ?? tip
   // What this merge actually changed on the base branch. Computed once and
@@ -1453,6 +1491,10 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
     // "FOLLOW-UP REPORT #n" instead of a second "Done" — and the flows fire
     // again, the merged ones included (reports.mjs, completeFollowUp).
     await completeFollowUp(runId, { mergeLine: line, merged: true })
+  } else if (run.review_sha) {
+    // A reviewed run said "done — in review" when it was submitted; this is
+    // the second, separate piece of news.
+    await notifyRun(runId, 'review_merged', `✅ Review approved and merged: "${run.title ?? shortId(runId)}" — ${line}${run.pr_url ? `\n${run.pr_url}` : ''}`, { dedupe: false })
   } else {
     await notifyRun(runId, 'done', doneText(run, run.report_md, line),
       { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: run.report_detail_md ?? run.report_md ?? '' })
@@ -1853,6 +1895,9 @@ async function startResolver(orig, repo) {
     }) + `\nThe conflict resolver's setup is not usable: ${problems.join(' · ')}`)
   }
   def.flows = null
+  // A conflict run carries the original's work to the base branch, so under
+  // code review it is reviewed like the original would have been.
+  if (orig.review_platform && orig.review_platform !== 'none') def.review = 'on'
 
   const title = `Resolve conflicts: ${orig.title ?? shortId(orig.id)}`.slice(0, TITLE_MAX)
   const r = await startRun(def, { repoId: repo.id, title })

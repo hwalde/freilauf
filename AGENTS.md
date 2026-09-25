@@ -110,6 +110,7 @@ only `PASS` ends the task.
 | Extra skills, the cleanup agent, model catalogs, extras suggestion | `server/zusaetze.mjs`, `server/cleanup.mjs`, `server/models.mjs`, `server/extras-suggest.mjs` | Run definition |
 | Watching, anomalies, incidents | `server/watcher.mjs`, `server/detect.mjs`, `server/incidents.mjs` | Watcher and incidents |
 | Merging into the base branch | `server/integrate.mjs` | Integration |
+| Code review, review platforms | `server/review.mjs`, `server/review-platforms/` | Code review (+ `docs/plugins.md`) |
 | tmux sessions, retention, memory | `server/sessions.mjs`, `server/terminal.mjs` | Sessions |
 | Pages, sidebar, live channel, transport | `server/pages.mjs`, `server/web.mjs`, `server/web-helpers.mjs`, `server/notifications.mjs`, `server/events.mjs`, `public/hub.js`, `vpn-proxy.mjs` | Pages and live channel |
 | Plugins, credentials, discovery, welcome | `server/plugins/`, `server/harnesses/`, `server/providers/`, `server/notifiers/`, `server/welcome.mjs` | Plugins (+ `docs/plugins.md`) |

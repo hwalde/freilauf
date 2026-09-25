@@ -243,12 +243,15 @@
     // the explanations say the name of the branch one actually picked.
     const base = bases[repoSel.value]
     if (base) box.querySelectorAll('[data-base]').forEach(el => { el.textContent = base })
-    const keep = box.querySelector('[data-hub-only]')
-    if (!keep) return
-    keep.hidden = modus !== 'hub'
-    // Hidden AND unticked: a box one cannot see must not still submit, and
-    // "keep the work here" means nothing in a repo the hub does not integrate.
-    if (keep.hidden) keep.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = false })
+    box.querySelectorAll('[data-hub-only]').forEach(function (keep) {
+      keep.hidden = modus !== 'hub'
+      // Hidden AND unticked: a box one cannot see must not still submit, and
+      // "keep the work here" means nothing in a repo the hub does not integrate.
+      // The code-review choice goes back to "repo default" for the same reason.
+      if (!keep.hidden) return
+      keep.querySelectorAll('input[type=checkbox]').forEach(c => { c.checked = false })
+      keep.querySelectorAll('select[name=review]').forEach(s => { s.value = 'inherit' })
+    })
   }
   document.querySelectorAll('[data-branch-choice]').forEach(function (box) {
     const form = box.closest('form') || document

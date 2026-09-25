@@ -59,6 +59,15 @@ das tut Freilauf, und es geht nur vorwärts.
   einem noch laufenden Agenten, was fehlt, merged in einem eigenen
   Integrations-Worktree, startet bei einem Konflikt einen Konfliktlauf und
   ruft dich zuletzt.
+- **Code-Review, wenn du eins willst.** Optional wie die Sandbox: global, pro
+  Repo und pro Agent oder Lauf einstellbar. Fertige Arbeit wird dann gepusht
+  und wartet auf eine Freigabe, statt im Basis-Branch zu landen: entweder auf
+  Freilaufs eigener Review-Seite (Diff, freigeben & mergen, Änderungen
+  anfordern — der Kommentar geht direkt in die Session des Agenten — oder
+  ablehnen) oder als Pull Request auf GitHub, GitLab, Bitbucket Cloud oder
+  Bitbucket Data Center, wo die Freigaben und der Branch-Schutz der Plattform
+  entscheiden und Freilauf dem Ergebnis folgt. Eine Freigabe gilt für genau
+  einen Commit: was der Agent danach committet, geht erneut ins Review.
 - **Flows ohne Code.** Wenn ein Lauf endet, kann ein Flow einem anderen
   Agenten schreiben, den nächsten Lauf starten und auf ihn warten,
   strukturierte Daten per LLM aus einem Report ziehen, verzweigen, schleifen,

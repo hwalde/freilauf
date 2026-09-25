@@ -38,6 +38,8 @@ import { TYPE_TEXT } from './detect.mjs'
 import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
+import { reviewCard, reviewLine, reviewInUse, openReviews, reviewsPageBody, reviewRepoFields, reviewRepoFromForm,
+  reviewSettingsFields, reviewSettingsFromForm } from './review.mjs'
 import { listSessionsSnapshot, sessionMemory, publishSessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
 import { cleanupSettings, cleanupConfigured, cleanupRunInFlight } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
@@ -955,8 +957,12 @@ export async function statusSidebar(repoId = null, back = '/') {
 export async function layout(req, title, active, content, selectedRepo = null, withTerminal = false) {
   // No "Flows" entry: a flow is not a place you go, it hangs on the agent or the
   // single run that starts it. The flow pages are reached from those two forms.
+  // "Reviews" only once code review is in use anywhere — optional like the
+  // sandbox, so an installation without it sees no trace of it.
+  const reviewNav = reviewInUse()
+    ? [['/reviews', t('nav.reviews') + (openReviews().length ? ` (${openReviews().length})` : '')]] : []
   const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
-    ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
+    ...reviewNav, ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   // Only ACTIVE repos are offered. This one query feeds both the header
   // switcher and the Quick-Run dialog (which takes the list as a parameter), so
@@ -1645,6 +1651,7 @@ export async function pageRun(req, res, url, id) {
   ${await sandboxCard(run, repo)}
   ${sandboxReconfigureCard(run)}
   ${integrationSection(run, repo)}
+  ${await reviewCard(run, repo)}
   ${goalCard(run)}
   ${run.help_text
     ? run.status === 'waiting_help'
@@ -1953,6 +1960,7 @@ export function integrationSection(run, repo) {
   return `<div class="banner waiting" id="run-integration">
     <b>${e(t('merge.section'))}:</b> ${zeilen.join(' · ') || `<span class="dim">–</span>`}
     ${why ? `<details class="merge-why"><summary>${e(t('merge.why'))}</summary><pre>${e(why)}</pre></details>` : ''}
+    ${reviewLine(run)}
     ${resume ? `<div class="dim">${e(t('merge.resume'))}: <code>${e(resume)}</code></div>` : ''}
     ${buttons.length ? `<div class="btn-row">${buttons.join('')}</div>` : ''}
   </div>`
@@ -2903,6 +2911,7 @@ export async function pageMergeSettings(req, res, url) {
     <label>${e(t('merge.resolver_prompt'))}
       <textarea name="merge_resolver_prompt" rows="8">${e(s.merge_resolver_prompt ?? '')}</textarea>
       <span class="dim">${e(t('merge.resolver_prompt_hint'))}</span></label>
+    ${reviewSettingsFields()}
     <div class="btn-row"><button>${e(t('settings.save'))}</button>
       <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
   </form>`
@@ -2931,7 +2940,19 @@ export async function mergeSettingsSave(req, res, url, formBody) {
     }
   }
   setSetting('merge_resolver_prompt', String(b.merge_resolver_prompt ?? ''))
+  // Only when the form carried the block — a body without it changes nothing.
+  if (b.review_default !== undefined) {
+    const rv = reviewSettingsFromForm(b)
+    setSetting('review_default', rv.review_default)
+    setSetting('review_platform', rv.review_platform)
+  }
   redirect(res, '/settings/merge')
+}
+
+/** The Reviews page: every open code review, and the latest decided ones. */
+export async function pageReviews(req, res) {
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('review.page_title'), '/reviews', reviewsPageBody()))
 }
 
 /** One line for the settings page: what the resolver is, or that there is none. */
@@ -3745,6 +3766,7 @@ function integrationFields(r = {}) {
       ${e(t('repos.notify_running'))}</label>
     <p class="dim">${e(t('repos.notify_running_hint'))}</p>
     ${num('max_parallel', r.max_parallel ?? 0, 0, 'repos.max_parallel_hint')}
+    ${reviewRepoFields(r)}
     ${mergeFlowsBlock(r)}
   </fieldset>`
 }
@@ -3770,6 +3792,7 @@ function integrationFromForm(b, problems) {
     // The last value wins in parseForm, so the checkbox beats its hidden companion.
     notify_running: b.notify_running === '1' || b.notify_running === 'on' ? 1 : 0,
     max_parallel: num('max_parallel', 0, 0),
+    ...reviewRepoFromForm(b),
   }
 }
 
@@ -3834,11 +3857,13 @@ export async function repoSave(req, res, url, formBody) {
   if (problems.length) return problemPage(req, res, t('repos.edit_title'), problems, back)
   const prompt = (b.prompt ?? '').trim() || null
   const i = [integ.merge_mode, integ.merge_check, integ.finish_timeout_min, integ.merge_max_attempts,
-    integ.conflict_parallel, integ.notify_running, integ.max_parallel]
+    integ.conflict_parallel, integ.notify_running, integ.max_parallel,
+    integ.review_mode, integ.review_platform, integ.review_project]
   if (id) {
     db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=?, prompt=?,
                 merge_mode=?, merge_check=?, finish_timeout_min=?, merge_max_attempts=?,
-                conflict_parallel=?, notify_running=?, max_parallel=? WHERE id=?`)
+                conflict_parallel=?, notify_running=?, max_parallel=?,
+                review_mode=?, review_platform=?, review_project=? WHERE id=?`)
       .run(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i, +id)
     if (sandbox) {
       db.prepare(`UPDATE repos SET sandbox_default=?, sandbox_profile_id=?, sandbox_overrides=?,
@@ -3849,7 +3874,8 @@ export async function repoSave(req, res, url, formBody) {
   } else {
     const newId = db.prepare(`INSERT INTO repos(name,path,base_branch,worktree_extras,prompt,
                 merge_mode,merge_check,finish_timeout_min,merge_max_attempts,
-                conflict_parallel,notify_running,max_parallel) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
+                conflict_parallel,notify_running,max_parallel,review_mode,review_platform,review_project)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
       .get(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i).id
     if (sandbox) {
       db.prepare(`UPDATE repos SET sandbox_default=?, sandbox_profile_id=?, sandbox_overrides=?,

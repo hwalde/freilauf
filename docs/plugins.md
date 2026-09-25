@@ -1,7 +1,7 @@
-# Plugin architecture: coding agents, model providers and notification channels
+# Plugin architecture: coding agents, model providers, notification channels and code review platforms
 
 Coding agents (the CLI "harnesses" the hub drives in a tmux session), model
-providers and notification channels are **plugins**: one plain-object descriptor
+providers, notification channels and code review platforms are **plugins**: one plain-object descriptor
 per file, collected by a registry. Everything else in the hub — forms, run
 start, log detection, the provider pulse, the usage panel, the budget gate, the
 hub's own LLM calls, every message it sends a human — consults that registry
@@ -24,7 +24,7 @@ process environment, and which of the old rules survived.
 
 ```
 server/plugins/
-  registry.mjs   THE registry: HARNESS_PLUGINS, PROVIDER_PLUGINS, NOTIFIER_PLUGINS, register/unregister, errors
+  registry.mjs   THE registry: HARNESS_PLUGINS, PROVIDER_PLUGINS, NOTIFIER_PLUGINS, REVIEW_PLUGINS, register/unregister, errors
   manifest.mjs   manifest + descriptor validation — pure, no I/O, unit-testable
   loader.mjs     loadExternalPlugins(): read the plugin directory, validate, register
   install.mjs    install from a directory, uninstall, list packages (broken ones included)
@@ -43,6 +43,9 @@ server/providers/          built-in model providers
 server/notifiers/          built-in notification channels
   index.mjs                front door — re-exports the registry
   telegram.mjs             the only built-in one
+server/review-platforms/   built-in code review platforms
+  index.mjs                front door — re-exports the registry
+  github.mjs  gitlab.mjs  bitbucket.mjs  bitbucket-server.mjs
 server/notify.mjs          THE facade: notify(), notifiersConfigured(), sendTest()
 server/notifications.mjs   Settings → Notifications, and the setup-wizard dispatcher
 bin/fl-notify              the same facade from outside the hub process (deploy scripts)
@@ -59,8 +62,8 @@ server/balances.mjs        aggregates plugin balance() for the UI
 
 A plugin is a **descriptor object**: data plus functions, with no state of its
 own and nothing imported from the hub. It is a `harness` (a coding agent), a
-`provider` (a model provider) or a `notifier` (a notification channel); the
-three contracts overlap in their optional halves (`credentials`, `settings`) and
+`provider` (a model provider), a `notifier` (a notification channel) or a
+`review` (a code review platform); the four contracts overlap in their optional halves (`credentials`, `settings`) and
 differ in everything else.
 
 Built-in plugins live where they always did:
@@ -69,6 +72,7 @@ Built-in plugins live where they always did:
 server/harnesses/<id>.mjs      shipped coding agents
 server/providers/<id>.mjs      shipped model providers
 server/notifiers/<id>.mjs      shipped notification channels
+server/review-platforms/<id>.mjs  shipped code review platforms
 ```
 
 An external plugin is a **package directory** under the plugin directory
@@ -87,8 +91,8 @@ An external plugin is a **package directory** under the plugin directory
 ```
 
 `validateManifest()` (manifest.mjs) enforces: `api` must be exactly `1`; `id`
-matches `^[a-z0-9][a-z0-9-]{1,39}$`; `kind` is `harness`, `provider` or
-`notifier`; `name`
+matches `^[a-z0-9][a-z0-9-]{1,39}$`; `kind` is `harness`, `provider`,
+`notifier` or `review`; `name`
 and `version` are present; `main` defaults to `index.mjs` and may neither start
 with `/` nor contain `..` — a manifest must not be able to import something else
 on the machine. The returned value is a **normalized copy** carrying only the
@@ -112,9 +116,10 @@ happened" has an answer on the Plugins page.
 
 ## The registry
 
-`server/plugins/registry.mjs` owns `HARNESS_PLUGINS`, `PROVIDER_PLUGINS` and
-`NOTIFIER_PLUGINS`. `server/harnesses/index.mjs`, `server/providers/index.mjs`
-and `server/notifiers/index.mjs` are front doors that **re-export those very
+`server/plugins/registry.mjs` owns `HARNESS_PLUGINS`, `PROVIDER_PLUGINS`,
+`NOTIFIER_PLUGINS` and `REVIEW_PLUGINS`. `server/harnesses/index.mjs`,
+`server/providers/index.mjs`, `server/notifiers/index.mjs` and
+`server/review-platforms/index.mjs` are front doors that **re-export those very
 objects** — the same identity, not a copy — so all their importers were
 untouched by the rebuild and a plugin registered later is simply present in the
 object every importer already holds. That is the whole reason the registry is
@@ -132,6 +137,7 @@ long since captured the object.
 | `harnessIds/getHarness/harnessLabel/goalSpec/harnessesWithGoal/detectInstalled` | the harness half |
 | `providerIds/getProvider/providerLabel/providerHasKey` | the provider half |
 | `notifierIds/getNotifier/notifierLabel/notifiersWithSetup` | the notifier half |
+| `reviewPlatformIds/getReviewPlatform/reviewPlatformLabel` | the review platform half |
 | `binaryPresent(bin)` | `command -v` — never throws, a missing binary is a normal answer |
 
 **Load order**: the built-ins are registered at module evaluation (they are
@@ -1155,6 +1161,49 @@ by `server/notify.mjs` actually being there. Exit `0` when delivered **or when
 nothing is configured** — both are fine, and a deploy must not fail because
 there is nobody to tell; `--strict` turns the second one into a `1`.
 
+## Code review platform plugin contract (`server/review-platforms/<id>.mjs`)
+
+Instead of merging a run's branch itself, the hub can push it and have a review
+platform open a pull/merge request, then poll its state. `validateDescriptor()`
+requires `id`, `label`, `open` and `status`; `parseRemote`, `comments` and
+`note` are optional but must be functions when present. No `sandbox` block.
+
+```js
+{ id, kind: 'review', label, descriptionKey?,
+  settings: [{ key: 'token', type: 'password', required: true, labelKey },
+             { key: 'base_url', type: 'text', default: '<public API base>', labelKey, hintKey }, …],
+  parseRemote(url)                         -> 'project path' | null
+  async open(ctx, { project, head, base, title, body })  -> { id: string, url: string }
+  async status(ctx, { project, id })       -> { state: 'open'|'merged'|'closed', approved, changesRequested, mergeSha: string|null, url }
+  async comments(ctx, { project, id })     -> [{ author, body, path: string|null, line: number|null, at: iso|null }]
+  async note(ctx, { project, id, body })   -> { ok }
+}
+```
+
+- `parseRemote` derives the project from `git remote get-url origin` (https,
+  `ssh://` and scp-like forms, `.git` stripped) host-agnostically: the operator
+  chose the platform per repo, so the plugin does not second-guess the host.
+- `open` is **idempotent**: an already open request for `head → base` is
+  returned, not duplicated — the hub may ask again after a restart.
+- `approved` means at least one approval and no outstanding request for
+  changes; `mergeSha` is set only when `state` is `merged`.
+- `comments` returns general and inline review comments together, oldest first.
+- Errors are thrown as one short English sentence prefixed with the plugin id
+  (`github: HTTP 401 on GET /repos/… — check the token`); the token never
+  appears in a message or a log line.
+- Settings are read with `ctx.setting()`; a vendor call uses the global `fetch`
+  with `AbortSignal.timeout(15000)`. A built-in imports nothing of the hub's.
+
+| Built-in | Project | API base default | Auth |
+|---|---|---|---|
+| `github` | `owner/repo` | `https://api.github.com` (Enterprise: `https://<host>/api/v3`) | `Bearer` |
+| `gitlab` | `group/sub/project`, URL-encoded | `https://gitlab.com/api/v4` | `PRIVATE-TOKEN` |
+| `bitbucket` | `workspace/repo_slug` | `https://api.bitbucket.org/2.0` | `Bearer`, or Basic with `username` + app password |
+| `bitbucket-server` | `PROJECTKEY/repo_slug` | none — `base_url` (server root) is required | `Bearer` (HTTP access token) |
+
+GitLab's `/approvals` answers `approved: true` on a project without approval
+rules (`approvals_required: 0`), so there only a named approver counts.
+
 ## Gates: the budget gate is plugin-declared
 
 `budgetGate(harness, model, provider)` in `scheduler.mjs` keeps its signature
@@ -1512,7 +1561,7 @@ operator has **configured**.
 ```sql
 plugin_config(
   plugin_id  TEXT PRIMARY KEY,
-  kind       TEXT NOT NULL,                    -- harness | provider | notifier
+  kind       TEXT NOT NULL,                    -- harness | provider | notifier | review
   enabled    INTEGER NOT NULL DEFAULT 1,
   config     TEXT NOT NULL DEFAULT '{}',       -- {providers:[], credentials:{}, settings:{}}
   source     TEXT NOT NULL DEFAULT 'builtin',  -- builtin | external
@@ -1520,7 +1569,7 @@ plugin_config(
   updated_at TEXT NOT NULL DEFAULT (datetime('now')))
 ```
 
-One table for all three kinds, because they are the same question:
+One table for all four kinds, because they are the same question:
 `coding_agents` only ever knew coding agents, so a model provider had no place
 to carry an enabled flag, a credential or a setting of its own, and a
 notification channel had no place at all.
@@ -1533,7 +1582,8 @@ inventing an off-by-default one would switch off working installations. For a
 notifier the argument goes one step further: an installation that already had a
 Telegram token in `settings` has no row here either, and an off-by-default
 channel would have gone silent on upgrade. Enabled is not configured, so a fresh
-installation stays quiet all the same.
+installation stays quiet all the same. A review platform is **on** as well: it
+is only asked when a repo selects it, so its settings are the configuration.
 
 **Credentials are stored as a mode, not as a value.**
 `setCredential(pluginId, key, {mode, envVar, value})`: `'env'` stores the name
@@ -1637,7 +1687,10 @@ credentials". `/settings/coding-agents` is a 303 redirect to it.
    switch, the credentials block, badges for "can answer the hub's own
    questions" (`llm`), "balance visible" (`balance`) and "credential present",
    the plugin's own `settings` fields, version and "Remove" for an external one.
-4. **Plugin packages** — every external package with id, kind, name, version,
+4. **Code review platforms** — one card per registered review plugin: enabled
+   switch, the plugin's own `settings` fields (token, API base), version and
+   "Remove" for an external one.
+5. **Plugin packages** — every external package with id, kind, name, version,
    path and its load error as it stands (a notifier package appears here too);
    the registry's error list below it; an "Install from a directory" form; and a
    note that built-ins cannot be removed.

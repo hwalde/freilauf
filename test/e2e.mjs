@@ -5989,6 +5989,267 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
   })
 
   // ------------------------------------------------------------------
+  group('Code review: nothing reaches main before a reviewer said yes')
+
+  // The same repo, the same helpers as the integration group above: review is
+  // a layer on the finish gate, not a second integrator.
+  const review = await import('../server/review.mjs')
+  const originHas = async (sha) => (await g(ORIGIN, 'merge-base', '--is-ancestor', sha, 'main')).ok
+  const originBranch = async (ref) => (await g(ORIGIN, 'rev-parse', '--verify', '-q', `refs/heads/${ref}`)).stdout.trim()
+  const paneOf = async (runId) => (await sh('tmux', ['capture-pane', '-p', '-J', '-S', '-200', '-t', `=${lauf(runId).tmux_session}:`])).stdout
+
+  await check('the three levels are forms: Settings → Merge, the repo, the run', async () => {
+    const r = await postForm('/settings/merge', { harness: '', merge_resolver_prompt: '', review_default: 'on', review_platform: 'internal' }, { asBrowser: true })
+    equal(r.status, 303, 'Settings → Merge saved')
+    equal(db.prepare(`SELECT value FROM settings WHERE key='review_default'`).get()?.value, 'on', 'global default stored')
+    const merge = await (await fetchPath('/settings/merge')).text()
+    contains(merge, 'name="review_default"', 'the global field is on the page')
+    await postForm('/settings/merge', { harness: '', merge_resolver_prompt: '', review_default: 'off', review_platform: 'internal' }, { asBrowser: true })
+    const row = await repoMerge({ review_mode: 'on', review_platform: 'internal', review_project: '' })
+    equal(row.review_mode, 'on', 'the repo overrides the global "off"')
+    equal(row.review_platform, 'internal', 'with its platform')
+    const edit = await (await fetchPath(`/repos/edit?id=${row.id}`)).text()
+    for (const f of ['name="review_mode"', 'name="review_platform"', 'name="review_project"']) contains(edit, f, `repo field ${f}`)
+    const form = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
+    contains(form, 'name="review"', 'the run form offers the choice')
+    const bad = await laufStarten({ repo_id: String(repoId), prompt: 'x', branch_mode: 'neu', branch_pattern: 'e2e/keep-{kurz}', keep_on_branch: '1', review: 'on' })
+    isFalse(!!bad.runId, 'keep-on-branch and review together are refused')
+    contains(bad.error ?? '', 'nothing to review', 'with a sentence that says why')
+  })
+
+  let rv = null
+  await check('a reviewed run is pushed and submitted — main stays where it was', async () => {
+    const mainBefore = (await g(ORIGIN, 'rev-parse', 'main')).stdout.trim()
+    rv = await mergeRun()
+    const prompt = readFileSync(join(SB, 'runs', rv.id, 'prompt.md'), 'utf8')
+    contains(prompt, 'Code review: your work is NOT merged directly', 'the agent is told at the start')
+    equal(lauf(rv.id).review_platform, 'internal', 'the decision is frozen at launch')
+    await writeAndCommit(rv.wt, 'review.txt', 'first version\n', 'E2E: work for review')
+    const tip = (await g(rv.wt, 'rev-parse', 'HEAD')).stdout.trim()
+    const answer = await sendReport(rv.id, { kind: 'done', text: 'Ready for review.' })
+    contains(answer.message ?? '', 'CODE REVIEW', 'the agent reads where its work went')
+    const r = lauf(rv.id)
+    equal(r.status, 'done', 'the run is done')
+    equal(r.merge_status, 'in_review', 'and waits for its reviewer')
+    equal(r.review_sha, tip, 'the submitted commit is recorded')
+    equal(r.finish_state, null, 'out of the gate')
+    equal(await originBranch(`run/${rv.id.split('-')[0]}`), tip, 'the branch is on origin — nothing lives on one disk')
+    equal((await g(ORIGIN, 'rev-parse', 'main')).stdout.trim(), mainBefore, 'main has not moved')
+    isTrue(ereignisse(rv.id).includes('review_opened'), 'recorded as an event')
+    equal(ereignisse(rv.id).filter(k => k === 'notified:done').length, 1, 'the operator hears "done — in review" once')
+  })
+
+  await check('the reviewer sees the diff, the buttons and the list', async () => {
+    const html = await (await fetchPath(`/runs/${rv.id}`)).text()
+    contains(html, 'id="review"', 'the review card')
+    contains(html, 'review.txt', 'the changed file')
+    contains(html, '+first version', 'the added line')
+    contains(html, `/api/runs/${rv.id}/review/approve`, 'approve')
+    contains(html, `/api/runs/${rv.id}/review/changes`, 'request changes')
+    contains(html, `/api/runs/${rv.id}/review/reject`, 'reject')
+    const list = await (await fetchPath('/reviews')).text()
+    contains(list, `/runs/${rv.id}#review`, 'the Reviews page lists it')
+    contains(await (await fetchPath('/')).text(), 'href="/reviews"', 'and the navigation leads there')
+  })
+
+  await check('"request changes" types the comment into the agent\'s session', async () => {
+    const empty = await postForm(`/api/runs/${rv.id}/review/changes`, { comment: '' })
+    equal(empty.status, 400, 'a change request without a comment is refused')
+    const r = await postForm(`/api/runs/${rv.id}/review/changes`, { comment: 'Please call it second version.' })
+    equal(r.status, 200, 'accepted')
+    equal(lauf(rv.id).merge_status, 'changes_requested', 'recorded')
+    isTrue(!!lauf(rv.id).followup_since, 'and it is a follow-up commission for the agent')
+    await waitFor(async () => (await paneOf(rv.id)).includes('Please call it second version.'),
+      { what: 'the comment arrives in the session', timeoutMs: 15_000 })
+  })
+
+  await check('the follow-up report re-submits the same review, still unmerged', async () => {
+    await writeAndCommit(rv.wt, 'review.txt', 'second version\n', 'E2E: review fix')
+    const tip2 = (await g(rv.wt, 'rev-parse', 'HEAD')).stdout.trim()
+    const a = await sendReport(rv.id, { kind: 'done', text: 'Renamed it.' })
+    isTrue(a.ok, 'accepted')
+    const r = lauf(rv.id)
+    equal(r.merge_status, 'in_review', 'back in review')
+    equal(r.review_sha, tip2, 'now reviewing the new commit')
+    equal(r.merged_sha, null, 'nothing merged')
+    isTrue(ereignisse(rv.id).includes('review_updated'), 'the update is recorded')
+    equal(await originBranch(`run/${rv.id.split('-')[0]}`), tip2, 'and pushed to the same branch')
+  })
+
+  await check('approve merges EXACTLY the approved commit, not what came after it', async () => {
+    const approved = lauf(rv.id).review_sha
+    // The agent commits once more after the reviewer looked — that commit is not approved.
+    await writeAndCommit(rv.wt, 'unreviewed.txt', 'sneaked in\n', 'E2E: after the review')
+    const later = (await g(rv.wt, 'rev-parse', 'HEAD')).stdout.trim()
+    const r = await postForm(`/api/runs/${rv.id}/review/approve`, { comment: 'LGTM' })
+    equal(r.status, 200, 'approved')
+    await waitFor(() => lauf(rv.id).merge_status === 'merged', { what: 'merged after approval', timeoutMs: 30_000 })
+    isTrue(await originHas(approved), 'the approved commit is on main')
+    isFalse(await originHas(later), 'the unreviewed one is not')
+    equal(lauf(rv.id).merged_sha, approved, 'and the record says which one')
+    const ev = ereignisse(rv.id)
+    isTrue(ev.includes('review_approved') && ev.includes('merged'), 'approval and merge are events')
+    equal(ev.filter(k => k === 'notified:review_merged').length, 1, 'the merge is its own message')
+  })
+
+  await check('reject merges nothing and keeps the branch', async () => {
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'rejected.txt', 'no\n', 'E2E: to be rejected')
+    await sendReport(l.id, { kind: 'done', text: 'try me' })
+    const sha = lauf(l.id).review_sha
+    const r = await postForm(`/api/runs/${l.id}/review/reject`, { comment: 'Not what we want.' })
+    equal(r.status, 200, 'rejected')
+    equal(lauf(l.id).merge_status, 'review_rejected', 'recorded')
+    isFalse(await originHas(sha), 'main does not have it')
+    equal(await originBranch(`run/${l.id.split('-')[0]}`), sha, 'the branch is still on origin')
+    const again = await postForm(`/api/runs/${l.id}/review/approve`, {})
+    equal(again.status, 400, 'a decided review cannot be approved afterwards')
+  })
+
+  await check('the run overrides its repo — in both directions', async () => {
+    const off = await mergeRun({ review: 'off' })
+    await writeAndCommit(off.wt, 'direct.txt', 'direct\n', 'E2E: no review for this one')
+    await sendReport(off.id, { kind: 'done', text: 'straight in' })
+    await waitFor(() => lauf(off.id).merge_status === 'merged', { what: 'merged without review', timeoutMs: 30_000 })
+    equal(lauf(off.id).review_platform, 'none', 'repo on, run off → no review')
+    await repoMerge({ review_mode: 'off' })
+    const on = await mergeRun({ review: 'on', branch_mode: 'neu', branch_pattern: 'e2e/review-{kurz}' })
+    await writeAndCommit(on.wt, 'branch-review.txt', 'on a branch\n', 'E2E: reviewed on a named branch')
+    await sendReport(on.id, { kind: 'done', text: 'on a branch' })
+    const r = lauf(on.id)
+    equal(r.merge_status, 'in_review', 'repo off, run on → reviewed')
+    const branch = r.branch_expected
+    isTrue(!!branch && branch.startsWith('e2e/review-'), 'the branch rule decides the name')
+    equal(await originBranch(branch), r.review_sha, 'and that branch is what was pushed')
+    await postForm(`/api/runs/${on.id}/review/reject`, {})
+  })
+
+  await check('with the session gone a change request says so instead of vanishing', async () => {
+    await repoMerge({ review_mode: 'on', review_platform: 'internal' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'gone.txt', 'x\n', 'E2E: session will close')
+    await sendReport(l.id, { kind: 'done', text: 'bye' })
+    await postForm('/api/sessions/kill', { session: l.session })
+    await waitFor(() => !!lauf(l.id).tmux_closed_at, { what: 'session closed', timeoutMs: 20_000 })
+    const r = await postForm(`/api/runs/${l.id}/review/changes`, { comment: 'more please' })
+    equal(r.status, 400, 'refused')
+    contains((await r.json()).error ?? '', 'session', 'with the reason')
+    equal(lauf(l.id).merge_status, 'in_review', 'the review is still open')
+    await watcherTick()
+    isTrue(existsSync(l.wt), 'and the worktree cleanup keeps an open review\'s worktree')
+    await postForm(`/api/runs/${l.id}/review/reject`, {})
+  })
+
+  // ---- an external platform: the built-in GitHub plugin against a stub API ----
+  const http = await import('node:http')
+  const gh = { pulls: [], reviews: [], comments: [], calls: [], state: 'open', merged: false, mergeSha: null }
+  const ghServer = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', c => { body += c })
+    req.on('end', () => {
+      gh.calls.push({ method: req.method, url: req.url, auth: req.headers.authorization ?? '' })
+      const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)) }
+      const u = new URL(req.url, 'http://x')
+      if (req.method === 'GET' && u.pathname === '/repos/acme/app/pulls') {
+        return send(200, gh.pulls.filter(p => p.state === 'open'))
+      }
+      if (req.method === 'POST' && u.pathname === '/repos/acme/app/pulls') {
+        const b = JSON.parse(body || '{}')
+        const pr = { number: 7, html_url: 'https://github.example/acme/app/pull/7', state: 'open', head: { ref: b.head }, base: { ref: b.base }, title: b.title }
+        gh.pulls.push(pr)
+        return send(201, pr)
+      }
+      if (req.method === 'GET' && u.pathname === '/repos/acme/app/pulls/7') {
+        return send(200, { number: 7, html_url: 'https://github.example/acme/app/pull/7', state: gh.state, merged: gh.merged, merge_commit_sha: gh.mergeSha })
+      }
+      if (req.method === 'GET' && u.pathname === '/repos/acme/app/pulls/7/reviews') return send(200, gh.reviews)
+      if (req.method === 'GET' && u.pathname === '/repos/acme/app/pulls/7/comments') return send(200, gh.comments)
+      if (req.method === 'GET' && u.pathname === '/repos/acme/app/issues/7/comments') return send(200, [])
+      if (req.method === 'POST' && u.pathname === '/repos/acme/app/issues/7/comments') return send(201, { id: 1 })
+      send(404, { message: 'Not Found' })
+    })
+  })
+  const ghPort = await freePort()
+  await new Promise(r => ghServer.listen(ghPort, '127.0.0.1', r))
+  try {
+    await check('GitHub: the hub opens a pull request instead of merging', async () => {
+      const { setSetting } = await import('../server/db.mjs')
+      const { pluginSettingKey, pluginFields } = await import('../server/plugins/settings.mjs')
+      const { getPlugin } = await import('../server/plugins/registry.mjs')
+      const plugin = getPlugin('github')
+      isTrue(!!plugin, 'the GitHub review plugin is built in')
+      const key = (k) => pluginSettingKey('github', pluginFields(plugin).find(f => f.key === k))
+      setSetting(key('token'), 'ghp_e2e_secret')
+      setSetting(key('base_url'), `http://127.0.0.1:${ghPort}`)
+      await repoMerge({ review_mode: 'on', review_platform: 'github', review_project: 'acme/app' })
+      const l = await mergeRun()
+      rv = l
+      await writeAndCommit(l.wt, 'gh.txt', 'for github\n', 'E2E: a pull request')
+      const answer = await sendReport(l.id, { kind: 'done', text: 'PR please' })
+      contains(answer.message ?? '', 'CODE REVIEW', 'the agent is told')
+      const r = lauf(l.id)
+      equal(r.merge_status, 'in_review', 'in review')
+      equal(r.review_id, '7', 'the pull request number')
+      equal(r.pr_url, 'https://github.example/acme/app/pull/7', 'and its URL')
+      const post = gh.calls.find(c => c.method === 'POST' && c.url === '/repos/acme/app/pulls')
+      isTrue(!!post, 'a pull request was opened')
+      contains(post.auth, 'ghp_e2e_secret', 'with the stored token')
+      equal(gh.pulls[0].head.ref, `run/${l.id.split('-')[0]}`, 'from the run\'s branch')
+      equal(gh.pulls[0].base.ref, 'main', 'into the base branch')
+      isFalse(readFileSync(join(SB, 'runs', l.id, 'prompt.md'), 'utf8').includes('ghp_e2e_secret'), 'the token never reaches the agent')
+    })
+
+    await check('GitHub: a change request is noticed, and its comments reach the agent', async () => {
+      gh.reviews = [{ user: { login: 'alice' }, state: 'CHANGES_REQUESTED', body: 'Rename the file.', submitted_at: '2026-09-25T10:00:00Z' }]
+      gh.comments = [{ user: { login: 'alice' }, body: 'This line is wrong.', path: 'gh.txt', line: 1, created_at: '2026-09-25T10:00:01Z' }]
+      const r = await postForm(`/api/runs/${rv.id}/review/refresh`, {})
+      equal(r.status, 200, 'state fetched')
+      equal(lauf(rv.id).merge_status, 'changes_requested', 'changes requested')
+      isTrue(ereignisse(rv.id).includes('notified:review_changes'), 'the operator is told')
+      const f = await postForm(`/api/runs/${rv.id}/review/forward`, {})
+      equal(f.status, 200, 'comments forwarded')
+      await waitFor(async () => (await paneOf(rv.id)).includes('This line is wrong.'),
+        { what: 'the platform comment arrives in the session', timeoutMs: 15_000 })
+      const again = await postForm(`/api/runs/${rv.id}/review/forward`, {})
+      equal(again.status, 400, 'the same comments are not sent twice')
+    })
+
+    await check('GitHub: merged on the platform → merged here, with the facts of the merge', async () => {
+      // Merge the branch the way the platform would: on origin, not by the hub.
+      const clone = join(SB, 'gh-merge-clone')
+      await sh('git', ['clone', '-q', '-b', 'main', ORIGIN, clone])
+      const branch = `run/${rv.id.split('-')[0]}`
+      await g(clone, '-c', 'user.email=gh@test.local', '-c', 'user.name=GitHub', 'merge', '--no-ff', '-q', '-m', 'Merge pull request #7', `origin/${branch}`)
+      await g(clone, 'push', '-q', 'origin', 'HEAD:main')
+      gh.state = 'closed'; gh.merged = true
+      gh.mergeSha = (await g(clone, 'rev-parse', 'HEAD')).stdout.trim()
+      isTrue(/^[0-9a-f]{40}$/.test(gh.mergeSha), 'the platform merge really happened')
+      gh.reviews = [{ user: { login: 'alice' }, state: 'APPROVED', submitted_at: '2026-09-25T11:00:00Z' }]
+      await review.pollReviews(Date.now(), { force: true })
+      await waitFor(() => lauf(rv.id).merge_status === 'merged', { what: 'recorded as merged', timeoutMs: 20_000 })
+      const r = lauf(rv.id)
+      equal(r.merged_sha, r.review_sha, 'the reviewed commit is the one recorded')
+      const merged = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='merged' ORDER BY id DESC LIMIT 1`).get(rv.id)
+      contains(merged?.payload ?? '', 'gh.txt', 'the merge event names what the merge changed')
+      isTrue(ereignisse(rv.id).includes('notified:review_merged'), 'and the operator hears about it')
+    })
+
+    await check('GitHub: closed without merge → rejected', async () => {
+      gh.pulls = []; gh.state = 'open'; gh.merged = false; gh.mergeSha = null; gh.reviews = []
+      const l = await mergeRun()
+      await writeAndCommit(l.wt, 'gh-closed.txt', 'x\n', 'E2E: will be closed')
+      await sendReport(l.id, { kind: 'done', text: 'close me' })
+      equal(lauf(l.id).merge_status, 'in_review', 'in review')
+      gh.state = 'closed'
+      await postForm(`/api/runs/${l.id}/review/refresh`, {})
+      equal(lauf(l.id).merge_status, 'review_rejected', 'closed = rejected')
+    })
+  } finally {
+    ghServer.close()
+    await repoMerge({ review_mode: 'inherit', review_platform: '', review_project: '' })
+  }
+
+  // ------------------------------------------------------------------
   group('Plugins: the page, an external package, the discovery scan and the wizard')
 
   // Deliberately the LAST stub group: it registers plugins into a process-wide
