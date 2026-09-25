@@ -1002,8 +1002,10 @@ export function wantsTurnEndFollowUp(run, tip, harness) {
   if (!run || !['done', 'failed', 'aborted'].includes(run.status)) return false
   if (run.finish_state || run.followup_open) return false        // already reporting
   if (!harness?.turnEndsRun) return false
-  if (!tip || !run.merged_sha) return false                        // nothing to compare against
-  return tip !== run.merged_sha
+  // A run in code review has no merge yet; what it delivered is the reviewed commit.
+  const delivered = run.merged_sha ?? run.review_sha
+  if (!tip || !delivered) return false                             // nothing to compare against
+  return tip !== delivered
 }
 
 async function handleFollowUp(run, body, via) {

@@ -4029,6 +4029,21 @@ try {
       isFalse(rv.wantsReview({ review_platform: 'none' }, 'aaa'), 'an unreviewed run is merged as before')
     })
 
+    await check('a platform change request the agent already answered is not raised again', async () => {
+      const dbm = await import('../server/db.mjs')
+      const id = 'review-stale-1'
+      const repo = dbm.default.prepare(`INSERT INTO repos(name,path) VALUES('review-stale','/tmp/review-stale')`).run().lastInsertRowid
+      dbm.default.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes)
+        VALUES(?,?,'done','claude','x','keiner',5)`).run(id, repo)
+      const at = (kind, ts) => dbm.default.prepare(`INSERT INTO events(run_id, kind, ts) VALUES(?,?,?)`).run(id, kind, ts)
+      isFalse(rv.staleChangeRequest({ id }, { changesRequested: true }), 'nothing re-submitted: a request is a request')
+      at('review_changes_requested', '2026-09-25 10:00:00')
+      at('review_updated', '2026-09-25 11:00:00')
+      isTrue(rv.staleChangeRequest({ id }, { changesRequested: true }), 'without a time: the re-submission answered it')
+      isTrue(rv.staleChangeRequest({ id }, { changesRequested: true, changesRequestedAt: '2026-09-25T10:30:00Z' }), 'an older request is stale')
+      isFalse(rv.staleChangeRequest({ id }, { changesRequested: true, changesRequestedAt: '2026-09-25T11:30:00Z' }), 'a newer one is new')
+    })
+
     await check('the diff is split per file, and comments become one block for the agent', () => {
       const patch = 'diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/d/y.md b/d/y.md\n+++ b/d/y.md\n+c\n'
       const parts = rv.splitPatch(patch)
@@ -4050,11 +4065,16 @@ try {
         .includes(rv.REVIEW_PLATFORM_RULE), 'and with the integration off not a word changes')
     })
 
-    await check('an open review counts as work on origin, and keeps its worktree', () => {
+    await check('an open review counts as work on origin, and keeps its worktree', async () => {
       for (const s of ['in_review', 'changes_requested', 'approved', 'review_rejected']) {
         isTrue(WORK_ON_ORIGIN.includes(s), `${s}: the branch was pushed before the review opened`)
       }
       isTrue(rv.inOpenReview({ review_platform: 'internal', merge_status: 'in_review' }), 'in review: keep')
+      const { archivable } = await import('../server/run-state.mjs')
+      isFalse(archivable({ status: 'done', review_platform: 'internal', merge_status: 'in_review' }), 'and it cannot be archived')
+      isTrue(archivable({ status: 'done', review_platform: 'internal', merge_status: 'merged' }), 'a decided one can')
+      equal(rv.safeHref('javascript:alert(1)'), null, 'an agent-written pr_url is no link target')
+      equal(rv.safeHref('https://github.com/a/b/pull/1'), 'https://github.com/a/b/pull/1', 'a web address is')
       isFalse(rv.inOpenReview({ review_platform: 'internal', merge_status: 'review_rejected' }), 'decided: the ordinary cleanup rules')
     })
 
@@ -6947,6 +6967,8 @@ try {
     isFalse(se.shouldAutoClose(lebt, { status: 'running' }, 3600_000, jetzt), 'a working agent is never closed')
     isTrue(se.shouldAutoClose(fertig, null, 3600_000, jetzt), 'two hours old, keep one hour')
     isFalse(se.shouldAutoClose(fertig, null, 4 * 3600_000, jetzt), 'keep four hours: stays')
+    isFalse(se.shouldAutoClose(fertig, { status: 'done', review_platform: 'internal', merge_status: 'in_review' }, 0, jetzt),
+      'a run in an open code review keeps its session — change requests go there')
     isTrue(se.shouldAutoClose(lebt, { status: 'done', ended_at: '1970-01-01 00:00:00' }, 0, jetzt),
       'keep 0 closes a finished run right away, even with a live pane')
     isFalse(se.shouldAutoClose(lebt, { status: 'done', ended_at: '1970-01-01 00:00:00',

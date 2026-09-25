@@ -6140,6 +6140,45 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
     await postForm(`/api/runs/${l.id}/review/reject`, {})
   })
 
+  await check('a conflict run of a reviewed run is reviewed too, and waits for its reviewer', async () => {
+    await resolverSetup()
+    await repoMerge({ review_mode: 'on', review_platform: 'internal' })
+    const l = await mergeRun()
+    await writeAndCommit(l.wt, 'README.md', '# Test repo\nreviewed run\n', 'E2E: reviewed run changes the readme')
+    await g(REPO, 'fetch', 'origin')
+    await g(REPO, 'reset', '--hard', 'origin/main')
+    writeFileSync(join(REPO, 'README.md'), '# Test repo\nreview outside\n')
+    await g(REPO, 'add', '-A')
+    await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: outside change during review')
+    await g(REPO, 'push', '-q', 'origin', 'main')
+    const a = await sendReport(l.id, { kind: 'done', text: 'readme for review' })
+    contains(a.message ?? '', 'cannot be merged into main', 'the gate still asks for a mergeable branch first')
+    await repoMerge({ review_mode: 'on', review_platform: 'internal', finish_timeout_min: '1' })
+    await integrate.integrateTick(Date.now() + 5 * 60_000)
+    const resolverRow = db.prepare('SELECT * FROM runs WHERE resolves_run_id=?').get(l.id)
+    isTrue(!!resolverRow, 'a conflict run took over')
+    await sessionMerken(resolverRow.id)
+    equal(lauf(resolverRow.id).review_platform, 'internal', 'and it is reviewed like its original')
+    const wt = lauf(resolverRow.id).workdir_effective
+    await g(wt, 'fetch', 'origin')
+    await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'merge', 'origin/main')
+    writeFileSync(join(wt, 'README.md'), '# Test repo\nreviewed run\nreview outside\n')
+    await g(wt, 'add', '-A')
+    await g(wt, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: both, for review')
+    await sendReport(resolverRow.id, { kind: 'done', text: 'Resolved, please review.' })
+    equal(lauf(resolverRow.id).merge_status, 'in_review', 'the conflict run waits for its reviewer')
+    equal(lauf(l.id).merge_status, 'resolving', 'the original waits with it')
+    isTrue(ereignisse(l.id).includes('notified:review_resolver'), 'and the operator hears about it through the original')
+    await integrate.integrateTick(Date.now() + 10 * 60_000)
+    equal(db.prepare('SELECT count(*) c FROM runs WHERE resolves_run_id=?').get(l.id).c, 1,
+      'a conflict run in review is not "stranded": no second one is started')
+    equal(lauf(l.id).merge_status, 'resolving', 'and the original is not blocked')
+    const ok = await postForm(`/api/runs/${resolverRow.id}/review/approve`, {})
+    equal(ok.status, 200, 'approved')
+    await waitFor(() => lauf(l.id).merge_status === 'merged', { what: 'the original merged through its reviewed conflict run', timeoutMs: 30_000 })
+    await repoMerge({ review_mode: 'on', review_platform: 'internal', finish_timeout_min: '15' })
+  })
+
   // ---- an external platform: the built-in GitHub plugin against a stub API ----
   const http = await import('node:http')
   const gh = { pulls: [], reviews: [], comments: [], calls: [], state: 'open', merged: false, mergeSha: null }
@@ -6212,6 +6251,21 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
         { what: 'the platform comment arrives in the session', timeoutMs: 15_000 })
       const again = await postForm(`/api/runs/${rv.id}/review/forward`, {})
       equal(again.status, 400, 'the same comments are not sent twice')
+    })
+
+    await check('GitHub: a re-submitted fix is not flagged again by the request it answers', async () => {
+      await writeAndCommit(rv.wt, 'gh.txt', 'for github, renamed\n', 'E2E: answer the review')
+      await sendReport(rv.id, { kind: 'done', text: 'Fixed the line.' })
+      equal(lauf(rv.id).merge_status, 'in_review', 're-submitted')
+      isTrue(gh.calls.some(c => c.method === 'POST' && c.url === '/repos/acme/app/issues/7/comments'), 'the pull request gets a note about the update')
+      // GitHub still reports alice's CHANGES_REQUESTED until she approves or dismisses it.
+      await postForm(`/api/runs/${rv.id}/review/refresh`, {})
+      equal(lauf(rv.id).merge_status, 'in_review', 'the old request does not flip the run back')
+      equal(ereignisse(rv.id).filter(k => k === 'notified:review_changes').length, 1, 'and does not ring again')
+      gh.reviews = [{ user: { login: 'alice' }, state: 'CHANGES_REQUESTED', body: 'Still wrong.', submitted_at: new Date(Date.now() + 60_000).toISOString() }]
+      await postForm(`/api/runs/${rv.id}/review/refresh`, {})
+      equal(lauf(rv.id).merge_status, 'changes_requested', 'a NEW request is noticed')
+      equal(ereignisse(rv.id).filter(k => k === 'notified:review_changes').length, 2, 'and announced')
     })
 
     await check('GitHub: merged on the platform → merged here, with the facts of the merge', async () => {

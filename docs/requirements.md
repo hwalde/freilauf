@@ -360,7 +360,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   HEAD:{base}`; a rejected push retries once, a second rejection is a
   conflict; any other push failure waits on a due time honoured by the loop
   (never a timer of its own), five failures escalate. Only after the push is
-  the run `done`, are others told and flows fired.
+  the run `done`, are others told and flows fired — except under code review,
+  where the run is `done` on submission and the merge follows the approval.
 - Escalation ladder: `blocked_dirty` (three one-click answers),
   `resolving` → `blocked_conflict` after `merge_max_attempts` conflict runs,
   `blocked_error` (the git sentence is stored in `merge_error` and shown via
@@ -371,8 +372,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   branch, its setup from Settings → Merge via `setupToFormBody()`; it never
   starts a conflict run, never notifies, fires no flows
   (`flow_dispatched=1`, `merge_dispatched=1` at creation), gets no generated
-  title, carries only `merged` or nothing, and every failure maps onto the
-  original run.
+  title, carries only `merged`, a review state (it is reviewed when the
+  original is) or nothing, and every failure — a rejected review included —
+  maps onto the original run.
 - After every merge the other running agents of the repo are told (urgently
   when files overlap), never a run in `waiting_help`.
 - Nothing lives only on this machine: the integrator knows no local merge; the
@@ -415,7 +417,16 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   same `finishMerged()`; the token stays in the hub process.
 - The reviewer's diff is computed in `repo.path` with `--no-ext-diff
   --no-textconv`, never in the agent's working copy; an open review keeps its
-  worktree (`inOpenReview()`), and the review states are in `WORK_ON_ORIGIN`.
+  worktree and its session — retention, the cleanup agent and the archive
+  skip it (`inOpenReview()`) — and the review states are in `WORK_ON_ORIGIN`.
+- An approval is atomic (one conditional `UPDATE`), a platform change request
+  the agent already answered is not re-flagged (`staleChangeRequest()`), and a
+  platform link is rendered only for `http(s)` (`safeHref()`: `fl-report pr`
+  lets an agent write `pr_url`).
+- The trust boundary: review holds back what the HUB merges. An unsandboxed
+  agent runs as the operator's user and could push to the base branch or call
+  the hub's local API itself; only a sandboxed run is actually fenced off, and
+  a platform's branch protection is the stronger guarantee.
 
 ## Reports and follow-ups
 

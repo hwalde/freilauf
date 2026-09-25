@@ -49,7 +49,8 @@ Six facts and you can reason about the whole system:
     a run without a detail behaves exactly as before, and the document then
     carries the full report again.
 4. **The hub does the merging, not the agent** (when a repo is set to
-   `merge_mode = hub`). A run is `done` when its work is on the base branch.
+   `merge_mode = hub`). A run is `done` when its work is on the base branch
+   (under code review: when it is submitted for review).
    If the worktree is dirty or the merge conflicts, the still-living agent is
    told to fix it, and only then a human. `server/integrate.mjs`.
    Optional **code review** on top (global, per repo, per agent/run): the

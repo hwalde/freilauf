@@ -1770,5 +1770,7 @@
   "review.recent": "最近已处理",
   "review.col_run": "运行",
   "review.col_platform": "平台",
-  "review.col_state": "状态"
+  "review.col_state": "状态",
+  "api.archive_review_open": "此运行正在等待未完成的代码评审——请先处理评审；修改请求会发送到它的会话中。",
+  "review.ev_approval_dropped": "批准已撤回——已批准的提交无法再合并"
 }

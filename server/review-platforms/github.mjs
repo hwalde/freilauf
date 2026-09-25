@@ -84,15 +84,20 @@ export default {
     // The latest deciding review per reviewer: a COMMENTED review decides nothing.
     const latest = new Map()
     for (const r of reviews) {
-      if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r?.state)) latest.set(r.user?.login ?? '?', r.state)
+      if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r?.state)) latest.set(r.user?.login ?? '?', r)
     }
-    const states = [...latest.values()]
+    const states = [...latest.values()].map(r => r.state)
     const changesRequested = states.includes('CHANGES_REQUESTED')
+    // A change request stays in force until its author approves or dismisses
+    // it; its time is what lets the hub tell an old request from a new one.
+    const changesRequestedAt = [...latest.values()].filter(r => r.state === 'CHANGES_REQUESTED')
+      .map(r => r.submitted_at ?? '').sort().pop() || null
     const merged = !!pr.merged || !!pr.merged_at
     return {
       state: merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'open',
       approved: states.includes('APPROVED') && !changesRequested,
       changesRequested,
+      changesRequestedAt,
       mergeSha: merged ? (pr.merge_commit_sha ?? null) : null,
       url: pr.html_url,
     }

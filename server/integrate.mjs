@@ -908,7 +908,9 @@ export async function integrateTick(nowMs = Date.now()) {
   // 'resolving' forever.
   const stranded = db.prepare(`SELECT r.* FROM runs r JOIN runs o ON o.id = r.resolves_run_id
     WHERE r.resolves_run_id IS NOT NULL AND r.status IN ('done','failed','aborted')
-      AND r.finish_state IS NULL AND o.merge_status='resolving' AND o.resolver_run_id = r.id`).all()
+      AND r.finish_state IS NULL AND o.merge_status='resolving' AND o.resolver_run_id = r.id
+      -- a reviewed conflict run waiting for its reviewer has delivered; review.mjs maps its end
+      AND COALESCE(r.merge_status,'') NOT IN ('in_review','changes_requested','approved')`).all()
   for (const r of stranded) {
     if (r.merge_status === 'merged') continue
     await resolverEnded(r)
@@ -1346,6 +1348,9 @@ async function integrateOne(runId, opts = {}) {
     'merge', '--no-ff', '-m', `Merge run ${shortId(runId)}: ${title}\n\nFreilauf run ${runId}`, tip])
   if (!merged.ok) {
     await sh('git', ['-C', dir, 'merge', '--abort'])
+    // The approved commit does not merge any more: whatever resolves it is new
+    // code, and new code is reviewed again.
+    if (reviewed) dropApproval(runId)
     return backToConflict(runId, repo, 'merge conflict')
   }
 
@@ -1366,6 +1371,7 @@ async function integrateOne(runId, opts = {}) {
       const tail = [r.stdout, r.stderr].filter(Boolean).join('\n').split('\n').slice(-60).join('\n')
       await sh('git', ['-C', dir, 'reset', '--hard', `origin/${repo.base_branch}`])
       setFinishState(runId, 'check_failed')
+      if (reviewed) dropApproval(runId)
       addEvent(runId, 'finish_check_failed', { tail: tail.slice(-4000) })
       lastTip.set(runId, tip)
       const fresh = getRun(runId)
@@ -1396,6 +1402,7 @@ async function integrateOne(runId, opts = {}) {
         fetchedAt.delete(repo.id)
         return integrateOne(runId, { ...opts, retriedPush: true })
       }
+      if (reviewed) dropApproval(runId)
       return backToConflict(runId, repo, 'merge conflict')
     }
     const n = (pushFails.get(runId) ?? 0) + 1
@@ -1430,6 +1437,12 @@ async function integrateOne(runId, opts = {}) {
 
   const mergedSha = (await sh('git', ['-C', dir, 'rev-parse', 'HEAD'])).stdout.trim()
   await finishMerged(runId, tip, repo, { mergedSha, beforeSha, dir })
+}
+
+/** An approval that can no longer be merged as it stands — the fix goes back to review. */
+function dropApproval(runId) {
+  db.prepare(`UPDATE runs SET review_approved_sha=NULL, review_state='open', merge_status='changes_requested' WHERE id=?`).run(runId)
+  addEvent(runId, 'review_approval_dropped', {})
 }
 
 /** A conflict found by the integrator puts the run back in front of its agent. */

@@ -67,7 +67,9 @@ das tut Freilauf, und es geht nur vorwärts.
   ablehnen) oder als Pull Request auf GitHub, GitLab, Bitbucket Cloud oder
   Bitbucket Data Center, wo die Freigaben und der Branch-Schutz der Plattform
   entscheiden und Freilauf dem Ergebnis folgt. Eine Freigabe gilt für genau
-  einen Commit: was der Agent danach committet, geht erneut ins Review.
+  einen Commit: was der Agent danach committet, geht erneut ins Review. Es
+  hält zurück, was Freilauf merged; ein Agent außerhalb der Sandbox läuft als
+  dein Benutzer und wird nur vom Branch-Schutz der Plattform aufgehalten.
 - **Flows ohne Code.** Wenn ein Lauf endet, kann ein Flow einem anderen
   Agenten schreiben, den nächsten Lauf starten und auf ihn warten,
   strukturierte Daten per LLM aus einem Report ziehen, verzweigen, schleifen,

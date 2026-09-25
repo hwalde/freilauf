@@ -10,7 +10,7 @@ import { detectInstalled } from './harnesses/index.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { providerBalances } from './balances.mjs'
 import { sseHandler } from './events.mjs'
-import { archivable, followUpActive, resumable } from './run-state.mjs'
+import { archivable, followUpActive, resumable, inOpenReview } from './run-state.mjs'
 import { launchRun, resumeRun } from './runner.mjs'
 import { startRun, startDeferredRun, startScheduledNow } from './scheduler.mjs'
 import { runDefFromForm, runStartFromForm, saveAgent, rememberRunChoice, lastRunChoiceFor } from './run-def.mjs'
@@ -135,7 +135,8 @@ function archiveRecord(run) {
     // not finished at all, the other is finished and back at work. A message
     // saying "only finished runs" about a run whose record says `done` would
     // send the reader looking for the wrong thing.
-    const key = followUpActive(run) ? 'api.archive_followup_open' : 'api.archive_only_finished'
+    const key = followUpActive(run) ? 'api.archive_followup_open'
+      : inOpenReview(run) ? 'api.archive_review_open' : 'api.archive_only_finished'
     return { error: t(key), session: null }
   }
   db.prepare(`UPDATE runs SET archived_at=COALESCE(archived_at, datetime('now')) WHERE id=?`).run(run.id)

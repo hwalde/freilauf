@@ -1770,5 +1770,7 @@
   "review.recent": "Recently decided",
   "review.col_run": "Run",
   "review.col_platform": "Platform",
-  "review.col_state": "State"
+  "review.col_state": "State",
+  "api.archive_review_open": "This run waits in an open code review — decide the review first; its session is where change requests go.",
+  "review.ev_approval_dropped": "approval withdrawn — the approved commit no longer merges"
 }

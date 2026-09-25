@@ -234,9 +234,13 @@ export async function approveReview(runId, comment = '') {
   if (error) return { ok: false, error }
   if (reviewPlatformOf(run) !== INTERNAL) return { ok: false, error: t('review.err_external') }
   if (!run.review_sha) return { ok: false, error: t('review.err_not_open') }
+  // Check and write in ONE statement: two quick clicks must not both pass the
+  // check and enqueue the merge twice.
+  const won = db.prepare(`UPDATE runs SET review_approved_sha=review_sha, review_state='approved', merge_status='approved',
+              finish_state='merging', finish_started_at=datetime('now')
+              WHERE id=? AND merge_status IN ('in_review','changes_requested') AND review_sha=?`).run(runId, run.review_sha)
+  if (won.changes !== 1) return { ok: false, error: t('review.err_not_open') }
   const { enqueueIntegration } = await import('./integrate.mjs')
-  db.prepare(`UPDATE runs SET review_approved_sha=review_sha, review_state='approved', merge_status='approved',
-              finish_state='merging', finish_started_at=datetime('now') WHERE id=?`).run(runId)
   addEvent(runId, 'review_approved', { sha: run.review_sha, comment: String(comment).slice(0, 4000) || null })
   enqueueIntegration(runId, { manual: true })
   return { ok: true, repo: repo.id }
@@ -249,7 +253,19 @@ export async function rejectReview(runId, comment = '') {
   if (reviewPlatformOf(run) !== INTERNAL) return { ok: false, error: t('review.err_external') }
   db.prepare(`UPDATE runs SET merge_status='review_rejected', review_state='rejected' WHERE id=?`).run(runId)
   addEvent(runId, 'review_rejected', { comment: String(comment).slice(0, 4000) || null })
+  rejectOriginal(run)
   return { ok: true }
+}
+
+/**
+ * A rejected conflict run: the reviewer said no to the work it carries, which
+ * is the ORIGINAL's work — so that is where the verdict lands, instead of the
+ * original waiting in 'resolving' for a run that will never deliver.
+ */
+function rejectOriginal(run) {
+  if (!run?.resolves_run_id) return
+  db.prepare(`UPDATE runs SET merge_status='review_rejected' WHERE id=? AND merge_status='resolving'`).run(run.resolves_run_id)
+  addEvent(run.resolves_run_id, 'review_rejected', { by_resolver: run.id })
 }
 
 /**
@@ -362,10 +378,12 @@ export async function pollOne(run) {
   if (st?.state === 'closed') {
     db.prepare(`UPDATE runs SET merge_status='review_rejected', review_state='closed' WHERE id=?`).run(run.id)
     addEvent(run.id, 'review_closed', { url })
+    rejectOriginal(run)
     await notifyRun(run.id, 'review_closed', `❌ Review closed without merging: ${url}`, { dedupe: false })
     return { ok: true, state: 'closed' }
   }
-  const state = st?.changesRequested ? 'changes_requested' : st?.approved ? 'approved' : 'open'
+  const state = st?.changesRequested && !staleChangeRequest(run, st) ? 'changes_requested'
+    : st?.approved && !st?.changesRequested ? 'approved' : 'open'
   if (state !== run.review_state) {
     db.prepare(`UPDATE runs SET review_state=?, merge_status=? WHERE id=?`)
       .run(state, state === 'changes_requested' ? 'changes_requested' : 'in_review', run.id)
@@ -375,6 +393,24 @@ export async function pollOne(run) {
     }
   }
   return { ok: true, state }
+}
+
+/**
+ * Is the platform's change request one the agent has already answered? A
+ * platform keeps a request in force until its author approves or dismisses it,
+ * so after a re-submission it is still reported — and must not flip the run
+ * back and ring again. With a timestamp (`changesRequestedAt`) the request is
+ * compared against the re-submission; without one, a re-submission made after
+ * the last change request the hub saw counts as the answer until the platform
+ * stops reporting it.
+ */
+export function staleChangeRequest(run, st) {
+  const ts = (kind) => db.prepare(`SELECT ts FROM events WHERE run_id=? AND kind=? ORDER BY id DESC LIMIT 1`).get(run.id, kind)?.ts ?? null
+  const updated = ts('review_updated')
+  if (!updated) return false
+  if (st?.changesRequestedAt) return Date.parse(st.changesRequestedAt) <= Date.parse(`${updated.replace(' ', 'T')}Z`)
+  const seen = ts('review_changes_requested')
+  return !!seen && seen <= updated
 }
 
 /**
@@ -408,7 +444,10 @@ const GIT_SAFE = ['-c', 'core.quotepath=off', 'diff', '--no-ext-diff', '--no-tex
 export async function reviewDiff(run, repo) {
   const sha = run.review_sha
   if (!sha) return null
-  const mb = await sh('git', ['-C', repo.path, 'merge-base', `origin/${repo.base_branch}`, sha])
+  // Once merged, the merge base IS the reviewed commit and the diff would be
+  // empty — the run's own start is the base then.
+  const mb = run.merge_status === 'merged' ? { ok: false }
+    : await sh('git', ['-C', repo.path, 'merge-base', `origin/${repo.base_branch}`, sha])
   const base = mb.ok ? mb.stdout.trim() : (run.base_sha ?? null)
   if (!base) return { error: (mb.stderr || 'no merge base').trim() }
   const log = await sh('git', ['-C', repo.path, 'log', '--no-color', '--format=%h %s', `${base}..${sha}`])
@@ -428,6 +467,12 @@ export async function reviewDiff(run, repo) {
 }
 
 /** One file's unified diff as HTML lines. */
+/** A link target only when it is a web address — `fl-report pr` lets an agent write this field. */
+export function safeHref(url) {
+  const u = String(url ?? '').trim()
+  return /^https?:\/\//i.test(u) ? u : null
+}
+
 function patchHtml(chunk) {
   return chunk.split('\n').map(line => {
     const cls = line.startsWith('+') && !line.startsWith('+++') ? 'add'
@@ -455,8 +500,8 @@ export function reviewLine(run) {
   const platform = reviewPlatformOf(run)
   if (!platform) return ''
   const state = run.review_state ? t(`review.state_${run.review_state}`) : t('review.state_pending')
-  const link = run.pr_url && platform !== INTERNAL
-    ? ` · <a href="${e(run.pr_url)}" target="_blank" rel="noopener">${e(t('review.open_platform'))}</a>` : ''
+  const link = safeHref(run.pr_url) && platform !== INTERNAL
+    ? ` · <a href="${e(safeHref(run.pr_url))}" target="_blank" rel="noopener">${e(t('review.open_platform'))}</a>` : ''
   return `<div class="dim">${e(t('review.label'))}: ${e(platformLabel(platform))} · ${e(state)}${link}</div>`
 }
 
@@ -475,7 +520,7 @@ export async function reviewCard(run, repo) {
   if (platform !== INTERNAL) {
     const act = (action, label) => `<form method="post" action="/api/runs/${e(run.id)}/review/${action}" class="inline"><button>${e(t(label))}</button></form>`
     return `<section class="card review" id="review">${head}
-      ${run.pr_url ? `<p><a href="${e(run.pr_url)}" target="_blank" rel="noopener">${e(run.pr_url)}</a></p>` : ''}
+      ${safeHref(run.pr_url) ? `<p><a href="${e(safeHref(run.pr_url))}" target="_blank" rel="noopener">${e(run.pr_url)}</a></p>` : ''}
       <p class="dim">${e(t('review.external_hint', { platform: platformLabel(platform) }))}</p>
       ${open ? `<div class="btn-row">${act('refresh', 'review.refresh')}${act('forward', 'review.forward')}</div>` : ''}
       ${history}</section>`
@@ -553,7 +598,7 @@ export function reviewsPageBody() {
   const table = (list) => `<table class="list"><thead><tr><th>${e(t('review.col_run'))}</th><th>${e(t('layout.repo'))}</th>
     <th>${e(t('review.col_platform'))}</th><th>${e(t('review.col_state'))}</th><th>${e(t('run.end'))}</th></tr></thead><tbody>
     ${list.map(r => `<tr><td><a href="/runs/${e(r.id)}#review">${e(r.title ?? shortId(r.id))}</a></td><td>${e(r.repo_name)}</td>
-      <td>${e(platformLabel(r.review_platform))}${r.pr_url && r.review_platform !== INTERNAL ? ` · <a href="${e(r.pr_url)}" target="_blank" rel="noopener">↗</a>` : ''}</td>
+      <td>${e(platformLabel(r.review_platform))}${safeHref(r.pr_url) && r.review_platform !== INTERNAL ? ` · <a href="${e(safeHref(r.pr_url))}" target="_blank" rel="noopener">↗</a>` : ''}</td>
       <td>${e(t(`merge.${r.merge_status}`) === `merge.${r.merge_status}` ? r.merge_status : t(`merge.${r.merge_status}`))}</td>
       <td class="dim">${e(r.ended_at ? fmtDbUtc(r.ended_at) : '')}</td></tr>`).join('')}</tbody></table>`
   return `<h2>${e(t('review.page_title'))}</h2>
@@ -640,8 +685,5 @@ export function reviewRunField(a = {}, { hidden = false } = {}) {
 
 export function reviewFromForm(b) { return tri(b?.review) }
 
-/** Is this run's work sitting in an open review — the worktree cleanup keeps it. */
-export function inOpenReview(run) {
-  return !!reviewPlatformOf(run) && [...REVIEW_OPEN, 'approved'].includes(String(run?.merge_status ?? ''))
-}
+export { inOpenReview } from './run-state.mjs'
 

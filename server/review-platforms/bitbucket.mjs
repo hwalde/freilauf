@@ -91,11 +91,14 @@ export default {
     const pr = await call(ctx, 'GET', `${repoPath(project)}/pullrequests/${encodeURIComponent(id)}`)
     const people = Array.isArray(pr.participants) ? pr.participants : []
     const changesRequested = people.some(p => p?.state === 'changes_requested')
+    const changesRequestedAt = people.filter(p => p?.state === 'changes_requested')
+      .map(p => p.participated_on ?? '').sort().pop() || null
     const state = STATES[pr.state] ?? 'open'
     return {
       state,
       approved: people.some(p => p?.approved === true || p?.state === 'approved') && !changesRequested,
       changesRequested,
+      changesRequestedAt,
       mergeSha: state === 'merged' ? (pr.merge_commit?.hash ?? null) : null,
       url: pr.links?.html?.href ?? '',
     }

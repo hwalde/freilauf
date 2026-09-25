@@ -19,7 +19,7 @@
 // tmuxVerdict, sessionGoneFrom) so they can be tested without a tmux server.
 import db, { getRun, addEvent, allSettings } from './db.mjs'
 import { sh, parseDbUtc } from './util.mjs'
-import { displayStatus, followUpActive } from './run-state.mjs'
+import { displayStatus, followUpActive, inOpenReview } from './run-state.mjs'
 // Static, and it cannot become a cycle: reports.mjs reaches sessions.mjs only
 // through `import()` at call time, never from its module body.
 import { abandonFollowUp } from './reports.mjs'
@@ -252,6 +252,8 @@ export function shouldCloseArchived(run, keepMs, nowMs = Date.now()) {
 
 /** Is this session over its keep time? */
 export function shouldAutoClose(session, run, keepMs, nowMs = Date.now()) {
+  // An open code review sends its change requests into this session.
+  if (inOpenReview(run)) return false
   const finished = finishedAtMs(session, run)
   if (finished == null) return false
   return nowMs - finished >= keepMs

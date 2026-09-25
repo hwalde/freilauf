@@ -1509,7 +1509,10 @@ export function defFromFlowProps(props) {
     // Only where there is a branch to keep the work on — the same rule the form
     // enforces, so a flow cannot store a combination the form would refuse.
     keepOnBranch: props.keepOnBranch && props.branchMode !== 'keiner' ? 1 : 0,
-    review: REVIEW_TRISTATE.includes(props.review) ? props.review : 'inherit',
+    // …and review beside keep is a pair the form refuses; keep merges nothing,
+    // so the flow's run inherits instead of carrying a choice that means nothing.
+    review: REVIEW_TRISTATE.includes(props.review) && !(props.keepOnBranch && props.branchMode !== 'keiner')
+      ? props.review : 'inherit',
     // The sandbox, through the same reading and the same baseline the form
     // applies. An unknown tri-state means `inherit` — the value that changes
     // nothing, like the routing above. An overrides document this hub would

@@ -1174,7 +1174,7 @@ requires `id`, `label`, `open` and `status`; `parseRemote`, `comments` and
              { key: 'base_url', type: 'text', default: '<public API base>', labelKey, hintKey }, …],
   parseRemote(url)                         -> 'project path' | null
   async open(ctx, { project, head, base, title, body })  -> { id: string, url: string }
-  async status(ctx, { project, id })       -> { state: 'open'|'merged'|'closed', approved, changesRequested, mergeSha: string|null, url }
+  async status(ctx, { project, id })       -> { state: 'open'|'merged'|'closed', approved, changesRequested, changesRequestedAt?: iso|null, mergeSha: string|null, url }
   async comments(ctx, { project, id })     -> [{ author, body, path: string|null, line: number|null, at: iso|null }]
   async note(ctx, { project, id, body })   -> { ok }
 }
@@ -1187,6 +1187,12 @@ requires `id`, `label`, `open` and `status`; `parseRemote`, `comments` and
   returned, not duplicated — the hub may ask again after a restart.
 - `approved` means at least one approval and no outstanding request for
   changes; `mergeSha` is set only when `state` is `merged`.
+- `changesRequestedAt` (optional) is the time of the newest outstanding change
+  request. Platforms keep a request in force until its author approves or
+  dismisses it; with the time the hub tells a request the agent already
+  answered (re-submitted after it) from a new one. Without it the hub treats a
+  re-submission as the answer until the platform stops reporting the request.
+  `github` and `bitbucket` return it.
 - `comments` returns general and inline review comments together, oldest first.
 - Errors are thrown as one short English sentence prefixed with the plugin id
   (`github: HTTP 401 on GET /repos/… — check the token`); the token never

@@ -1770,5 +1770,7 @@
   "review.recent": "Zuletzt entschieden",
   "review.col_run": "Run",
   "review.col_platform": "Plattform",
-  "review.col_state": "Stand"
+  "review.col_state": "Stand",
+  "api.archive_review_open": "Dieser Run wartet in einem offenen Code-Review — erst das Review entscheiden; in seine Session gehen die Änderungsanforderungen.",
+  "review.ev_approval_dropped": "Freigabe zurückgezogen — der freigegebene Commit merged nicht mehr"
 }

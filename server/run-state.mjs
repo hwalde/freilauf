@@ -219,7 +219,20 @@ export function displayStatus(run) {
  * archives a run that is still being worked on.
  */
 export function archivable(run) {
-  return !!run && FINISHED.includes(run.status) && !followUpActive(run)
+  return !!run && FINISHED.includes(run.status) && !followUpActive(run) && !inOpenReview(run)
+}
+
+/** The merge statuses of a code review that is not decided yet (server/review.mjs). */
+export const OPEN_REVIEW_STATES = ['in_review', 'changes_requested', 'approved']
+
+/**
+ * Is this run's work waiting in an open code review? Such a run is `done`, but
+ * its session is where change requests go and its worktree is what an approval
+ * merges — so retention, the cleanup agent and the archive leave it standing.
+ */
+export function inOpenReview(run) {
+  const p = run?.review_platform
+  return !!p && p !== 'none' && OPEN_REVIEW_STATES.includes(String(run?.merge_status ?? ''))
 }
 
 /**

@@ -49,7 +49,9 @@ Claude Code、opencode、hermes、cursor，或任何以插件形式加入的智�
   要么在 Freilauf 自带的评审页面（查看差异、批准并合并、要求修改——评论会直接
   发送到智能体的会话中——或拒绝），要么作为 GitHub、GitLab、Bitbucket Cloud 或
   Bitbucket Data Center 上的拉取请求，由平台自身的审批和分支保护来决定，Freilauf
-  跟随其结果。批准只针对一个提交：智能体之后提交的内容会重新进入评审。
+  跟随其结果。批准只针对一个提交：智能体之后提交的内容会重新进入评审。它拦住的是
+  Freilauf 自己的合并；沙箱之外的智能体以你的用户身份运行，只有平台的分支保护才能
+  拦住它。
 - **无需编码的流程。** 一次运行结束时，流程可以给另一个智能体发消息、启动下一次
   运行并等待结果、用 LLM 从报告中提取结构化数据、分支、循环、通知你、调用 URL、
   执行 shell 命令（[server/flows/AGENTS.md](server/flows/AGENTS.md)）。
