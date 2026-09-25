@@ -2475,7 +2475,7 @@ export function endedSessionRuns(limit = 20) {
       LEFT JOIN repos ON repos.id = r.repo_id LEFT JOIN agents a ON a.id = r.agent_id
     WHERE r.status IN ('done','failed','aborted') AND r.workdir_effective IS NOT NULL
       AND r.archived_at IS NULL AND r.resolves_run_id IS NULL
-      AND (r.tmux_session IS NULL OR r.tmux_closed_at IS NOT NULL)
+      AND (r.tmux_session IS NULL OR r.tmux_closed_at IS NOT NULL) AND COALESCE(r.resume_pending, 0) = 0
     ORDER BY COALESCE(r.tmux_closed_at, r.ended_at, r.started_at) DESC LIMIT ?`).all(limit)
     .filter(run => resumable(run, { live: false }))
 }

@@ -820,6 +820,9 @@ export function resumeLaunchInFlight(runId, nowMs = Date.now()) {
     const info = JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8'))
     const since = Date.parse(info?.launching_at ?? '')
     const grace = info?.keep_status ? REVIVE_LAUNCH_GRACE_MS : RESUME_LAUNCH_GRACE_MS
+    // A launch begun before this process started died with the process that
+    // ran it: it is not in flight, however recent.
+    if (Number.isFinite(since) && since < PROCESS_STARTED_MS) return false
     return Number.isFinite(since) && nowMs - since < grace
   } catch { return false }
 }
@@ -833,6 +836,7 @@ export function resumeLaunchInFlight(runId, nowMs = Date.now()) {
  * marker is refreshed before fl-start as well.
  */
 export const REVIVE_LAUNCH_GRACE_MS = 15 * 60_000
+const PROCESS_STARTED_MS = Date.now() - Math.round(process.uptime() * 1000)
 /** The prompt the resumed CLI is launched with — never prompt.md, which is the record of the task. */
 const RESUME_PROMPT_FILE = 'resume-prompt.md'
 
@@ -1756,14 +1760,19 @@ export function reviveFailed(runId, text) {
   // What resumeRun() reset for the session that did not come is put back; the
   // session is recorded as closed either way, because retention's worktree
   // cleanup only looks at runs whose session is.
-  db.prepare(`UPDATE runs SET resume_pending=0, tmux_session=COALESCE(tmux_session, ?),
+  const res = db.prepare(`UPDATE runs SET resume_pending=0, tmux_session=COALESCE(tmux_session, ?),
               tmux_closed_at=COALESCE(tmux_closed_at, ?, datetime('now')),
               goal_sent_at=COALESCE(goal_sent_at, ?), agent_state=COALESCE(agent_state, ?),
-              agent_state_at=COALESCE(agent_state_at, ?), last_activity_at=COALESCE(?, last_activity_at) WHERE id=?`)
+              agent_state_at=COALESCE(agent_state_at, ?), last_activity_at=COALESCE(?, last_activity_at)
+              WHERE id=? AND resume_pending=1 AND tmux_session IS NULL`)
     .run(restore?.tmux_session ?? null, restore?.tmux_closed_at ?? null, restore?.goal_sent_at ?? null,
       restore?.agent_state ?? null, restore?.agent_state_at ?? null, restore?.last_activity_at ?? null, runId)
+  // Only a revive still in flight is taken back — never one whose session
+  // stands by now (a second process, a late caller).
+  if (!res.changes) return false
   try { rmSync(join(RUNS_DIR, runId, RESUME_FILE), { force: true }) } catch { /* the marker is a courtesy */ }
   addEvent(runId, 'revive_failed', { error: String(text).slice(0, 500) })
+  return true
 }
 
 export function failRun(runId, text) {
