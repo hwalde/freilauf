@@ -44,6 +44,16 @@ a day on which nothing was released.
   and branch protection in charge. The token never reaches a run's session or
   container. The contract for further platforms is in `docs/plugins.md`.
 
+### Changed
+
+- **A run in an open code review keeps its tmux session and its worktree**:
+  session retention and the tmux-cleanup agent leave it alone and it cannot be
+  archived until the review is decided — change requests are typed into that
+  session. An approval whose commit no longer merges (conflict, red merge
+  check) is withdrawn, and the fix goes back to review. Code review holds back
+  what Freilauf merges; an agent outside the sandbox runs as your user, so a
+  platform's branch protection is the stronger guarantee.
+
 ## 2026-09-13
 
 ### Added

@@ -253,7 +253,7 @@ export async function rejectReview(runId, comment = '') {
   if (reviewPlatformOf(run) !== INTERNAL) return { ok: false, error: t('review.err_external') }
   db.prepare(`UPDATE runs SET merge_status='review_rejected', review_state='rejected' WHERE id=?`).run(runId)
   addEvent(runId, 'review_rejected', { comment: String(comment).slice(0, 4000) || null })
-  rejectOriginal(run)
+  await rejectOriginal(run)
   return { ok: true }
 }
 
@@ -262,10 +262,14 @@ export async function rejectReview(runId, comment = '') {
  * is the ORIGINAL's work — so that is where the verdict lands, instead of the
  * original waiting in 'resolving' for a run that will never deliver.
  */
-function rejectOriginal(run) {
+async function rejectOriginal(run) {
   if (!run?.resolves_run_id) return
-  db.prepare(`UPDATE runs SET merge_status='review_rejected' WHERE id=? AND merge_status='resolving'`).run(run.resolves_run_id)
+  const r = db.prepare(`UPDATE runs SET merge_status='review_rejected' WHERE id=? AND merge_status='resolving'`).run(run.resolves_run_id)
+  if (r.changes !== 1) return
   addEvent(run.resolves_run_id, 'review_rejected', { by_resolver: run.id })
+  // The conflict run's own messages are silenced, so the operator hears it here.
+  const { notifyRun } = await import('./reports.mjs')
+  await notifyRun(run.resolves_run_id, 'review_closed', `❌ The review of this run's conflict run was rejected — nothing was merged.`, { dedupe: false })
 }
 
 /**
@@ -378,7 +382,7 @@ export async function pollOne(run) {
   if (st?.state === 'closed') {
     db.prepare(`UPDATE runs SET merge_status='review_rejected', review_state='closed' WHERE id=?`).run(run.id)
     addEvent(run.id, 'review_closed', { url })
-    rejectOriginal(run)
+    await rejectOriginal(run)
     await notifyRun(run.id, 'review_closed', `❌ Review closed without merging: ${url}`, { dedupe: false })
     return { ok: true, state: 'closed' }
   }
