@@ -392,9 +392,9 @@ const plugin = {
    * shape a fault can take: the work never happened, and another run's report
    * is now in this run's record.
    *
-   * `null` is the documented, safe answer (docs/plugins.md): runner.mjs starts
-   * the CLI afresh from the original prompt behind a header naming what the run
-   * had already committed. Doing the task twice is a cost; reporting somebody
+   * `null` is the documented, safe answer (docs/plugins.md): runner.mjs hands
+   * the run over to a fresh agent with the whole record — the task, every
+   * report, what the run had already committed (handoverPrompt). Doing the task twice is a cost; reporting somebody
    * else's work as done is not a cost, it is a wrong answer.
    *
    * Lazy import — the plugin rule (docs/plugins.md): hub modules are reached

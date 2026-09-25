@@ -405,8 +405,8 @@ if [[ -n "$SPEC_MODE" ]]; then
         err "Note: --settings has no place in '$HARNESS''s launch spec (ignored)."
     fi
     # A resume needs the declaration's resume form; without one the launch
-    # is an ordinary fresh start and says so — the hub has already put the
-    # original task behind a header for exactly that case.
+    # is an ordinary fresh start and says so — the hub has already written a
+    # handover prompt (task plus the run's record) for exactly that case.
     if [[ -n "$RESUME_ID" ]] && ! jq -e '(.resume | type) == "array" and (.resume | length) > 0' >/dev/null 2>&1 <<<"$SPEC_JSON"; then
         err "Note: '$HARNESS' declares no resume form (launch.resume) — starting afresh."
         RESUME_ID=""

@@ -79,6 +79,8 @@ change are in `AGENTS.md`.
   the argument.
 - `--resume <id>` without a prompt waits for input in every permission mode;
   with a prompt it continues.
+- `--session-id <id>` refuses an id whose transcript exists ("Session ID … is
+  already in use") and exits; renaming `<id>.jsonl` is enough to reuse it.
 - Claude rewrites transcripts it is not working in, in batches: a file's mtime
   is not the agent's activity; read the newest record's timestamp.
 - Background subagent completions arrive as `<task-notification>` user

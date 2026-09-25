@@ -544,7 +544,8 @@ const plugin = {
   /**
    * The chat id the hub resumes with (runner.mjs, resumeRun): the transcript
    * file's basename. `null` when there is no transcript — then there is
-   * nothing to continue, and the run is started afresh with its task.
+   * nothing to continue, and a fresh agent takes over, handed the run's whole
+   * record (runner.mjs, handoverPrompt).
    */
   resumeId(run) {
     const path = transcriptPath(run)

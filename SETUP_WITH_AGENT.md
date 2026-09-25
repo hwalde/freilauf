@@ -358,8 +358,8 @@ deferred and planned runs, the finish gate, pending goals, waiting flows — is
 in the database and is picked up within seconds of a start. A **server
 reboot** ends every tmux session; the hub then **resumes** every run that was
 still working, in a new session (claude, cursor and opencode continue their
-conversation, hermes is started afresh with its task and told what it had
-already committed), and catches up the cron and weekly slots the downtime
+conversation, hermes too; where no conversation can be continued a fresh
+agent takes over and is handed the whole record), and catches up the cron and weekly slots the downtime
 swallowed (Settings → "Catch up missed schedule slots", default 6 hours).
 
 The same holds for the other shape a restart has, and it is the more common
@@ -368,10 +368,16 @@ one: where a session **survives** but the agent's process inside it is killed
 the OOM killer), the run is resumed just the same. Capped at three times per
 run, so a CLI the machine shoots at every start is not restarted for ever.
 Where the hub cannot tell — an agent that crashed on its own, a run past that
-cap — the run's page has a **"Resume run"** button next to "Retry run": resume
-continues in the same worktree with the same commits and conversation, retry
-starts the task from scratch. Details: `docs/requirements.md`, "Deploying
-and restarts".
+cap, or a finished run whose session is long closed — the run's page has a
+**"Revive agent"** button: it brings the agent back into a new tmux session
+with all the run's settings (sandbox included), in the same worktree
+(recreated at the same path if retention removed it) and, where the coding
+agent can, the same conversation — as often as you like. A finished run
+needs an instruction and the revive becomes a follow-up. Tick "Fresh agent"
+to have a new agent take over instead, handed the original task, every
+report, the questions and answers and the state of the worktree. "Retry run"
+(failed and aborted runs) still starts the task from scratch. Details:
+`docs/requirements.md`, "Launch and resume".
 
 So the rules for the machine are short. Unattended package upgrades are fine
 and need nothing from you — they do not kill user processes. Leave
