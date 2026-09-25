@@ -199,6 +199,7 @@
   "run.revive_text_ph_done": "代理现在要做什么？（必填 —— 这将成为一次后续任务）",
   "run.revive_text_ph": "可选：代理现在要做什么。留空 = 完成原始任务。",
   "run.revive_needs_text": "该运行已完成：请说明被唤醒的代理要做什么 —— 唤醒即为一次后续任务",
+  "run.revive_pending": "该运行的唤醒已在进行中 —— 请等待它的会话",
   "run.archive": "移入归档",
   "run.restore": "恢复到概览",
   "run.archive_hint": "已归档的运行在概览中隐藏，但仍可在此完整查看。",

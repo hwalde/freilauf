@@ -199,6 +199,7 @@
   "run.revive_text_ph_done": "What should the agent do now? (required — this becomes a follow-up)",
   "run.revive_text_ph": "Optional: what the agent should do now. Empty = finish the original task.",
   "run.revive_needs_text": "this run is finished: say what the revived agent should do — reviving it is a follow-up",
+  "run.revive_pending": "a revive of this run is already under way — wait for its session",
   "run.archive": "Move to archive",
   "run.restore": "Restore to overview",
   "run.archive_hint": "An archived run is hidden from the overview but stays fully readable here.",

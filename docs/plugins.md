@@ -684,9 +684,9 @@ launch: {
   "Deploying and restarts" in `docs/requirements.md`). Same rules as `args`, one placeholder
   more: `{resume_id}` is what `resumeId(run)` answered (the run id when the
   plugin declares none), and `{prompt}` is the continuation text — the next
-  turn, not the task. A plugin without `resume` is not resumed: such a run is
-  started afresh from `args` with its original task behind a header that names
-  what it had already committed. The built-ins declare it (claude `--resume
+  turn, not the task. A plugin without `resume` is not resumed: a fresh agent
+  is started from `args` with a handover prompt — the original task, every
+  report, the questions and answers and what the run had already committed. The built-ins declare it (claude `--resume
   {resume_id}`, cursor `--resume {resume_id}`, opencode `--session
   {resume_id}`, hermes `chat --in {workdir} --resume {resume_id} -q {prompt}`),
   as documentation of what fl-start's own cases do. Measured for claude:

@@ -118,7 +118,20 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   revive of it goes through `reviveFailed()`, never `failRun()`.
 - A revive whose worktree retention removed recreates it at the same path
   (the resume keeps `branch_expected`), because the CLI finds its
-  conversation by that path; after a merge `base_sha` moves to the new HEAD.
+  conversation by that path; a working directory that came back elsewhere is
+  a handover, never a `--resume`. After a merge `base_sha` and `merged_sha`
+  move to the new HEAD (old values on `worktree_recreated`), or the leftovers
+  assessment counts the base's history as the run's.
+- `resumeRun()` claims `resume_pending` with a conditional UPDATE before any
+  await, so two clicks or passes launch one session; a `done` run left
+  pending without a launch in flight is taken back by the watcher
+  (`reviveFailed()`).
+- A resume clears the old life's `pane_died` and `sandbox:released`, or the
+  release sweep frees the new container at once or never again.
+- Untrusted text (instructions, commit subjects) goes into a prompt through
+  `fillTemplate()` — one pass, function replacer — never a string `replace`.
+- A takeover's retired claude transcripts (`<id>.before-*.jsonl`) still count
+  toward the run's tokens.
 
 ## Run definition
 

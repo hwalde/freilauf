@@ -807,7 +807,18 @@ async function api(req, res, url) {
     addEvent(run.id, 'resume_requested', { previous_status: run.status, by: 'operator',
       ...(instruction ? { text: instruction.slice(0, 500) } : {}), ...(fresh ? { mode: 'fresh' } : {}) })
     let r
-    try { r = await resumeRun(run.id, { reason: 'operator', instruction, fresh }) } catch (e) { r = { ok: false, error: e.message } }
+    try { r = await resumeRun(run.id, { reason: 'operator', instruction, fresh }) } catch (e) {
+      r = { ok: false, error: e.message }
+      // A throw past launchRun()'s own catches leaves the mark standing, and a
+      // `done` run has no watcher pass that would ever pick it up again.
+      if (finished && getRun(run.id)?.resume_pending) {
+        const { reviveFailed } = await import('./runner.mjs')
+        reviveFailed(run.id, e.message)
+      }
+    }
+    // Somebody else's revive of this run is already under way (a second tab,
+    // a double submit): this click starts nothing and must not say it did.
+    if (r?.pending) return refuse(t('run.revive_pending'))
     if (!r?.ok && !r?.retry) {
       // The resume was refused after all (no launch spec, a budget gate, a
       // container runtime that did not answer): put the record back exactly as
@@ -823,7 +834,7 @@ async function api(req, res, url) {
     }
     // The revived agent is working on the operator's instruction from this
     // moment — the same commission a line typed into a live session opens.
-    if (finished && r?.ok) startFollowUpCommission(run.id, instruction, 'revive')
+    if (finished && r?.ok && r.session) startFollowUpCommission(run.id, instruction, 'revive')
     return answer(req, res, 200, { ok: true, ...r }, `/runs/${run.id}`)
   }
   // "End the follow-up": take back a commission that is open over a

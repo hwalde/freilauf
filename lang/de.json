@@ -199,6 +199,7 @@
   "run.revive_text_ph_done": "Was soll der Agent jetzt tun? (Pflicht — daraus wird ein Nachauftrag)",
   "run.revive_text_ph": "Optional: was der Agent jetzt tun soll. Leer = die ursprüngliche Aufgabe zu Ende bringen.",
   "run.revive_needs_text": "dieser Lauf ist fertig: sag, was der wiederbelebte Agent tun soll — das Wiederbeleben ist ein Nachauftrag",
+  "run.revive_pending": "eine Wiederbelebung dieses Laufs ist schon unterwegs — warte auf ihre Session",
   "run.archive": "Ins Archiv verschieben",
   "run.restore": "Zurück in die Übersicht",
   "run.archive_hint": "Ein archivierter Lauf ist aus der Übersicht ausgeblendet, bleibt hier aber vollständig lesbar.",

@@ -3,7 +3,7 @@
 // cost estimation, auto-close of finished sessions (server/sessions.mjs), worktree cleanup.
 import { inOpenReview } from './review.mjs'
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname, basename } from 'node:path'
 import db, { getRepo, getRun, addEvent, announceRun, allSettings } from './db.mjs'
 import { RUNS_DIR, sh, parseDbUtc, shortId } from './util.mjs'
 import { notify, notifyOnFor } from './notify.mjs'
@@ -1211,6 +1211,37 @@ export function claudeTranscriptReading(text, mtime) {
   return out
 }
 
+/** Readings of retired transcripts, by path and size: they never change once retired. */
+const retiredReadings = new Map()
+
+/**
+ * The token totals of every `<run id>.before-*.jsonl` beside a claude
+ * transcript — the conversations `retireConversation()` filed away before a
+ * fresh agent took over under the same session id.
+ */
+export function retiredClaudeTokens(transcript) {
+  const out = { tokensIn: 0, tokensOut: 0 }
+  const dir = dirname(transcript)
+  const stem = basename(transcript, '.jsonl')
+  let names = []
+  try { names = readdirSync(dir).filter(n => n.startsWith(`${stem}.before-`) && n.endsWith('.jsonl')) } catch { return out }
+  for (const n of names) {
+    const p = join(dir, n)
+    try {
+      const size = statSync(p).size
+      let r = retiredReadings.get(p)
+      if (!r || r.size !== size) {
+        const reading = claudeTranscriptReading(readFileSync(p, 'utf8'), new Date())
+        r = { size, tokensIn: reading.tokensIn, tokensOut: reading.tokensOut }
+        retiredReadings.set(p, r)
+      }
+      out.tokensIn += r.tokensIn
+      out.tokensOut += r.tokensOut
+    } catch { /* an unreadable file adds nothing */ }
+  }
+  return out
+}
+
 /**
  * Evaluate the Claude transcript (path known in advance thanks to --session-id, planning 7.1).
  *
@@ -1233,6 +1264,12 @@ async function measureActivity(run) {
         out.tokensOut = reading.tokensOut
       } catch {}
     }
+    // A fresh agent that took over the run (runner.mjs, the handover) left the
+    // earlier conversations beside this one (claude.retireConversation); their
+    // tokens are the run's too, or a takeover would erase them from its record.
+    const before = retiredClaudeTokens(f)
+    out.tokensIn += before.tokensIn
+    out.tokensOut += before.tokensOut
     return out
   }
   // opencode: the session store — the run's whole session TREE, not the newest
@@ -1358,6 +1395,16 @@ export function noteResume(runId, outcome) {
  * it also keeps the cap.
  */
 async function retryPendingResumes() {
+  // A revive of a FINISHED run that never came up — the hub restarted between
+  // the mark and the session. It is not retried (the operator clicked once,
+  // hours may have passed): it is taken back, so the next click works and the
+  // release sweep, which skips a pending run, sees the run again.
+  const stuck = db.prepare(`SELECT id FROM runs WHERE status = 'done'
+                            AND resume_pending = 1 AND tmux_session IS NULL`).all()
+  if (stuck.length) {
+    const { reviveFailed, resumeLaunchInFlight } = await import('./runner.mjs')
+    for (const row of stuck) if (!resumeLaunchInFlight(row.id)) reviveFailed(row.id, 'the revive was interrupted before its session started')
+  }
   const rows = db.prepare(`SELECT id FROM runs WHERE status IN ('running','waiting_help')
                            AND resume_pending = 1 AND tmux_session IS NULL`).all()
   if (!rows.length) return

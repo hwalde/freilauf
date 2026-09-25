@@ -2500,12 +2500,12 @@ try {
                                    workdir_effective,started_at,ended_at,exit_code,merge_status)
                   VALUES(?,?,'claude','E2E-Resume: the operator says so','keiner',45,'failed',?,
                          datetime('now'),datetime('now'),1,'unmerged_both')`)
-        .run(id, repoId, REPO)
+        .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`))
       mkdirSync(join(SB, 'runs', id), { recursive: true })
       // The conversation the hub started under the run id, where claude files it:
       // only a transcript that is really there is continued (claude.resumeId).
       const { claudeTranscriptPath } = await import('../server/watcher.mjs')
-      const transcript = claudeTranscriptPath({ id, workdir_effective: REPO, sandbox: 0 })
+      const transcript = claudeTranscriptPath({ id, workdir_effective: join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`), sandbox: 0 })
       mkdirSync(dirname(transcript), { recursive: true })
       writeFileSync(transcript, '{}\n')
 
@@ -2533,12 +2533,7 @@ try {
       sessions.delete(l.tmux_session)
       db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), tmux_closed_at=datetime('now'),
                   report_md='E2E-REPORT-OLD' WHERE id=?`).run(id)
-      // The first revive moved the run from the repo into a worktree of its
-      // own (this row was inserted with the repo as its directory), and claude
-      // files a conversation under the directory — so that is where it now is.
-      const transcript2 = claudeTranscriptPath({ id, workdir_effective: lauf(id).workdir_effective, sandbox: 0 })
-      mkdirSync(dirname(transcript2), { recursive: true })
-      writeFileSync(transcript2, '{}\n')
+      const transcript2 = transcript
       const r2 = await postForm(`/api/runs/${id}/resume`, { mode: 'fresh' })
       equal(r2.status, 200, 'a second revive is taken too')
       await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the second session', timeoutMs: 20_000 })
@@ -2549,12 +2544,27 @@ try {
       contains(hand, 'E2E-Resume: the operator says so', 'and the original task')
       isFalse(existsSync(transcript2), 'the old conversation no longer sits under the run id')
       isTrue(readdirSync(dirname(transcript2)).some(f => f.startsWith(`${id}.before-`)), 'it was filed away beside it')
+
+      // A third time, with no instruction: the agent is told to finish its task.
+      const s2 = lauf(id).tmux_session
+      await sh('tmux', ['kill-session', '-t', `=${s2}`])
+      sessions.delete(s2)
+      writeFileSync(transcript2, '{}\n')
+      db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now'), tmux_closed_at=datetime('now') WHERE id=?`).run(id)
+      equal((await postForm(`/api/runs/${id}/resume`, {})).status, 200, 'a third revive, without an instruction')
+      await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the third session', timeoutMs: 20_000 })
+      sessions.add(lauf(id).tmux_session)
+      contains(readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8'), 'No new instruction',
+        'with nothing typed, the conversation is told to finish the original task')
+      contains(ereignisse(id).join(','), 'revive_started', 'an operator\'s revive is recorded as one, not as a lost session')
       db.prepare('DELETE FROM runs WHERE id=?').run(id)
     })
 
     await check('a FINISHED run whose session and worktree are gone is revived as a follow-up', async () => {
       const id = randomUUID()
-      const gone = join(SB, 'worktrees-gone', id)
+      // Where makeWorktree() puts a detached run — the path it had, which is what
+      // a CLI finds its conversation by.
+      const gone = join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`)
       db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,report_md,
                                    workdir_effective,worktree,started_at,ended_at,tmux_session,tmux_closed_at,merge_status)
                   VALUES(?,?,'claude','E2E-Revive: a finished task','keiner',45,'done','E2E-REPORT-DONE',?,?,
@@ -2576,7 +2586,9 @@ try {
       equal(l.started_at, before.started_at, 'and its start is not moved')
       equal(l.report_md, 'E2E-REPORT-DONE', 'its report is untouched')
       isTrue(!!l.followup_since, 'the revive opened a follow-up commission')
-      isTrue(existsSync(l.workdir_effective), `the worktree was made again (${l.workdir_effective})`)
+      equal(l.workdir_effective, gone, 'the worktree was made again at the SAME path')
+      isTrue(existsSync(gone), 'and it stands')
+      equal(l.merged_sha, l.base_sha, 'what was merged is behind it: the run\'s own commits count from the new HEAD')
       const ev = ereignisse(id)
       contains(ev.join(','), 'worktree_recreated', 'and that is on the record')
       contains(ev.join(','), 'followup_started', 'the commission is on the record')
@@ -2586,6 +2598,47 @@ try {
       contains(hand, 'E2E-REPORT-DONE', 'the fresh agent gets the report')
       contains(hand, 'E2E-FOLLOWUP-ORDER', 'and the instruction')
       contains(hand, 'follow-up report', 'and is told its report is a follow-up')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    await check('two clicks at once start ONE agent, never two on one worktree', async () => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,report_md,
+                                   workdir_effective,started_at,ended_at)
+                  VALUES(?,?,'claude','E2E-Revive: double click','keiner',45,'done','R',?,datetime('now'),datetime('now'))`)
+        .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`))
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      const [a, b] = await Promise.all([
+        postForm(`/api/runs/${id}/resume`, { text: 'E2E-A' }),
+        postForm(`/api/runs/${id}/resume`, { text: 'E2E-B' }),
+      ])
+      equal([a.status, b.status].sort().join(','), '200,400', `one is taken, the other refused (${a.status}, ${b.status})`)
+      await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the one session', timeoutMs: 30_000 })
+      sessions.add(lauf(id).tmux_session)
+      equal(ereignisse(id).filter(k => k === 'tmux_started').length, 1, 'exactly one session was started')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    await check('a session still open with a DEAD pane is replaced, not left beside the new one', async () => {
+      const id = randomUUID()
+      const alt = `fl-dead-${id.slice(0, 8)}`
+      sessions.add(alt)
+      await sh('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', alt])
+      await sh('tmux', ['set-option', '-t', `=${alt}:`, 'remain-on-exit', 'on'])
+      await sh('tmux', ['send-keys', '-t', `=${alt}:`, 'exit 0', 'Enter'])
+      await waitFor(async () => (await sh('tmux', ['display', '-p', '-t', `=${alt}:`, '#{pane_dead}'])).stdout.trim() === '1',
+        { what: 'the pane is dead', timeoutMs: 5000 })
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,report_md,
+                                   workdir_effective,tmux_session,started_at,ended_at)
+                  VALUES(?,?,'claude','E2E-Revive: dead pane','keiner',45,'done','R',?,?,datetime('now'),datetime('now'))`)
+        .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`), alt)
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      const r = await postForm(`/api/runs/${id}/resume`, { text: 'E2E-DEADPANE' })
+      equal(r.status, 200, 'the route takes it')
+      await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the new session', timeoutMs: 30_000 })
+      sessions.add(lauf(id).tmux_session)
+      isFalse((await sh('tmux', ['has-session', '-t', `=${alt}`])).ok, 'the dead session is gone')
+      isTrue((await sh('tmux', ['has-session', '-t', `=${lauf(id).tmux_session}`])).ok, 'the new one stands')
       db.prepare('DELETE FROM runs WHERE id=?').run(id)
     })
 
@@ -8409,6 +8462,11 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         rmSync(vorher.workdir_effective, { recursive: true, force: true })
         await sh('tmux', ['kill-session', '-t', `=${vorher.tmux_session}`])
         db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(sandboxRunId)
+        // The release sweep, driven by hand (the suite owns the reaper clock,
+        // FREILAUF_SANDBOX_REAPER_OFF): the first life is released as usual.
+        const { reconcileContainers } = await import('../server/watcher.mjs')
+        try { await reconcileContainers() } catch { /* the event is the verdict */ }
+        isTrue(ereignisse(sandboxRunId).includes('sandbox:released'), 'the first life was released when it ended')
         shim.reset()
         const r = await postForm(`/api/runs/${sandboxRunId}/resume`, { text: 'E2E-SANDBOX-REVIVE' })
         equal(r.status, 200, `the route takes it (${r.status})`)
@@ -8423,7 +8481,13 @@ writeFileSync(process.env.FL_DOCKER_STATE + '/witness',
         equal(l.sandbox_spec, vorher.sandbox_spec, 'from the spec frozen into the row')
         contains(readFileSync(join(SB, 'runs', sandboxRunId, 'resume-prompt.md'), 'utf8'), 'E2E-SANDBOX-REVIVE',
           'and the agent is handed the instruction')
+        isFalse(ereignisse(sandboxRunId).includes('sandbox:released'), 'the first life\'s release no longer stands')
+        // …and the revived life is released when IT ends — otherwise every
+        // revive would leave a network and a proxy behind for good.
         await fetchPath(`/api/runs/${sandboxRunId}/kill`, { method: 'POST' })
+        try { await reconcileContainers() } catch { /* the event is the verdict */ }
+        isTrue(ereignisse(sandboxRunId).includes('sandbox:released'), 'the revived life is released too')
+        isFalse(!!shim.networks()[`fl-net-${sandboxRunId}`], `and its network is gone (${JSON.stringify(shim.order())})`)
       })
 
       await check('the pane command the launcher prints resolves to the shim too', async () => {
