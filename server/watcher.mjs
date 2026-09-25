@@ -1219,14 +1219,16 @@ const retiredReadings = new Map()
  * transcript — the conversations `retireConversation()` filed away before a
  * fresh agent took over under the same session id.
  */
-export function retiredClaudeTokens(transcript) {
+export function retiredClaudeTokens(transcript, elsewhere = []) {
   const out = { tokensIn: 0, tokensOut: 0 }
   const dir = dirname(transcript)
   const stem = basename(transcript, '.jsonl')
   let names = []
-  try { names = readdirSync(dir).filter(n => n.startsWith(`${stem}.before-`) && n.endsWith('.jsonl')) } catch { return out }
-  for (const n of names) {
-    const p = join(dir, n)
+  try { names = readdirSync(dir).filter(n => n.startsWith(`${stem}.before-`) && n.endsWith('.jsonl')) } catch { /* none here */ }
+  // `elsewhere`: retired transcripts recorded under ANOTHER working directory
+  // (the run's directory moved before the handover — `conversation_retired`).
+  const paths = new Set([...names.map(n => join(dir, n)), ...elsewhere.filter(Boolean)])
+  for (const p of paths) {
     try {
       const size = statSync(p).size
       let r = retiredReadings.get(p)
@@ -1267,7 +1269,9 @@ async function measureActivity(run) {
     // A fresh agent that took over the run (runner.mjs, the handover) left the
     // earlier conversations beside this one (claude.retireConversation); their
     // tokens are the run's too, or a takeover would erase them from its record.
-    const before = retiredClaudeTokens(f)
+    const moved = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='conversation_retired'`).all(run.id)
+      .map(r => { try { return JSON.parse(r.payload)?.to ?? null } catch { return null } })
+    const before = retiredClaudeTokens(f, moved)
     out.tokensIn += before.tokensIn
     out.tokensOut += before.tokensOut
     return out

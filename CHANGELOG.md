@@ -30,7 +30,9 @@ a day on which nothing was released.
   hermes). As often as you like; a revive spends no crash budget. A finished
   run needs an instruction and the revive becomes a follow-up (the status,
   report and merge of the first attempt stay as they were); for a failed or
-  aborted run the instruction is optional.
+  aborted run the instruction is optional. The Sessions page lists the
+  ended sessions with a "Revive" link, and offers it beside a session whose
+  agent has exited.
 - **A fresh agent can take over instead.** Tick "Fresh agent instead of the
   old conversation", or it happens by itself where no conversation can be
   continued: a new agent starts in the same worktree and is handed the whole

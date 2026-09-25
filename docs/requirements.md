@@ -116,6 +116,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   and route). A revived `done` run keeps its status, `started_at`, report and
   merge, needs an instruction and opens a follow-up commission; a failed
   revive of it goes through `reviveFailed()`, never `failRun()`.
+- The Sessions page offers revive only through the run page's form (a link,
+  never a POST — a finished run needs an instruction), for exactly the runs
+  `resumable()` admits.
 - A revive whose worktree retention removed recreates it at the same path
   (the resume keeps `branch_expected`), because the CLI finds its
   conversation by that path; a working directory that came back elsewhere is
@@ -124,8 +127,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   assessment counts the base's history as the run's.
 - `resumeRun()` claims `resume_pending` with a conditional UPDATE before any
   await, so two clicks or passes launch one session; a `done` run left
-  pending without a launch in flight is taken back by the watcher
-  (`reviveFailed()`).
+  pending without a launch in flight (`REVIVE_LAUNCH_GRACE_MS`, longer than
+  recreate plus fl-start) is taken back by the watcher (`reviveFailed()`),
+  and a launch records its session only while the mark is still its own.
 - A resume clears the old life's `pane_died` and `sandbox:released`, or the
   release sweep frees the new container at once or never again.
 - Untrusted text (instructions, commit subjects) goes into a prompt through

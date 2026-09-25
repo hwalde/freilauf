@@ -8209,6 +8209,10 @@ try {
     wf(join(dir, 'other.before-1.jsonl'), line(999, 999) + '\n')
     const t = retiredClaudeTokens(join(dir, 'abc.jsonl'))
     equal(t.tokensOut, 15, 'the retired conversations of THIS run are summed, and only those')
+    const far = mkdtempSync(join(tmpdir(), 'fl-retired-far-'))
+    wf(join(far, 'abc.before-9.jsonl'), line(7, 7) + '\n')
+    equal(retiredClaudeTokens(join(dir, 'abc.jsonl'), [join(far, 'abc.before-9.jsonl')]).tokensOut, 22,
+      'and one recorded under a directory the run has since left')
     isTrue(t.tokensIn >= 150, `input counted too (${t.tokensIn})`)
   })
 

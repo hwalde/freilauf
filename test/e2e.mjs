@@ -2642,6 +2642,71 @@ try {
       db.prepare('DELETE FROM runs WHERE id=?').run(id)
     })
 
+    await check('a done run\'s revive that never launched is taken back, and the row restored', async () => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,report_md,
+                                   workdir_effective,started_at,ended_at,resume_pending)
+                  VALUES(?,?,'claude','E2E-Revive: stuck','keiner',45,'done','R',?,datetime('now'),datetime('now'),1)`)
+        .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`))
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      // What resumeRun() leaves when the hub dies between the mark and the launch.
+      writeFileSync(join(SB, 'runs', id, 'resume.json'), JSON.stringify({
+        reason: 'operator', keep_status: true, launching_at: new Date(Date.now() - 3_600_000).toISOString(),
+        restore: { tmux_session: 'fl-old-name', tmux_closed_at: '2026-01-01 00:00:00', goal_sent_at: '2026-01-01 00:00:01',
+          agent_state: 'waiting', agent_state_at: '2026-01-01 00:00:02', last_activity_at: '2026-01-01 00:00:03' },
+      }))
+      await watcherTick()
+      const l = lauf(id)
+      equal(l.resume_pending, 0, 'the mark is taken back, so the next click works')
+      equal(l.status, 'done', 'the run is as it was')
+      equal(l.tmux_session, 'fl-old-name', 'the old session name is back on the row')
+      equal(l.tmux_closed_at, '2026-01-01 00:00:00', 'and when it closed')
+      equal(l.agent_state, 'waiting', 'the attention the reset had cleared')
+      equal(l.last_activity_at, '2026-01-01 00:00:03', 'and the last activity')
+      contains(ereignisse(id).join(','), 'revive_failed', 'and why is on the record')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    await check('a revive taken back while it launched does not leave a session behind', async () => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,report_md,
+                                   workdir_effective,started_at,ended_at,resume_pending)
+                  VALUES(?,?,'claude','E2E-Revive: taken back','keiner',45,'done','R',?,datetime('now'),datetime('now'),1)`)
+        .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`))
+      mkdirSync(join(SB, 'runs', id), { recursive: true })
+      writeFileSync(join(SB, 'runs', id, 'resume.json'), JSON.stringify({ reason: 'operator', keep_status: true, instruction: 'X' }))
+      const { launchRun } = await import('../server/runner.mjs')
+      const p = launchRun(id)
+      // The recovery pass takes the mark back while the launch is under way.
+      db.prepare('UPDATE runs SET resume_pending=0, tmux_closed_at=datetime(\'now\') WHERE id=?').run(id)
+      const r = await p
+      isFalse(r.ok, 'the launch reports that it did not take')
+      equal(lauf(id).tmux_session, null, 'no session is recorded on the run')
+      isTrue(!!lauf(id).tmux_closed_at, 'which stays closed')
+      const started = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='revive_failed'`).get(id)
+      const s = started ? JSON.parse(started.payload).session : null
+      isTrue(!!s, 'the session it had started is named')
+      if (s) isFalse((await sh('tmux', ['has-session', '-t', `=${s}`])).ok, 'and was killed again')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
+    await check('/sessions lists the ended sessions and leads to the revive form', async () => {
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,title,branch_mode,expected_minutes,status,report_md,
+                                   workdir_effective,tmux_session,tmux_closed_at,started_at,ended_at)
+                  VALUES(?,?,'claude','E2E-Revive: listed','E2E-ENDED-LISTED','keiner',45,'done','R',?,'fl-gone-listed',
+                         datetime('now'),datetime('now'),datetime('now'))`)
+        .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`))
+      const html = await (await fetchPath('/sessions')).text()
+      contains(html, 'E2E-ENDED-LISTED', 'the run whose session is gone is listed')
+      contains(html, `/runs/${id}?revive=1#revive`, 'with the way to revive it')
+      const page = await (await fetchPath(`/runs/${id}?revive=1`)).text()
+      isTrue(/<details class="revive" id="revive" open>/.test(page), 'which arrives with the revive form open')
+      db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id=?`).run(id)
+      isFalse((await (await fetchPath('/sessions')).text()).includes('E2E-ENDED-LISTED'), 'an archived run is not offered')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    })
+
     await check('what may not be resumed is refused with a reason, not a 500', async () => {
       const mk = (over) => {
         const id = randomUUID()

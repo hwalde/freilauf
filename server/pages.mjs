@@ -1702,7 +1702,7 @@ export async function pageRun(req, res, url, id) {
           <button class="danger">${e(t('run.end_session'))}</button></form>
         <span class="dim">${e(t('run.end_session_hint'))}</span></div>` : ''}
   </details>
-  ${reviveBlock(run, live)}
+  ${reviveBlock(run, live, { open: url?.searchParams?.get('revive') === '1' })}
   ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
     // A conflict run is never retried: the way back in is "Merge now" on the
     // run it works for, which starts a fresh one with a fresh branch.
@@ -1737,10 +1737,10 @@ export async function pageRun(req, res, url, id) {
  * revive is a follow-up commission. For a failed or aborted one the text is
  * optional and the agent is told to finish its task.
  */
-export function reviveBlock(run, live) {
+export function reviveBlock(run, live, { open = false } = {}) {
   if (!resumable(run, { live })) return ''
   const done = run.status === 'done'
-  return `<details class="revive" id="revive"${done ? '' : ' open'}><summary>${e(t('run.resume'))} <span class="dim">${e(t('run.resume_hint'))}</span></summary>
+  return `<details class="revive" id="revive"${done && !open ? '' : ' open'}><summary>${e(t('run.resume'))} <span class="dim">${e(t('run.resume_hint'))}</span></summary>
     <form method="post" action="/api/runs/${e(run.id)}/resume">
       <textarea name="text" rows="3"${done ? ' required' : ''} placeholder="${e(t(done ? 'run.revive_text_ph_done' : 'run.revive_text_ph'))}"></textarea>
       <label class="chk"><input type="checkbox" name="mode" value="fresh"> ${e(t('run.revive_fresh'))} <span class="dim">${e(t('run.revive_fresh_hint'))}</span></label>
@@ -2454,8 +2454,51 @@ export function sessionRow(s, ctx = {}) {
         : `${e(byteText(s.resources.rssKb))}<div class="dim">${e(fmtNum(s.resources.cpu, { maximumFractionDigits: 1 }))} % CPU</div>`}</td>
     <td>${s.windows}/${s.paneCount}${s.attached ? ` <b>${e(t('sessions.attached'))}</b>` : ''}</td>
     <td class="dim"><code>${e(s.path)}</code></td>
-    <td><button type="button" class="danger sess-kill">${e(t('sessions.end'))}</button></td>
+    <td>${
+      // A session whose agent has exited is the one case where the way on is
+      // not this page's "End" but the agent back: the run page's revive form
+      // (it may need an instruction, so this is a link, not a POST).
+      run && s.state === 'dead' && resumable(run, { live: false })
+        ? `<a class="btn" href="/runs/${e(run.id)}?revive=1#revive">${e(t('sessions.revive'))}</a> ` : ''
+    }<button type="button" class="danger sess-kill">${e(t('sessions.end'))}</button></td>
   </tr>`
+}
+
+/**
+ * The runs whose session is already GONE and whose agent may be revived —
+ * the other half of "what is in tmux", because a session that retention or a
+ * click ended is exactly the one somebody comes to this page looking for.
+ * Newest first, capped: this is a way back in, not an archive.
+ */
+export function endedSessionRuns(limit = 20) {
+  return db.prepare(`SELECT r.*, repos.name AS repo_name, a.name AS agent_name FROM runs r
+      LEFT JOIN repos ON repos.id = r.repo_id LEFT JOIN agents a ON a.id = r.agent_id
+    WHERE r.status IN ('done','failed','aborted') AND r.workdir_effective IS NOT NULL
+      AND r.archived_at IS NULL AND r.resolves_run_id IS NULL
+      AND (r.tmux_session IS NULL OR r.tmux_closed_at IS NOT NULL)
+    ORDER BY COALESCE(r.tmux_closed_at, r.ended_at, r.started_at) DESC LIMIT ?`).all(limit)
+    .filter(run => resumable(run, { live: false }))
+}
+
+export function endedSessionsTable(runs) {
+  if (!runs.length) return `<p class="dim">${e(t('sessions.ended_none'))}</p>`
+  const when = (ts) => {
+    const ms = parseDbUtc(ts)
+    return Number.isFinite(ms)
+      ? `<time class="reltime" datetime="${new Date(ms).toISOString()}" title="${e(fmtDateTime(ms))}">${e(fmtRelativeTime(ms))}</time>`
+      : '<span class="dim">–</span>'
+  }
+  return `<div class="table-wrap"><table class="list sessions-ended"><thead><tr>
+    <th>${e(t('sessions.col_run'))}</th><th>${e(t('sessions.col_session'))}</th>
+    <th>${e(t('sessions.col_closed'))}</th><th></th></tr></thead><tbody>${runs.map(run => `
+    <tr id="ended-${e(run.id)}">
+      <td><a href="/runs/${e(run.id)}">${e(runTitle(run, run.agent_name, t('overview.single_run')))}</a>
+        <div class="dim">${e(statusText(displayStatus(run)))}${run.repo_name ? ` · ${e(run.repo_name)}` : ''}</div></td>
+      <td>${run.tmux_session ? `<code>${e(run.tmux_session)}</code>` : '<span class="dim">–</span>'}
+        <div class="dim">${e(harnessLabel(run.harness))}${run.model ? `/${e(run.model)}` : ''}${run.sandbox ? ` · ${e(t('sessions.ended_sandboxed'))}` : ''}</div></td>
+      <td>${when(run.tmux_closed_at ?? run.ended_at)}</td>
+      <td><a class="btn" href="/runs/${e(run.id)}?revive=1#revive">${e(t('sessions.revive'))}</a></td>
+    </tr>`).join('')}</tbody></table></div>`
 }
 
 export async function pageSessions(req, res, url) {
@@ -2506,7 +2549,10 @@ export async function pageSessions(req, res, url) {
   <p class="dim">${e(t('sessions.auto_hint', { hours: hours }))}
      <a href="/settings">${e(t('nav.settings'))}</a></p>
   ${sessionsTable(sessions, { unreachable: !tmuxAnswered })}
-  <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>`
+  <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>
+  <h3>${e(t('sessions.ended_title'))}</h3>
+  <p class="dim">${e(t('sessions.ended_hint'))}</p>
+  ${endedSessionsTable(endedSessionRuns())}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     .end(await layout(req, t('sessions.title'), '/sessions', body))
 }

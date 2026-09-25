@@ -819,9 +819,20 @@ export function resumeLaunchInFlight(runId, nowMs = Date.now()) {
   try {
     const info = JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8'))
     const since = Date.parse(info?.launching_at ?? '')
-    return Number.isFinite(since) && nowMs - since < RESUME_LAUNCH_GRACE_MS
+    const grace = info?.keep_status ? REVIVE_LAUNCH_GRACE_MS : RESUME_LAUNCH_GRACE_MS
+    return Number.isFinite(since) && nowMs - since < grace
   } catch { return false }
 }
+
+/**
+ * The same bound for a revived `done` run, whose stuck mark the watcher TAKES
+ * BACK rather than retries: a revive may recreate its worktree first (`git
+ * fetch` and `worktree add`, 120 s each) or build its sandbox before fl-start's
+ * own 120 s, and taking back a launch that is merely slow would leave an agent
+ * running on a run recorded as closed. Longer than all of those together; the
+ * marker is refreshed before fl-start as well.
+ */
+export const REVIVE_LAUNCH_GRACE_MS = 15 * 60_000
 /** The prompt the resumed CLI is launched with — never prompt.md, which is the record of the task. */
 const RESUME_PROMPT_FILE = 'resume-prompt.md'
 
@@ -1649,6 +1660,12 @@ export async function launchRun(runId) {
     if (sandbox.launchOverrides?.mode) args.unshift('--mode', sandbox.launchOverrides.mode)
   }
 
+  // The launch is still in flight: said again before the last slow step, so
+  // the watcher's recovery pass measures from here, not from the start.
+  if (resuming) {
+    resumeInfo.launching_at = new Date().toISOString()
+    try { writeFileSync(join(runDir, RESUME_FILE), JSON.stringify(resumeInfo), { mode: 0o600 }) } catch { /* best effort */ }
+  }
   const r = await sh(env('START_SCRIPT') ?? `${homedir()}/.local/bin/fl-start`, args, { timeout: 120_000 })
   // fl-start's success line ("Session '<name>' started …"); the German wording
   // is still accepted for older installed scripts.
@@ -1670,7 +1687,28 @@ export async function launchRun(runId) {
     fail(`Start failed (fl-start):\n\n${error}`)
     return { ok: false, error }
   }
-  db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0 WHERE id=?').run(session, runId)
+  if (resuming) {
+    // Only while the mark is still ours: a revive the watcher took back in the
+    // meantime (reviveFailed) must not come back to life as a session on a run
+    // recorded as closed — nobody would watch it, and retention could remove
+    // the worktree under it. The session just started goes again instead.
+    const took = db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL WHERE id=? AND resume_pending=1')
+      .run(session, runId)
+    if (!took.changes) {
+      // The container first, as the kill route does: its client is the pane.
+      if (sandbox) {
+        try {
+          const { stopRunContainer } = await import('./sessions.mjs')
+          await stopRunContainer(db.prepare('SELECT * FROM runs WHERE id=?').get(runId) ?? run)
+        } catch { /* the reaper is the net under this */ }
+      }
+      await sh('tmux', ['kill-session', '-t', `=${session}`])
+      addEvent(runId, 'revive_failed', { error: 'the resume was taken back before its session started', session })
+      return { ok: false, error: 'the resume was taken back before its session started' }
+    }
+  } else {
+    db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0 WHERE id=?').run(session, runId)
+  }
   addEvent(runId, 'tmux_started', { session })
   if (resuming) {
     try { rmSync(join(runDir, RESUME_FILE), { force: true }) } catch { /* the marker is a courtesy */ }
