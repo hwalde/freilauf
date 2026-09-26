@@ -943,14 +943,26 @@ try {
     const p = await neueSeite('/settings')
     await p.click('a[href="/settings/review"]')
     await p.waitForURL('**/settings/review')
-    await p.selectOption('select[name=review_default]', 'on')
-    await Promise.all([p.waitForURL('**/settings/review'), p.click('form[action="/settings/review"] button')])
-    equal(await p.$eval('select[name=review_default]', s => s.value), 'on', 'the choice survives the save')
-    await p.goto(`${sk.base}/settings`)
-    isTrue((await p.textContent('body')).includes('Global default: on'), 'and the settings page says so')
-    await p.goto(`${sk.base}/settings/review`)
-    await p.selectOption('select[name=review_default]', 'off')
-    await Promise.all([p.waitForURL('**/settings/review'), p.click('form[action="/settings/review"] button')])
+    // The page is already at /settings/review, so waiting for that URL proves
+    // nothing — wait for the POST's answer and read the value back from the server.
+    const save = async (values) => {
+      for (const [name, value] of Object.entries(values)) await p.selectOption(`select[name=${name}]`, value)
+      const [res] = await Promise.all([
+        p.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/settings/review')),
+        p.click('form[action="/settings/review"] button'),
+      ])
+      isTrue(res.status() < 400, `the save was accepted (${res.status()})`)
+      await p.waitForLoadState('load')
+      await p.reload({ waitUntil: 'load' })
+    }
+    await save({ review_default: 'on', review_platform: 'github' })
+    equal(await p.$eval('select[name=review_default]', s => s.value), 'on', 'the default comes back from the server')
+    equal(await p.$eval('select[name=review_platform]', s => s.value), 'github', 'and so does a platform plugin')
+    await p.goto(`${sk.base}/settings`, { waitUntil: 'load' })
+    isTrue((await p.textContent('body')).includes('Global default: on (GitHub)'), 'the settings page says so')
+    await p.goto(`${sk.base}/settings/review`, { waitUntil: 'load' })
+    await save({ review_default: 'off', review_platform: 'internal' })
+    equal(await p.$eval('select[name=review_default]', s => s.value), 'off', 'and it is off again for every later check')
     sauber(p)
     await p.close()
   })
