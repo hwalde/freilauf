@@ -103,6 +103,9 @@ Options:
                         ('latest' = the workspace's newest session); a --spec harness
                         needs a 'resume' argv in its declaration. The prompt (-p/-f)
                         is then the continuation text.
+      --no-prompt       with --resume only: bring the conversation back and send
+                        nothing — the agent waits at its prompt for a human (the
+                        hub's "Revive agent").
   -h, --help            This help.
 
 Examples:
@@ -185,6 +188,7 @@ KEEP=""
 CLAUDE_SESSION_ID=""
 CLAUDE_SETTINGS=""
 RESUME_ID=""
+NOPROMPT=""
 NAME_ARG=""
 ID_SUFFIX=""
 SPEC=""
@@ -222,6 +226,7 @@ while [[ $# -gt 0 ]]; do
                           CLAUDE_SETTINGS="$2"; shift 2 ;;
         --resume)         [[ $# -ge 2 ]] || { err "Error: $1 requires a session id."; exit 2; }
                           RESUME_ID="$2"; shift 2 ;;
+        --no-prompt)      NOPROMPT=1; shift ;;
         --spec)           [[ $# -ge 2 ]] || { err "Error: $1 requires a file path."; exit 2; }
                           SPEC="$2"; shift 2 ;;
         --sandbox)        [[ $# -ge 2 ]] || { err "Error: $1 requires a file path."; exit 2; }
@@ -454,6 +459,13 @@ fi
 
 AUTONOM=""
 [[ -n "$PROMPT" ]] && AUTONOM=1
+# A resume that sends nothing still goes through the launcher (the resume form,
+# the hooks, the sandbox all live on that path); only the text is left out.
+if [[ -n "$NOPROMPT" ]]; then
+    [[ -n "$RESUME_ID" ]] || { err "Error: --no-prompt needs --resume (and a harness with a resume form)."; exit 2; }
+    [[ -z "$PROMPT" ]] || { err "Error: --no-prompt and -p/-f are mutually exclusive."; exit 2; }
+    AUTONOM=1
+fi
 
 # Locate the harness binary.
 BIN=""
@@ -595,7 +607,7 @@ fi
 # otherwise split it in two.
 spec_argv() {
     local key="$1" have_prompt=""
-    [[ -n "$AUTONOM" ]] && have_prompt=1
+    [[ -n "$AUTONOM" && -z "$NOPROMPT" ]] && have_prompt=1
     jq -r --arg key "$key" --arg model "$MODEL" --arg provider "$PROVIDER" \
           --arg effort "$EFFORT" --arg prompt "$have_prompt" --arg mode "$MODE" \
           --arg session_id "$CLAUDE_SESSION_ID" --arg settings "$CLAUDE_SETTINGS" \
@@ -630,7 +642,7 @@ spec_cmd() {
         if [[ "$el" == '{prompt}' ]]; then
             # Only in an autonomous start does the launcher hold the text; an
             # interactive one simply drops the argument.
-            [[ -n "$AUTONOM" ]] && out+=' "$FL_PROMPT"'
+            [[ -n "$AUTONOM" && -z "$NOPROMPT" ]] && out+=' "$FL_PROMPT"'
         else
             out+=" $(q "$el")"
         fi
@@ -752,7 +764,11 @@ cmd_autonomous() {
         [[ -n "$CLAUDE_SETTINGS" ]]   && claude_args+=" --settings $(q "$CLAUDE_SETTINGS")"
     }
     case "$HARNESS" in
-        claude)  printf '%s --permission-mode %s%s "$FL_PROMPT"' "$(q "$BIN")" "$(q "$MODE")" "$claude_args" ;;
+        # --no-prompt: no positional — claude resumes and waits for input
+        # (measured, see above).
+        claude)  printf '%s --permission-mode %s%s' "$(q "$BIN")" "$(q "$MODE")" "$claude_args"
+                 [[ -z "$NOPROMPT" ]] && printf ' "$FL_PROMPT"'
+                 : ;;
         # A RESUME takes no --prompt: measured with 1.18.29, `--session <id>
         # --prompt "…"` (and `--continue --prompt`) opens the session and drops
         # the text — nothing is submitted, the editor stays empty, even with the
@@ -773,7 +789,9 @@ cmd_autonomous() {
         # need a one-time consent hermes asks for at the TTY — and nobody sits
         # at this one.
         hermes)  if [[ -n "$RESUME_ID" ]]; then
-                     printf '%s chat --in %s --resume %s -q "$FL_PROMPT" --yolo --accept-hooks%s' "$(q "$BIN")" "$(q "$WORKDIR")" "$(q "$RESUME_ID")" "$model_args"
+                     printf '%s chat --in %s --resume %s' "$(q "$BIN")" "$(q "$WORKDIR")" "$(q "$RESUME_ID")"
+                     [[ -z "$NOPROMPT" ]] && printf ' -q "$FL_PROMPT"'
+                     printf ' --yolo --accept-hooks%s' "$model_args"
                  else
                      printf '%s chat -q "$FL_PROMPT" --yolo --accept-hooks%s' "$(q "$BIN")" "$model_args"
                  fi ;;
@@ -786,7 +804,7 @@ cmd_autonomous() {
         cursor)  printf '%s --force --trust' "$(q "$BIN")"
                  [[ -n "$MODEL" ]] && printf ' --model %s' "$(q "$MODEL")"
                  [[ -n "$RESUME_ID" ]] && printf ' --resume %s' "$(q "$RESUME_ID")"
-                 printf ' -- "$FL_PROMPT"'
+                 [[ -z "$NOPROMPT" ]] && printf ' -- "$FL_PROMPT"'
                  : ;;
     esac
 }
@@ -1155,11 +1173,12 @@ else
             printf 'rm -f %s %s\n' "$(q "$PF")" "$(q "$LF")"
         fi
         if [[ "$HARNESS" == "opencode" ]]; then
-            if [[ -n "$RESUME_ID" ]]; then oc_resume_paste; else oc_submit_nudge; fi
+            # Nothing to paste when nothing is sent (--no-prompt).
+            if [[ -n "$RESUME_ID" ]]; then [[ -z "$NOPROMPT" ]] && oc_resume_paste; else oc_submit_nudge; fi
         fi
-        [[ -n "$SPEC_MODE" ]] && spec_submit_nudge
+        [[ -n "$SPEC_MODE" && -z "$NOPROMPT" ]] && spec_submit_nudge
         AUTO_CMD="$(cmd_autonomous)"
-        if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "stdin" ]]; then
+        if [[ -n "$SPEC_MODE" && "$SPEC_PROMPT_MODE" == "stdin" && -z "$NOPROMPT" ]]; then
             # A here-string, not a pipe: the redirection is set up before exec, so
             # the CLI still becomes the pane's own process and pane-died keeps
             # meaning what it means everywhere else. In a sandbox the same is

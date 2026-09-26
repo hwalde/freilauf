@@ -369,13 +369,14 @@ the OOM killer), the run is resumed just the same. Capped at three times per
 run, so a CLI the machine shoots at every start is not restarted for ever.
 Where the hub cannot tell — an agent that crashed on its own, a run past that
 cap, or a finished run whose session is long closed — the run's page has a
-**"Revive agent"** button: it brings the agent back into a new tmux session
-with all the run's settings (sandbox included), in the same worktree
-(recreated at the same path if retention removed it) and, where the coding
-agent can, the same conversation — as often as you like. A finished run
-needs an instruction and the revive becomes a follow-up. Tick "Fresh agent"
-to have a new agent take over instead, handed the original task, every
-report, the questions and answers and the state of the worktree. "Retry run"
+**"Revive agent"** button: it brings the agent's own conversation back into
+a new tmux session with all the run's settings (sandbox included), in the
+same worktree (recreated at the same path if retention removed it), and
+sends nothing — you type into that terminal what you want next. As often as
+you like; the Sessions page has the same button. Beside it, **"New agent
+takes over"** starts a fresh agent on the result of the first with an
+instruction you type: it is handed the original task, every report, the
+questions and answers and the state of the worktree. "Retry run"
 (failed and aborted runs) still starts the task from scratch. Details:
 `docs/requirements.md`, "Launch and resume".
 

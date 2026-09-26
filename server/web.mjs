@@ -758,8 +758,12 @@ async function api(req, res, url) {
     const run = getRun(m[1])
     if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
     const b = await form(req)
-    // What the operator wants now (may be empty), and whether a FRESH agent is
-    // to take over instead of the old conversation (the handover, runner.mjs).
+    // Two buttons. "Revive agent" brings the session back and sends nothing —
+    // the operator types into the agent's own terminal. "New agent takes over"
+    // (`mode=fresh`) starts a fresh agent handed the whole record, and THAT one
+    // needs the operator's instruction: it has no conversation to go on from.
+    // A `text` without `mode=fresh` (the API, a flow) is sent as the revived
+    // conversation's next turn.
     const instruction = String(b.text ?? '').trim()
     const fresh = String(b.mode ?? '') === 'fresh'
     // A refusal has a reason, and a redirect back to the run would swallow it:
@@ -776,11 +780,12 @@ async function api(req, res, url) {
     const { paneAlive } = await import('./sessions.mjs')
     const live = sessionOpen && (await paneAlive(run.tmux_session)) !== false
     if (!resumable(run, { live })) return refuse(t('run.resume_err'))
-    // Reviving a FINISHED run is a follow-up commission, and a commission has a
-    // content: without one the agent would come back, have nothing to do, and
-    // the run would read "follow-up in progress" over a conversation nobody has.
-    const finished = run.status === 'done'
-    if (finished && !instruction) return refuse(t('run.revive_needs_text'))
+    if (fresh && !instruction) return refuse(t('run.takeover_needs_text'))
+    // Only an instruction for a failed or aborted run continues its ATTEMPT
+    // (status back to `running`, the leftovers verdict taken back); everything
+    // else keeps the run as it ended, and what follows is a follow-up.
+    const continues = !!instruction && ['failed', 'aborted'].includes(run.status)
+    const finished = !continues
     if (sessionOpen) {
       // Unhooked from the row BEFORE it is killed, so a watcher pass in between
       // does not read the vanished session as lost and start a second resume;
@@ -792,14 +797,11 @@ async function api(req, res, url) {
       await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
     }
     // Everything the ending wrote about a failed/aborted run is taken back
-    // before the resume, not after it: `resumeRun()` refuses anything but a
-    // live run, and the integrator's verdict on the leftovers ("unmerged_both")
-    // describes an attempt that is about to continue. `assessUnmerged()` runs
-    // again at the real end. `exit_code` goes for the same reason — it belongs
-    // to a process that is being replaced. A `done` run keeps all of it: its
-    // status and its merge are the truth about its attempt, and the revive is a
-    // follow-up on top (resumeRun's `keepStatus`).
-    if (!finished) {
+    // before the resume when the attempt CONTINUES: the integrator's verdict on
+    // the leftovers ("unmerged_both") describes an attempt that is about to go
+    // on, and `assessUnmerged()` runs again at the real end. `exit_code` goes
+    // for the same reason — it belongs to a process that is being replaced.
+    if (continues) {
       db.prepare(`UPDATE runs SET status='running', ended_at=NULL, exit_code=NULL,
                   agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(run.id)
       resetIntegration(run.id)
@@ -818,8 +820,7 @@ async function api(req, res, url) {
     }
     // Somebody else's revive of this run is already under way (a second tab,
     // a double submit): this click starts nothing and must not say it did.
-    if (r?.pending) return refuse(t('run.revive_pending'))
-    if (!r?.ok && !r?.retry) {
+    if (r?.pending || (!r?.ok && !r?.retry)) {
       // The resume was refused after all (no launch spec, a budget gate, a
       // container runtime that did not answer): put the record back exactly as
       // it was rather than leaving a `running` run with nothing behind it.
@@ -829,12 +830,14 @@ async function api(req, res, url) {
       }
       if (sessionOpen) db.prepare(`UPDATE runs SET tmux_session=COALESCE(tmux_session, ?),
                                    tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')) WHERE id=?`).run(run.tmux_session, run.id)
+      if (r?.pending) return refuse(t('run.revive_pending'))
       addEvent(run.id, 'resume_refused', { error: r?.error ?? 'unknown' })
       return refuse(r?.error ?? 'resume failed')
     }
-    // The revived agent is working on the operator's instruction from this
-    // moment — the same commission a line typed into a live session opens.
-    if (finished && r?.ok && r.session) startFollowUpCommission(run.id, instruction, 'revive')
+    // With an instruction the revived agent is working on it from this moment —
+    // the same commission a line typed into a live session opens. Without one
+    // nothing is commissioned: the operator's first line into the terminal is.
+    if (finished && instruction && r?.ok && r.session) startFollowUpCommission(run.id, instruction, 'revive')
     return answer(req, res, 200, { ok: true, ...r }, `/runs/${run.id}`)
   }
   // "End the follow-up": take back a commission that is open over a

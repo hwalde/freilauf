@@ -289,7 +289,7 @@ while [[ $# -gt 0 ]]; do
     --log)  LOG="$2";  shift 2 ;;
     --keep) KEEP=1; shift ;;
     -f|--prompt-file) PROMPTFILE="$2"; shift 2 ;;
-    --no-trust|--keep) shift ;;
+    --no-trust|--keep|--no-prompt) shift ;;
     *) POS+=("$1"); shift ;;
   esac
 done

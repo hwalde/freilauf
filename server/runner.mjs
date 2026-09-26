@@ -980,7 +980,7 @@ export function handoverPrompt({ run, context, taskPrompt, platformPrompt, why, 
       : finished
         ? 'The previous agent reported the task as done. Check that the result is really complete and working, fix what is not, and report what you found.'
         : 'Finish the original task from where the previous agent stopped.',
-    followup: finished ? ' The run has reported done once already, so your report counts as a follow-up report — same files, same command.' : '',
+    followup: finished ? ' The run has ended once already, so your report counts as a follow-up report — same files, same command.' : '',
   }),
   platformPrompt].filter(Boolean).join('\n\n')
   return { task, platform }
@@ -1071,9 +1071,12 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   instruction = null, fresh = false } = {}) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) return { ok: false, error: 'run not found' }
-  // A `done` run is revived only by the operator (the Revive button): it stays
-  // `done`, and what is launched is a follow-up commission (`keepStatus`).
-  const keepStatus = run.status === 'done' && reason === 'operator'
+  // An ended run is revived only by the operator (the Revive buttons), and it
+  // keeps its status (`keepStatus`): the status is the truth about its attempt,
+  // and whatever the revived agent does next is a follow-up. The one case that
+  // continues the attempt itself — a new agent told to go on with a failed or
+  // aborted task — arrives here already put back to `running` by the route.
+  const keepStatus = reason === 'operator' && ['done', 'failed', 'aborted'].includes(run.status)
   if (!keepStatus && !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
   if (run.resume_pending && !adoptPending) return { ok: true, pending: true }
   // Reported already: the finish gate's `agent_gone` escalation owns this case.
@@ -1085,6 +1088,14 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
     return { ok: false, error: 'the worktree is gone' }
   }
   if (!launchable(run.harness)) return { ok: false, error: `no launch spec for ${run.harness}` }
+  // The plain revive (no instruction, no new agent) brings a CONVERSATION back
+  // and sends nothing. Where there is none to bring back it is refused here,
+  // before anything is marked — an agent started without an instruction would
+  // go its own way, and "New agent takes over" is the way with one.
+  if (reason === 'operator' && !String(instruction ?? '').trim() && !fresh) {
+    const rid = resumable(run.harness) ? await resumeIdFor(run) : null
+    if (!rid) return { ok: false, error: t('run.revive_no_conversation') }
+  }
   const counted = reason === 'session_lost'
   if (counted && run.resume_attempts >= RESUME_MAX) {
     return { ok: false, error: `resumed ${run.resume_attempts} times already (cap ${RESUME_MAX})` }
@@ -1411,6 +1422,9 @@ export async function launchRun(runId) {
   let promptFile = join(runDir, 'prompt.md')
   // The resume form's argv, when this launch continues a conversation.
   let resumeArgs = []
+  // A resume that sends nothing (the operator's plain revive): fl-start
+  // --no-prompt instead of -f.
+  let noPrompt = false
   if (resuming) {
     // A worktree made again after its work was merged starts from the base
     // branch, which already holds that work: the run's own commits count from
@@ -1446,15 +1460,31 @@ export async function launchRun(runId) {
     const rid = resumable(run.harness) && !resumeInfo.fresh && !moved ? await resumeIdFor(run) : null
     const operator = resumeInfo.reason === 'operator'
     const instruction = String(resumeInfo.instruction ?? '').trim()
+    // Over already (done, failed or aborted, kept as it is): whatever it
+    // reports now is a follow-up report.
     const finished = keepStatus || run.status === 'done'
+    // The operator's plain "Revive agent": the session comes back and nothing
+    // is sent — the agent waits at its prompt for the human who clicked.
+    const quiet = operator && !instruction && !resumeInfo.fresh
     let context = await resumeContext({ ...run, workdir_effective: workdir })
     if (recreated) context = `${fillTemplate(RECREATED_NOTE, { base: repo.base_branch || 'main' })}\n\n${context}`
     let text
-    if (rid) {
+    if (quiet && !rid) {
+      // Nothing to bring back after all (the directory came back elsewhere, the
+      // conversation is gone): a plain revive never starts an agent without an
+      // instruction — that is what "New agent takes over" is for.
+      const msg = t('run.revive_no_conversation')
+      fail(msg)
+      return { ok: false, error: msg }
+    } else if (quiet) {
+      resumeArgs = ['--resume', rid]
+      noPrompt = true
+      text = null
+    } else if (rid) {
       resumeArgs = ['--resume', rid]
       text = operator
         ? fillTemplate(REVIVE_PROMPT, { context, instruction: instruction || REVIVE_CONTINUE,
-          followup: finished ? ' — the run has reported done once already, so this report counts as a follow-up report' : '' })
+          followup: finished ? ' — the run has ended once already, so this report counts as a follow-up report' : '' })
         : fillTemplate(resumeInfo.text || RESUME_PROMPT, { context })
     } else {
       // The conversation cannot come back (or was not wanted): a claude
@@ -1474,8 +1504,12 @@ export async function launchRun(runId) {
       text = offload.prompt
       writeFileSync(join(runDir, 'handover-prompt.md'), [h.task, h.platform].join('\n\n'), { mode: 0o600 })
     }
-    promptFile = join(runDir, RESUME_PROMPT_FILE)
-    writeFileSync(promptFile, text, { mode: 0o600 })
+    if (text != null) {
+      promptFile = join(runDir, RESUME_PROMPT_FILE)
+      writeFileSync(promptFile, text, { mode: 0o600 })
+    } else {
+      try { rmSync(join(runDir, RESUME_PROMPT_FILE), { force: true }) } catch { /* nothing sent this time */ }
+    }
   } else {
     // prompt.md is the RECORD — always the whole thing, offload or not. What the
     // CLI is actually launched with is a separate file, so "what was this run
@@ -1578,7 +1612,7 @@ export async function launchRun(runId) {
     ...(sandbox ? [] : ['--env', `CC_HUB_URL=${hubUrl}`]),
     ...(sandbox ? sandboxEnvArgs(run, sandbox) : hostHomeArgs(run)),
     '--log', join(runDir, 'log.txt'), '--keep',
-    '-f', promptFile, workdir]
+    ...(noPrompt ? ['--no-prompt'] : ['-f', promptFile]), workdir]
   const modelArgs = harnessModelArgs(run, { externalDirs: runExternalDirs(run, repo, runDir) })
   if (sandbox) {
     // §7.8: under `secrets.mode: 'inject'` the container must hold a placeholder

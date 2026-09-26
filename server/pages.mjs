@@ -1702,7 +1702,7 @@ export async function pageRun(req, res, url, id) {
           <button class="danger">${e(t('run.end_session'))}</button></form>
         <span class="dim">${e(t('run.end_session_hint'))}</span></div>` : ''}
   </details>
-  ${reviveBlock(run, live, { open: url?.searchParams?.get('revive') === '1' })}
+  ${reviveBlock(run, live)}
   ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
     // A conflict run is never retried: the way back in is "Merge now" on the
     // run it works for, which starts a fresh one with a fresh branch.
@@ -1727,25 +1727,30 @@ export async function pageRun(req, res, url, id) {
 }
 
 /**
- * "Revive": bring an ended run's agent back into a new tmux session — its own
- * conversation where the coding agent can continue one, otherwise (or when the
- * operator ticks it) a fresh agent handed the whole record (runner.mjs,
- * handoverPrompt). As often as wanted; a deliberate revive spends no crash
- * budget. `resumable()` is the rule and the route enforces the same one.
+ * The two ways back for an ended run (`resumable()` is the rule, the route
+ * enforces the same one), as buttons rather than a form to unfold:
  *
- * A finished run needs an instruction (the route refuses without one): its
- * revive is a follow-up commission. For a failed or aborted one the text is
- * optional and the agent is told to finish its task.
+ *  - "Revive agent": the session comes back with the agent in it — its own
+ *    conversation where the coding agent can continue one — and nothing is
+ *    sent. What the operator wants next they type into that terminal.
+ *  - "New agent takes over": a fresh agent is handed the whole record (the
+ *    task, every report, questions and answers, the worktree) and the
+ *    instruction typed here, which it needs because it has no conversation.
+ *
+ * Both as often as wanted, with every setting of the run, sandbox included.
  */
-export function reviveBlock(run, live, { open = false } = {}) {
+export function reviveBlock(run, live) {
   if (!resumable(run, { live })) return ''
-  const done = run.status === 'done'
-  return `<details class="revive" id="revive"${done && !open ? '' : ' open'}><summary>${e(t('run.resume'))} <span class="dim">${e(t('run.resume_hint'))}</span></summary>
-    <form method="post" action="/api/runs/${e(run.id)}/resume">
-      <textarea name="text" rows="3"${done ? ' required' : ''} placeholder="${e(t(done ? 'run.revive_text_ph_done' : 'run.revive_text_ph'))}"></textarea>
-      <label class="chk"><input type="checkbox" name="mode" value="fresh"> ${e(t('run.revive_fresh'))} <span class="dim">${e(t('run.revive_fresh_hint'))}</span></label>
-      <div class="btn-row"><button>${e(t('run.resume'))}</button></div>
-    </form></details>`
+  const action = `/api/runs/${e(run.id)}/resume`
+  return `<div class="revive card" id="revive">
+    <div class="btn-row"><form method="post" action="${action}" class="inline"><button>${e(t('run.resume'))}</button></form>
+      <span class="dim">${e(t('run.resume_hint'))}</span></div>
+    <form method="post" action="${action}" class="revive-new">
+      <input type="hidden" name="mode" value="fresh">
+      <textarea name="text" rows="2" required placeholder="${e(t('run.takeover_ph'))}"></textarea>
+      <div class="btn-row"><button>${e(t('run.takeover'))}</button>
+        <span class="dim">${e(t('run.takeover_hint'))}</span></div>
+    </form></div>`
 }
 
 /**
@@ -2456,10 +2461,9 @@ export function sessionRow(s, ctx = {}) {
     <td class="dim"><code>${e(s.path)}</code></td>
     <td>${
       // A session whose agent has exited is the one case where the way on is
-      // not this page's "End" but the agent back: the run page's revive form
-      // (it may need an instruction, so this is a link, not a POST).
-      run && s.state === 'dead' && resumable(run, { live: false })
-        ? `<a class="btn" href="/runs/${e(run.id)}?revive=1#revive">${e(t('sessions.revive'))}</a> ` : ''
+      // not this page's "End" but the agent back — the same button as on the
+      // run page; the route closes the dead session first.
+      run && s.state === 'dead' && resumable(run, { live: false }) ? reviveButton(run) : ''
     }<button type="button" class="danger sess-kill">${e(t('sessions.end'))}</button></td>
   </tr>`
 }
@@ -2480,6 +2484,11 @@ export function endedSessionRuns(limit = 20) {
     .filter(run => resumable(run, { live: false }))
 }
 
+/** The plain revive as one button; the answer lands on the run's page and its terminal. */
+function reviveButton(run) {
+  return `<form method="post" action="/api/runs/${e(run.id)}/resume" class="inline"><button>${e(t('sessions.revive'))}</button></form> `
+}
+
 export function endedSessionsTable(runs) {
   if (!runs.length) return `<p class="dim">${e(t('sessions.ended_none'))}</p>`
   const when = (ts) => {
@@ -2497,7 +2506,7 @@ export function endedSessionsTable(runs) {
       <td>${run.tmux_session ? `<code>${e(run.tmux_session)}</code>` : '<span class="dim">–</span>'}
         <div class="dim">${e(harnessLabel(run.harness))}${run.model ? `/${e(run.model)}` : ''}${run.sandbox ? ` · ${e(t('sessions.ended_sandboxed'))}` : ''}</div></td>
       <td>${when(run.tmux_closed_at ?? run.ended_at)}</td>
-      <td><a class="btn" href="/runs/${e(run.id)}?revive=1#revive">${e(t('sessions.revive'))}</a></td>
+      <td>${reviveButton(run)}</td>
     </tr>`).join('')}</tbody></table></div>`
 }
 

@@ -27,18 +27,16 @@ a day on which nothing was released.
   recreated at the same path). The agent comes back in a new tmux session
   with all the run's settings, sandbox included, and continues its own
   conversation where the coding agent can (claude, cursor, opencode,
-  hermes). As often as you like; a revive spends no crash budget. A finished
-  run needs an instruction and the revive becomes a follow-up (the status,
-  report and merge of the first attempt stay as they were); for a failed or
-  aborted run the instruction is optional. The Sessions page lists the
-  ended sessions with a "Revive" link, and offers it beside a session whose
-  agent has exited.
-- **A fresh agent can take over instead.** Tick "Fresh agent instead of the
-  old conversation", or it happens by itself where no conversation can be
-  continued: a new agent starts in the same worktree and is handed the whole
-  record — the original task, every report and follow-up report, progress
-  reports, questions and answers, the operator's messages and the state of
-  the worktree. The automatic resume after a lost session uses the same
+  hermes). Nothing is sent to it: the agent waits at its prompt and you type
+  into its terminal what you want. As often as you like; a revive spends no
+  crash budget, and the run keeps its status, report and merge — what you ask
+  for then is a follow-up. The Sessions page lists the ended sessions with a
+  "Revive" button, and offers it beside a session whose agent has exited.
+- **"New agent takes over".** Beside the revive button: type an instruction
+  and a fresh agent starts on the result of the first, in the same worktree,
+  handed the whole record — the original task, every report and follow-up
+  report, progress reports, questions and answers, the operator's messages
+  and the state of the worktree. The automatic resume after a lost session uses the same
   handover where it cannot continue a conversation.
 
 - **Code review, optional.** Finished work can wait for a reviewer instead of

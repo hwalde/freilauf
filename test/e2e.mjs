@@ -2534,7 +2534,9 @@ try {
       db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), tmux_closed_at=datetime('now'),
                   report_md='E2E-REPORT-OLD' WHERE id=?`).run(id)
       const transcript2 = transcript
-      const r2 = await postForm(`/api/runs/${id}/resume`, { mode: 'fresh' })
+      equal((await postForm(`/api/runs/${id}/resume`, { mode: 'fresh' })).status, 400,
+        'a new agent without an instruction is refused: it has no conversation to go on from')
+      const r2 = await postForm(`/api/runs/${id}/resume`, { mode: 'fresh', text: 'E2E-TAKEOVER' })
       equal(r2.status, 200, 'a second revive is taken too')
       await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the second session', timeoutMs: 20_000 })
       sessions.add(lauf(id).tmux_session)
@@ -2542,10 +2544,12 @@ try {
       contains(hand, 'taking over', 'a fresh agent is told it takes over')
       contains(hand, 'E2E-REPORT-OLD', 'with the reports of the one before it')
       contains(hand, 'E2E-Resume: the operator says so', 'and the original task')
+      contains(hand, 'E2E-TAKEOVER', 'and the operator\'s instruction')
       isFalse(existsSync(transcript2), 'the old conversation no longer sits under the run id')
       isTrue(readdirSync(dirname(transcript2)).some(f => f.startsWith(`${id}.before-`)), 'it was filed away beside it')
 
-      // A third time, with no instruction: the agent is told to finish its task.
+      // A third time, the plain button: the session comes back and NOTHING is
+      // sent — the operator types into the agent's own terminal.
       const s2 = lauf(id).tmux_session
       await sh('tmux', ['kill-session', '-t', `=${s2}`])
       sessions.delete(s2)
@@ -2554,8 +2558,10 @@ try {
       equal((await postForm(`/api/runs/${id}/resume`, {})).status, 200, 'a third revive, without an instruction')
       await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the third session', timeoutMs: 20_000 })
       sessions.add(lauf(id).tmux_session)
-      contains(readFileSync(join(SB, 'runs', id, 'resume-prompt.md'), 'utf8'), 'No new instruction',
-        'with nothing typed, the conversation is told to finish the original task')
+      isFalse(existsSync(join(SB, 'runs', id, 'resume-prompt.md')), 'nothing is sent to the agent')
+      const third = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='resumed' ORDER BY id DESC`).get(id)
+      equal(JSON.parse(third.payload).resume_form, id, 'its own conversation is back')
+      equal(lauf(id).status, 'aborted', 'and the run stays as it ended — what the operator types next is a follow-up')
       contains(ereignisse(id).join(','), 'revive_started', 'an operator\'s revive is recorded as one, not as a lost session')
       db.prepare('DELETE FROM runs WHERE id=?').run(id)
     })
@@ -2573,13 +2579,18 @@ try {
       mkdirSync(join(SB, 'runs', id), { recursive: true })
       const before = lauf(id)
 
+      // The plain button brings a CONVERSATION back and sends nothing. This run
+      // has none (no transcript), and an agent started without an instruction
+      // would go its own way — so it is refused, pointing at the new agent.
       const leer = await postForm(`/api/runs/${id}/resume`, {})
-      equal(leer.status, 400, 'without an instruction it is refused: a revived finished run is a follow-up')
-      equal(lauf(id).status, 'done', 'and left as it was')
+      equal(leer.status, 400, 'no conversation to bring back: the plain revive is refused')
+      contains(JSON.stringify(await leer.json()), 'New agent takes over', 'and says which button to use instead')
+      equal(lauf(id).status, 'done', 'the run is left exactly as it was')
+      equal(lauf(id).resume_pending, 0, 'with nothing marked')
 
-      const r = await postForm(`/api/runs/${id}/resume`, { text: 'E2E-FOLLOWUP-ORDER' })
-      equal(r.status, 200, 'with one it is taken')
-      await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the revived session', timeoutMs: 30_000 })
+      const r = await postForm(`/api/runs/${id}/resume`, { mode: 'fresh', text: 'E2E-FOLLOWUP-ORDER' })
+      equal(r.status, 200, 'a new agent with an instruction is taken')
+      await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the new agent\'s session', timeoutMs: 30_000 })
       const l = lauf(id)
       sessions.add(l.tmux_session)
       equal(l.status, 'done', 'the status still tells the truth about the first attempt')
@@ -2699,9 +2710,10 @@ try {
         .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`))
       const html = await (await fetchPath('/sessions')).text()
       contains(html, 'E2E-ENDED-LISTED', 'the run whose session is gone is listed')
-      contains(html, `/runs/${id}?revive=1#revive`, 'with the way to revive it')
-      const page = await (await fetchPath(`/runs/${id}?revive=1`)).text()
-      isTrue(/<details class="revive" id="revive" open>/.test(page), 'which arrives with the revive form open')
+      contains(html, `action="/api/runs/${id}/resume"`, 'with a button that revives it')
+      const page = await (await fetchPath(`/runs/${id}`)).text()
+      contains(page, `action="/api/runs/${id}/resume" class="inline"`, 'the run page has the plain button')
+      contains(page, 'name="mode" value="fresh"', 'and beside it the new agent, with its instruction field')
       db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id=?`).run(id)
       isFalse((await (await fetchPath('/sessions')).text()).includes('E2E-ENDED-LISTED'), 'an archived run is not offered')
       db.prepare('DELETE FROM runs WHERE id=?').run(id)
@@ -2720,13 +2732,13 @@ try {
       }
       for (const [was, over] of [
         ['a run that is still going', { status: 'running' }],
-        ['a finished one without an instruction — its revive is a follow-up', { status: 'done' }],
+        ['a new agent without an instruction', { status: 'done', body: { mode: 'fresh' } }],
         ['one whose worktree is gone', { workdir: null }],
         ['a conflict run', { resolves_run_id: R1 }],
         ['an archived one', { archived_at: 1 }],
       ]) {
         const id = mk(over)
-        const r = await postForm(`/api/runs/${id}/resume`, {})
+        const r = await postForm(`/api/runs/${id}/resume`, over.body ?? {})
         equal(r.status, 400, `${was}: refused`)
         equal(lauf(id).status, over.status ?? 'failed', `${was}: and left exactly as it was`)
         db.prepare('DELETE FROM runs WHERE id=?').run(id)

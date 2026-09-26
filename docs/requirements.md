@@ -113,11 +113,16 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - The operator revives any `done`/`failed`/`aborted` run that ever had a
   working directory, as often as wanted, never beside a live agent and never
   a conflict or archived run (`resumable()` in run-state.mjs, shared by page
-  and route). A revived `done` run keeps its status, `started_at`, report and
-  merge, needs an instruction and opens a follow-up commission; a failed
-  revive of it goes through `reviveFailed()`, never `failRun()`.
-- The Sessions page offers revive only through the run page's form (a link,
-  never a POST — a finished run needs an instruction), for exactly the runs
+  and route). The plain revive sends NOTHING (`fl-start --no-prompt`): the
+  conversation comes back and waits for a human, because an agent resumed
+  with a text goes on working unasked; with no conversation to bring back it
+  is refused, never replaced by an uninstructed agent. "New agent takes over"
+  (`mode=fresh`) requires an instruction. A revived run keeps its status,
+  `started_at`, report and merge (a failed/aborted one given an instruction
+  continues its attempt instead); a failed revive goes through
+  `reviveFailed()`, never `failRun()`; a commission opens only with an
+  instruction.
+- The Sessions page offers the plain revive button for exactly the runs
   `resumable()` admits.
 - A revive whose worktree retention removed recreates it at the same path
   (the resume keeps `branch_expected`), because the CLI finds its
