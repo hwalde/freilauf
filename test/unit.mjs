@@ -8128,19 +8128,92 @@ try {
     }
   })
 
-  await check('resumable: picking an ended run back up is not the same offer as retrying it', async () => {
+  await check('resumable: an ended run may be revived, as often as wanted, but never beside a live agent', async () => {
     const { resumable } = await import('../server/run-state.mjs')
-    isTrue(resumable({ status: 'failed' }, true), 'a failed run whose worktree stands may be continued')
-    isTrue(resumable({ status: 'aborted' }, true), 'an aborted one too — the machine ends runs that way')
-    isFalse(resumable({ status: 'failed' }, false), 'but not without the worktree: there is nothing to continue in')
-    isFalse(resumable({ status: 'done' }, true), 'a finished run is continued by typing into its session, not by this')
-    isFalse(resumable({ status: 'running' }, true), 'and one that is still going needs nothing')
-    isFalse(resumable({ status: 'deferred' }, true), 'nor one that has not started')
-    isFalse(resumable({ status: 'failed', resolves_run_id: 'x' }, true),
+    const w = { workdir_effective: '/tmp/wt' }
+    isTrue(resumable({ ...w, status: 'failed' }), 'a failed run may be continued')
+    isTrue(resumable({ ...w, status: 'aborted' }), 'an aborted one too — the machine ends runs that way')
+    isTrue(resumable({ ...w, status: 'done' }), 'a finished one whose session is gone may be revived (a follow-up)')
+    isFalse(resumable({ ...w, status: 'done' }, { live: true }), 'but not while its agent still sits in the session — type into it')
+    isFalse(resumable({ ...w, status: 'failed' }, { live: true }), 'nor any other run with a live agent: two agents, one worktree')
+    isFalse(resumable({ status: 'failed' }), 'a run that never got a working directory never ran')
+    isFalse(resumable({ ...w, status: 'running' }), 'one that is still going needs nothing')
+    isFalse(resumable({ ...w, status: 'deferred' }), 'nor one that has not started')
+    isFalse(resumable({ ...w, status: 'failed', resolves_run_id: 'x' }),
       'never a conflict run — "Merge now" on the original is the way back in')
-    isFalse(resumable({ status: 'failed', archived_at: 'x' }, true),
-      'nor an archived one: it was put away, and archiving closed its session')
-    isFalse(resumable(null, true), 'no run, no verdict')
+    isFalse(resumable({ ...w, status: 'failed', archived_at: 'x' }),
+      'nor an archived one: it was put away')
+    isFalse(resumable(null), 'no run, no verdict')
+  })
+
+  await check('handoverPrompt: a fresh agent is handed the whole record, data first, instructions last', async () => {
+    const { handoverPrompt } = await import('../server/runner.mjs')
+    const { db, addEvent } = await import('../server/db.mjs')
+    const id = (await import('node:crypto')).randomUUID()
+    const repo = db.prepare('SELECT id FROM repos LIMIT 1').get()?.id ?? null
+    db.exec('PRAGMA foreign_keys=OFF')
+    db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, report_md, report_detail_md, help_text)
+                VALUES(?, ?, 'done', 'claude', 'TASK-X', 'keiner', 45, 'REPORT-1\n\n---\n## Follow-up report #1\n\nREPORT-2', 'DETAIL-1', 'QUESTION-1')`)
+      .run(id, repo ?? 'none')
+    addEvent(id, 'progress', { text: 'PROGRESS-1' })
+    addEvent(id, 'help', { text: 'QUESTION-0' })
+    addEvent(id, 'help_answered', { text: 'ANSWER-0' })
+    addEvent(id, 'help', {})
+    addEvent(id, 'help_answered', { text: 'ANSWER-1' })
+    addEvent(id, 'followup_started', { text: 'EARLIER-ORDER' })
+    addEvent(id, 'resume_requested', { text: 'NOW-ORDER' })
+    const run = db.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    const h = handoverPrompt({ run, context: 'COMMITS-1', taskPrompt: 'TASK-X', platformPrompt: 'RULES-1',
+      why: 'WHY-1', instruction: 'NOW-ORDER', finished: true })
+    for (const s of ['WHY-1', 'COMMITS-1', 'REPORT-1', 'REPORT-2', 'DETAIL-1', 'PROGRESS-1', 'QUESTION-1', 'ANSWER-1', 'EARLIER-ORDER', 'TASK-X']) {
+      contains(h.task, s, `the record carries ${s}`)
+    }
+    isTrue(h.task.indexOf('<previous_work>') < h.task.indexOf('<original_task>'), 'the record stands before the task')
+    contains(h.task, '<question at=', 'questions are listed with their answers')
+    isTrue(/QUESTION-0<\/question>\n<answer>ANSWER-0/.test(h.task), 'each question paired with the answer that followed it')
+    isFalse(h.task.includes('NOW-ORDER'), 'the current instruction is not echoed into the history')
+    contains(h.platform, '<operator_instruction>\nNOW-ORDER', 'it stands in the instructions, tagged')
+    contains(h.platform, 'follow-up report', 'a finished run is told its report is a follow-up')
+    isTrue(h.platform.endsWith('RULES-1'), 'the platform rules close the prompt, inline, never offloaded')
+    const plain = handoverPrompt({ run, context: '', taskPrompt: 'T', platformPrompt: 'R', why: 'W', instruction: '', finished: false })
+    contains(plain.platform, 'Finish the original task', 'no instruction on an unfinished run: finish the task')
+    isFalse(plain.platform.includes('<operator_instruction>'), 'and no empty instruction block')
+    // Untrusted text goes in literally: `$&`, `$'` and a typed placeholder are
+    // not patterns (String.prototype.replace would read them as such).
+    const nasty = "price $' and $& and {goal} and {followup}"
+    const hn = handoverPrompt({ run, context: 'ctx $&', taskPrompt: 'T', platformPrompt: 'R', why: 'W', instruction: nasty, finished: false })
+    contains(hn.platform, nasty, 'the instruction arrives byte for byte')
+    isFalse(hn.platform.includes('{instruction}'), 'and no placeholder is left behind')
+    contains(hn.task, 'ctx $&', 'so does the context')
+    db.prepare('DELETE FROM events WHERE run_id=?').run(id)
+    db.prepare('DELETE FROM runs WHERE id=?').run(id)
+    db.exec('PRAGMA foreign_keys=ON')
+  })
+
+  await check('fillTemplate: one pass, literal values, unknown names left alone', async () => {
+    const { fillTemplate } = await import('../server/runner.mjs')
+    equal(fillTemplate('A {x} B {y} {z}', { x: "$' $& {y}", y: '2' }), "A $' $& {y} B 2 {z}",
+      'a value that looks like a placeholder or a pattern stays what it is')
+  })
+
+  await check('retiredClaudeTokens: a takeover does not erase the first agent\'s tokens', async () => {
+    const { retiredClaudeTokens } = await import('../server/watcher.mjs')
+    const { mkdtempSync, writeFileSync: wf } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const dir = mkdtempSync(join(tmpdir(), 'fl-retired-'))
+    const line = (i, o) => JSON.stringify({ type: 'assistant', timestamp: new Date().toISOString(),
+      message: { id: `m${i}${o}`, usage: { input_tokens: i, output_tokens: o } } })
+    wf(join(dir, 'abc.jsonl'), line(1, 1) + '\n')
+    wf(join(dir, 'abc.before-1.jsonl'), line(100, 10) + '\n')
+    wf(join(dir, 'abc.before-2.jsonl'), line(50, 5) + '\n')
+    wf(join(dir, 'other.before-1.jsonl'), line(999, 999) + '\n')
+    const t = retiredClaudeTokens(join(dir, 'abc.jsonl'))
+    equal(t.tokensOut, 15, 'the retired conversations of THIS run are summed, and only those')
+    const far = mkdtempSync(join(tmpdir(), 'fl-retired-far-'))
+    wf(join(far, 'abc.before-9.jsonl'), line(7, 7) + '\n')
+    equal(retiredClaudeTokens(join(dir, 'abc.jsonl'), [join(far, 'abc.before-9.jsonl')]).tokensOut, 22,
+      'and one recorded under a directory the run has since left')
+    isTrue(t.tokensIn >= 150, `input counted too (${t.tokensIn})`)
   })
 
   await check('sessionPending: "no session" and "no session yet" are two different answers', async () => {

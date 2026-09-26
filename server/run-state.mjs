@@ -251,22 +251,28 @@ export function inOpenReview(run) {
  * in its worktree those are not the same offer, and the overview used to make
  * only the destructive one.
  *
- * `worktreeThere` is handed in rather than looked up, so the rule stays pure:
- * the caller has the filesystem, this has the reasoning. Four refusals:
+ * A `done` run is revived too, but only once nobody is left in its session
+ * (`live` false): while the agent still sits there, typing into it IS the
+ * follow-up, and a second session beside it would be two agents on one
+ * worktree. A revived `done` run stays `done` — what is launched is a
+ * follow-up commission, so the caller insists on the instruction.
  *
- *  - only a run that really ENDED (`failed`/`aborted`). A `done` run is picked
- *    back up by typing into its session — that is a follow-up commission and it
- *    has its own machinery; `scheduled`/`deferred` have not started yet.
- *  - not without the worktree: there is nothing to continue in.
+ * The worktree does not have to stand: `launchRun()` recreates it at the same
+ * path (retention removes it once the work is merged), and the same path is
+ * what lets a CLI find its conversation again. Refused:
+ *
+ *  - anything but `done`/`failed`/`aborted` — `scheduled`/`deferred` have not
+ *    started, a running run needs nothing.
+ *  - a run that never got a working directory: it never ran.
+ *  - a live agent (see above).
  *  - never a conflict run — the way back in there is "Merge now" on the run it
  *    worked for, which starts a fresh resolver with a fresh branch (the rule
  *    the retry button already keeps).
- *  - not an archived one: it was deliberately put away, and archiving closed
- *    its session.
+ *  - not an archived one: it was deliberately put away; unarchive it first.
  */
-export function resumable(run, worktreeThere) {
-  return !!run && ['failed', 'aborted'].includes(run.status)
-    && !!worktreeThere && !run.resolves_run_id && !run.archived_at
+export function resumable(run, { live = false } = {}) {
+  return !!run && ['done', 'failed', 'aborted'].includes(run.status)
+    && !!run.workdir_effective && !live && !run.resolves_run_id && !run.archived_at
 }
 
 /**

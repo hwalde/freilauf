@@ -719,7 +719,9 @@ export async function handleReport(runId, body, via = 'http') {
       // side of it.
       const schon = run.status === 'waiting_help' && run.help_text === text
       db.prepare(`UPDATE runs SET status='waiting_help', help_text=? WHERE id=?`).run(text, runId)
-      addEvent(runId, 'help')
+      // The question travels on the event, not only on the row, which keeps just
+      // the latest: a successor agent is handed every question with its answer.
+      addEvent(runId, 'help', { text: String(text ?? '').slice(0, 2000) })
       // The question MUST arrive completely — truncated it cannot be answered.
       if (!schon) {
         await notifyRun(runId, 'help', `${reportHeader(run)}\n\n${text}\n\n🆘 Help call · ${harnessLabel(run)}`,
@@ -1087,7 +1089,7 @@ async function handleFollowUp(run, body, via) {
     }
     case 'help': {
       db.prepare(`UPDATE runs SET help_text=? WHERE id=?`).run(text, runId)
-      addEvent(runId, 'help', { followup: true })
+      addEvent(runId, 'help', { followup: true, text: String(text ?? '').slice(0, 2000) })
       await notifyRun(runId, 'help', `${followUpHeader(run, 'FOLLOW-UP HELP CALL')}\n\n${text}\n\n🆘 Help call · ${harnessLabel(run)}`,
         { fileName: `help-${runId.slice(0, 8)}.md`, fileContent: text, dedupe: false })
       return { ok: true }

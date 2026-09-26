@@ -819,9 +819,24 @@ export function resumeLaunchInFlight(runId, nowMs = Date.now()) {
   try {
     const info = JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8'))
     const since = Date.parse(info?.launching_at ?? '')
-    return Number.isFinite(since) && nowMs - since < RESUME_LAUNCH_GRACE_MS
+    const grace = info?.keep_status ? REVIVE_LAUNCH_GRACE_MS : RESUME_LAUNCH_GRACE_MS
+    // A launch begun before this process started died with the process that
+    // ran it: it is not in flight, however recent.
+    if (Number.isFinite(since) && since < PROCESS_STARTED_MS) return false
+    return Number.isFinite(since) && nowMs - since < grace
   } catch { return false }
 }
+
+/**
+ * The same bound for a revived `done` run, whose stuck mark the watcher TAKES
+ * BACK rather than retries: a revive may recreate its worktree first (`git
+ * fetch` and `worktree add`, 120 s each) or build its sandbox before fl-start's
+ * own 120 s, and taking back a launch that is merely slow would leave an agent
+ * running on a run recorded as closed. Longer than all of those together; the
+ * marker is refreshed before fl-start as well.
+ */
+export const REVIVE_LAUNCH_GRACE_MS = 15 * 60_000
+const PROCESS_STARTED_MS = Date.now() - Math.round(process.uptime() * 1000)
 /** The prompt the resumed CLI is launched with — never prompt.md, which is the record of the task. */
 const RESUME_PROMPT_FILE = 'resume-prompt.md'
 
@@ -838,19 +853,138 @@ export const RESUME_PROMPT = `Your session was interrupted: the tmux session it 
 Continue the task from where you were. Check \`git status\` and \`git log\` first so you do not redo work that is already committed, then carry on and finish. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed. If you were waiting for a human's answer when the cut came, ask the question again with \`fl-report help\`. If the interruption cost you something you cannot recover, say so in the report.`
 
 /**
- * The header for a coding agent that has NO resume form (a plugin without
- * `launch.resume`; cursor before its transcript exists): it is started afresh
- * with the ORIGINAL prompt, and this stands in front of it so it does not redo
- * the committed half of its own work. All four built-ins resume — hermes too,
- * since 0.21 (measured; see harnesses/hermes.mjs).
+ * The continuation for a session the OPERATOR brings back (`reason: 'operator'`,
+ * the Revive button): nothing was interrupted by accident — the session had
+ * ended, and a human wants the agent back. `{instruction}` is what they want
+ * now, or the sentence that says to finish the task.
  */
-export const RESUME_FRESH_HEADER = `# This run was interrupted and is being restarted
-
-The session this run worked in is gone (a server restart, an update, a lost tmux server). This coding agent cannot resume a conversation, so Freilauf starts you afresh with the original task below. The worktree is exactly as the previous session left it: look at \`git status\` and \`git log\` before you begin, and do NOT redo what is already committed.
+export const REVIVE_PROMPT = `Your session had ended, and the operator has brought you back: Freilauf resumed your conversation in a new tmux session. The worktree is exactly as you left it — or, where the platform had already removed it after merging your work, recreated at the same path from the base branch.
 
 {context}
 
-The original task follows.`
+<operator_instruction>
+{instruction}
+</operator_instruction>
+
+Check \`git status\` and \`git log\` first so you do not redo work that is already committed, then do what <operator_instruction> says. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed{followup}.`
+
+/**
+ * Fill `{name}` placeholders in ONE pass with a function replacer. The values
+ * here are untrusted text — an operator's instruction, commit subjects — and
+ * `String.prototype.replace` with a string reads `$&`, `$'` and `$$` in it as
+ * patterns, while a chain of replaces substitutes a `{goal}` somebody typed.
+ * Unknown names are left standing.
+ */
+export function fillTemplate(template, values) {
+  return String(template).replace(/\{([a-z_]+)\}/g, (all, name) =>
+    Object.prototype.hasOwnProperty.call(values, name) ? String(values[name] ?? '') : all)
+}
+
+/** Said in front of the context when launchRun() had to make the worktree again. */
+const RECREATED_NOTE = 'Note: the platform had removed this worktree after the run ended and has recreated it at the same path from `{base}` (or from the run\'s branch). Work that was merged is in `{base}` already; anything that was never committed is lost.'
+
+/** How the previous agent ended, for the handover's first paragraph. */
+const HANDOVER_WHY = {
+  fresh: 'Its session has ended, and the operator asked for a fresh agent to carry on instead of continuing its conversation.',
+  revived: 'Its session has ended, the operator wants the work to go on, and its conversation cannot be continued.',
+  lost: 'Its session was interrupted (a server restart, an update, a lost tmux server), and its conversation cannot be continued.',
+}
+
+/** What a revived run is told to do when the operator gave no instruction. */
+const REVIVE_CONTINUE = 'No new instruction: continue the original task from where you stopped and finish it.'
+
+/**
+ * The handover to a FRESH agent — the second way back when no conversation can
+ * be continued (a coding agent without a resume form, a conversation that is
+ * gone) or when the operator asks for a fresh one. It is the whole record
+ * instead of a conversation: the data first, in tags, then the original task,
+ * then what to do — an agent that is told "continue" without being told where
+ * the work stood redoes it. Two halves because `offloadPrompt()` may move the
+ * first (`{history}` + task) into a file; the second must stand on its own.
+ */
+export const HANDOVER_INTRO = `# You are taking over an existing Freilauf run
+
+Another coding agent worked on this run before you. {why} You start with a fresh conversation in the SAME working directory, so everything it committed or left uncommitted is there. Below is the record of that earlier work in <previous_work>, followed by the original task in <original_task>.`
+
+export const HANDOVER_INSTRUCTIONS = `# How to take over
+
+You continue the work of an earlier agent on this run: its record is in <previous_work> and the task it was given in <original_task>.{instruction}
+
+1. Read <previous_work> completely before you change anything. The reports were written by the previous agent and may be incomplete or too optimistic, so check them against \`git log\`, \`git status\` and the code itself.
+2. Do not redo work that is already committed; build on it.
+3. {goal}
+4. The platform rules below (and inside <original_task>) apply to you unchanged: commit your work, write the two report files and run \`fl-report done\` exactly as they describe.{followup}
+5. If the record leaves a question open that only a human can answer, ask it with \`fl-report help\` instead of guessing.`
+
+/**
+ * Everything the hub recorded about a run that a successor needs: its reports
+ * (the first one and every follow-up, which `appendReport()` keeps in
+ * `report_md`), the detailed reports, progress reports, questions and answers,
+ * and the operator's messages — as tagged blocks, oldest first. Empty blocks
+ * are left out; an empty result means the run left no record at all.
+ * `current` is the instruction the successor is handed separately — its own
+ * echo in the event list (`resume_requested`, `followup_started`) is left out.
+ */
+export function runHistory(run, { current = '' } = {}) {
+  const blocks = []
+  const tag = (name, body) => { if (String(body ?? '').trim()) blocks.push(`<${name}>\n${String(body).trim()}\n</${name}>`) }
+  tag('reports', run.report_md)
+  tag('detailed_report', run.report_detail_md)
+  if (run.followup_detail_md && run.followup_detail_md !== run.report_detail_md) tag('latest_followup_detailed_report', run.followup_detail_md)
+  const rows = db.prepare(`SELECT ts, kind, payload FROM events WHERE run_id=?
+    AND kind IN ('progress','help','help_answered','followup_started','message_sent','flow_message','resume_requested') ORDER BY id`).all(run.id)
+  const text = (r) => { try { const p = JSON.parse(r.payload ?? 'null'); return String(p?.text ?? p?.message ?? '').trim() } catch { return '' } }
+  const line = (r) => `- ${r.ts} UTC: ${text(r)}`
+  tag('progress_reports', rows.filter(r => r.kind === 'progress' && text(r)).map(line).join('\n'))
+  // Each question with the answer that followed it. A question recorded before
+  // the event carried its text is known only as the row's latest `help_text`.
+  const qa = []
+  for (const r of rows) {
+    if (r.kind === 'help') qa.push({ q: text(r) || null, a: null, ts: r.ts, asked: true })
+    else if (r.kind === 'help_answered') {
+      const open = [...qa].reverse().find(x => x.a === null)
+      if (open) open.a = text(r) || '(answered without text)'
+      else qa.push({ q: null, a: text(r), ts: r.ts })
+    }
+  }
+  // The row keeps the LATEST question: it names the newest question event
+  // that carried no text of its own.
+  const lastAsked = [...qa].reverse().find(x => x.asked)
+  if (lastAsked && lastAsked.q === null && run.help_text) lastAsked.q = run.help_text
+  if (!qa.length && run.help_text) qa.push({ q: run.help_text, a: null, ts: null })
+  tag('questions_and_answers', qa.filter(x => x.q || x.a).map(x =>
+    `<question${x.ts ? ` at="${x.ts} UTC"` : ''}>${x.q ?? '(text not recorded)'}</question>\n<answer>${x.a ?? '(no answer recorded)'}</answer>`).join('\n'))
+  const now = String(current ?? '').trim().slice(0, 500)
+  tag('operator_messages', rows.filter(r => ['followup_started', 'message_sent', 'flow_message', 'resume_requested'].includes(r.kind)
+    && text(r) && text(r) !== now)
+    .map(line).join('\n'))
+  return blocks.join('\n\n')
+}
+
+/**
+ * The handover prompt as `{ task, platform }` for `offloadPrompt()`. `why` says
+ * how the previous agent ended, `instruction` is the operator's (may be empty),
+ * `finished` whether the run has already reported done once.
+ */
+export function handoverPrompt({ run, context, taskPrompt, platformPrompt, why, instruction, finished }) {
+  const history = [context ? `<state_of_the_worktree>\n${context}\n</state_of_the_worktree>` : '', runHistory(run, { current: instruction })]
+    .filter(Boolean).join('\n\n')
+  const task = [fillTemplate(HANDOVER_INTRO, { why }),
+    `<previous_work>\n${history || 'The previous agent left no record.'}\n</previous_work>`,
+    `<original_task>\n${taskPrompt}\n</original_task>`].join('\n\n')
+  const instr = String(instruction ?? '').trim()
+  const platform = [fillTemplate(HANDOVER_INSTRUCTIONS, {
+    instruction: instr ? `\n\nThe operator's instruction for you now:\n<operator_instruction>\n${instr}\n</operator_instruction>` : '',
+    goal: instr
+      ? 'Carry out <operator_instruction>. The original task is its context, not a second job — unless the instruction says to finish it.'
+      : finished
+        ? 'The previous agent reported the task as done. Check that the result is really complete and working, fix what is not, and report what you found.'
+        : 'Finish the original task from where the previous agent stopped.',
+    followup: finished ? ' The run has reported done once already, so your report counts as a follow-up report — same files, same command.' : '',
+  }),
+  platformPrompt].filter(Boolean).join('\n\n')
+  return { task, platform }
+}
 
 /**
  * What the worktree and the run's own reports say happened before the cut —
@@ -933,26 +1067,67 @@ export async function resumeIdFor(run) {
  * as strict for everyone else — it is what keeps two watcher passes from
  * launching one run twice.
  */
-export async function resumeRun(runId, { reason = 'session_lost', text = null, adoptPending = false } = {}) {
+export async function resumeRun(runId, { reason = 'session_lost', text = null, adoptPending = false,
+  instruction = null, fresh = false } = {}) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) return { ok: false, error: 'run not found' }
-  if (!['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
+  // A `done` run is revived only by the operator (the Revive button): it stays
+  // `done`, and what is launched is a follow-up commission (`keepStatus`).
+  const keepStatus = run.status === 'done' && reason === 'operator'
+  if (!keepStatus && !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
   if (run.resume_pending && !adoptPending) return { ok: true, pending: true }
   // Reported already: the finish gate's `agent_gone` escalation owns this case.
   if (run.finish_state) return { ok: false, error: 'in the finish gate — the integrator escalates' }
-  if (!run.workdir_effective || !existsSync(run.workdir_effective)) return { ok: false, error: 'the worktree is gone' }
+  // The operator may revive a run whose worktree retention already removed:
+  // launchRun() recreates it at the same path. Every automatic resume still
+  // needs it standing — a run in flight whose worktree vanished is a fault.
+  if (!run.workdir_effective || (reason !== 'operator' && !existsSync(run.workdir_effective))) {
+    return { ok: false, error: 'the worktree is gone' }
+  }
   if (!launchable(run.harness)) return { ok: false, error: `no launch spec for ${run.harness}` }
   const counted = reason === 'session_lost'
   if (counted && run.resume_attempts >= RESUME_MAX) {
     return { ok: false, error: `resumed ${run.resume_attempts} times already (cap ${RESUME_MAX})` }
   }
-  const lastSeen = Math.max(parseDbUtc(run.last_activity_at) || 0, parseDbUtc(run.started_at) || 0)
-  const gapSec = lastSeen ? Math.max(0, Math.round((Date.now() - lastSeen) / 1000)) : 0
   const runDir = join(RUNS_DIR, runId)
   mkdirSync(runDir, { recursive: true })
-  writeFileSync(join(runDir, RESUME_FILE),
-    JSON.stringify({ reason, text: text || null, counted, at: new Date().toISOString(), session: run.tmux_session }),
+  // The mark is CLAIMED, not just set: two clicks (two tabs, a double submit)
+  // or two watcher passes both read `resume_pending=0` a moment ago, and only
+  // the one whose UPDATE changes the row goes on — otherwise two sessions
+  // would share one worktree. The in-flight marker goes with the claim, so the
+  // watcher's recovery pass leaves the launch alone while it is under way.
+  if (!adoptPending) {
+    const claimed = db.prepare('UPDATE runs SET resume_pending=1 WHERE id=? AND COALESCE(resume_pending, 0)=0').run(runId)
+    if (!claimed.changes) return { ok: true, pending: true }
+  }
+  // What a failed revive of a `done` run puts back (reviveFailed): the columns
+  // below are about to be reset for a session that may never come.
+  const restore = keepStatus ? { tmux_session: run.tmux_session, tmux_closed_at: run.tmux_closed_at,
+    goal_sent_at: run.goal_sent_at, agent_state: run.agent_state, agent_state_at: run.agent_state_at,
+    last_activity_at: run.last_activity_at } : null
+  const marker = (extra = {}) => writeFileSync(join(runDir, RESUME_FILE),
+    JSON.stringify({ reason, text: text || null, counted, at: new Date().toISOString(), session: run.tmux_session,
+      instruction: instruction ? String(instruction) : null, fresh: !!fresh, keep_status: keepStatus, restore,
+      launching_at: new Date().toISOString(), ...extra }),
     { mode: 0o600 })
+  marker()
+  // The budget gate BEFORE anything else is changed for a revived `done` run:
+  // it has no `deferred` to wait in (that status would overwrite the truth
+  // about its first attempt), so a blocked revive is a refusal the operator
+  // reads — and the claim is taken back.
+  const { budgetGate } = await import('./scheduler.mjs')
+  if (keepStatus) {
+    let gate = null
+    try { gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null) } catch { gate = null }
+    if (gate) {
+      db.prepare('UPDATE runs SET resume_pending=0 WHERE id=?').run(runId)
+      try { rmSync(join(runDir, RESUME_FILE), { force: true }) } catch { /* the marker is a courtesy */ }
+      return { ok: false, error: gate.reason }
+    }
+  }
+  const lastSeen = Math.max(parseDbUtc(run.last_activity_at) || 0, parseDbUtc(run.started_at) || 0)
+  // A finished run's `started_at` measures its first attempt and is not moved.
+  const gapSec = keepStatus ? 0 : lastSeen ? Math.max(0, Math.round((Date.now() - lastSeen) / 1000)) : 0
   // The goal starts over with the session: a `/goal` typed into the old one
   // went with it, and the watcher's pending-goal pass delivers it again.
   // …and so does the agent's attention: 'waiting' described a process that is gone.
@@ -975,20 +1150,26 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   // SPENDS the alarm — the run would then be free to end without a report for
   // real, and nobody would ever be told (the same trap `notified:followup_overrun`
   // has its own entry about).
+  //
+  // `pane_died` and `sandbox:released` belong to the life that ended: left
+  // standing, the release sweep (watcher.mjs, releasable) would release the
+  // revived run's container at once — a `pane_died` makes an ended run
+  // releasable — or never again, since it skips a run released once.
   clearAnomalies(runId, [
     'anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:overrun', 'anomaly:session_gone',
     'anomaly:exit_without_report', ...notifiedFlags('exit_without_report'),
+    'pane_died', 'sandbox:released',
   ])
-  addEvent(runId, 'session_lost', {
+  // An operator's revive is not a lost session, and the record says which.
+  addEvent(runId, reason === 'operator' ? 'revive_started' : 'session_lost', {
     reason, attempt: run.resume_attempts + 1, gap_s: gapSec,
     started_at_before: run.started_at, session: run.tmux_session,
   })
   // The same gate as at any other start: a resume into an exhausted quota
   // dies at the first API call like a fresh start would. A blocked one waits
   // as `deferred` — with `resume_pending` kept, so the watcher's retry resumes
-  // rather than starting afresh.
-  const { budgetGate } = await import('./scheduler.mjs')
-  const gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
+  // rather than starting afresh. (A revived `done` run was asked above.)
+  const gate = keepStatus ? null : await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
   if (gate) {
     db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null, resume: true })
@@ -1003,9 +1184,10 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
  *
  * With `runs.resume_pending` set this is a RESUME (see resumeRun above): the
  * worktree is reused as it stands, prompt.md is left alone and the CLI is
- * launched in its resume form with a continuation prompt — or, for a coding
- * agent without one, afresh with the original prompt behind a header that
- * says what already happened. `base_sha` and the quota marks are kept: the
+ * launched in its resume form with a continuation prompt — or, where no
+ * conversation can be continued (or the operator asked for a fresh agent), a
+ * fresh agent is handed the whole record (handoverPrompt). A worktree that is
+ * gone is made again. `base_sha` and the quota marks are kept: the
  * run's own commits are still what it wants merged. A launch that fails on a
  * resume leaves the run pending for the next watcher pass instead of failing
  * it, until the cap is reached: right after a reboot the tmux server itself
@@ -1068,12 +1250,21 @@ export async function launchRun(runId) {
     resumeInfo.launching_at = new Date().toISOString()
     try { writeFileSync(join(runDir, RESUME_FILE), JSON.stringify(resumeInfo), { mode: 0o600 }) } catch { /* best effort */ }
   }
+  // A revived `done` run (resumeRun, `keep_status`) must never be failed by its
+  // own revive: failRun() would overwrite its status and its report. A revive
+  // that does not come up is written down and taken back instead.
+  const keepStatus = resuming && !!resumeInfo.keep_status
+  const fail = (text) => keepStatus ? reviveFailed(runId, text) : failRun(runId, text)
+  // The operator may revive a run whose worktree retention removed; it is made
+  // again below at the same path, which is what lets the CLI find its
+  // conversation (claude files it under the working directory).
+  const recreated = resuming && !(run.workdir_effective && existsSync(run.workdir_effective))
 
   // Asked BEFORE the worktree: a coding agent nothing can launch produces a
   // clean failure here instead of a worktree, a session and a puzzled operator.
   if (!launchable(run.harness)) {
     const msg = t('run.no_launch_spec', { harness: run.harness })
-    failRun(runId, msg)
+    fail(msg)
     return { ok: false, error: msg }
   }
 
@@ -1089,7 +1280,10 @@ export async function launchRun(runId) {
   let bypassed = false
   try {
     if (run.branch_mode === 'neu' || run.branch_mode === 'fest') {
-      branchExpected = expandPattern(run.branch_pattern, { ...run, agent_name: agent?.name, id: runId })
+      // A resume keeps the branch the run already had: a pattern with a date in
+      // it would name another branch, and with it another worktree path.
+      branchExpected = resuming && run.branch_expected ? run.branch_expected
+        : expandPattern(run.branch_pattern, { ...run, agent_name: agent?.name, id: runId })
     }
     if (run.sandbox) {
       // §7.11's start order, all of it idempotent, because a resume walks it
@@ -1105,7 +1299,7 @@ export async function launchRun(runId) {
       const av = resuming ? { available: true } : await refreshSandboxAvailability()
       const weakened = av.available ? null : await sandboxUnavailable(runId, av.reason)
       if (weakened?.problem) {
-        failRun(runId, weakened.problem)
+        fail(weakened.problem)
         return { ok: false, error: weakened.problem }
       }
       if (weakened?.bypass) {
@@ -1138,6 +1332,9 @@ export async function launchRun(runId) {
         writeFileSync(join(runDir, RESUME_FILE), JSON.stringify(resumeInfo), { mode: 0o600 })
       } catch { /* the marker is a courtesy */ }
       addEvent(runId, 'resume_failed', { attempt: run.resume_attempts, error: String(err.message).slice(0, 500), waiting: 'sandbox_runtime' })
+      // A revived `done` run has no watcher pass to wait for: the operator is
+      // told now, and clicks again once the runtime is back.
+      if (keepStatus) { fail(err.message); return { ok: false, error: err.message } }
       return { ok: false, retry: true, error: err.message }
     }
     // The same fact on a FRESH start means the opposite thing (§8.1), so it gets
@@ -1148,7 +1345,7 @@ export async function launchRun(runId) {
     if (!resuming && err?.sandboxRetry && run.sandbox) {
       const weakened = await sandboxUnavailable(runId, err.message)
       if (weakened?.problem) {
-        failRun(runId, weakened.problem)
+        fail(weakened.problem)
         return { ok: false, error: weakened.problem }
       }
       try {
@@ -1161,7 +1358,7 @@ export async function launchRun(runId) {
         workdir = await makeWorktree(repo, run, branchExpected)
         bypassed = true
       } catch (e2) {
-        failRun(runId, `Start failed:\n\n${e2.message}`)
+        fail(`Start failed:\n\n${e2.message}`)
         return { ok: false, error: e2.message }
       }
     }
@@ -1176,7 +1373,7 @@ export async function launchRun(runId) {
           await teardownSandbox(run, { reason: 'launch_failed', removeNetwork: true })
         } catch { /* a teardown that fails must not hide the reason the start did */ }
       }
-      failRun(runId, `Start failed:\n\n${err.message}`)
+      fail(`Start failed:\n\n${err.message}`)
       return { ok: false, error: err.message }
     }
   }
@@ -1215,17 +1412,67 @@ export async function launchRun(runId) {
   // The resume form's argv, when this launch continues a conversation.
   let resumeArgs = []
   if (resuming) {
+    // A worktree made again after its work was merged starts from the base
+    // branch, which already holds that work: the run's own commits count from
+    // here — for the context below as for "what does this run want merged"
+    // and for the leftovers assessment, which measures from `merged_sha` and
+    // would otherwise count the base's history since that merge as this run's.
+    // The old values are on the event, so the overwrite can be traced.
+    if (recreated) {
+      const head = await sh('git', ['-C', workdir, 'rev-parse', 'HEAD'])
+      const sha = head.ok ? head.stdout.trim() : null
+      addEvent(runId, 'worktree_recreated', { workdir, previous_workdir: run.workdir_effective ?? null,
+        head: sha, base_sha_before: run.base_sha ?? null, merged_sha_before: run.merged_sha ?? null })
+      if (sha && run.merge_status === 'merged') {
+        run.base_sha = sha
+        run.merged_sha = sha
+        db.prepare('UPDATE runs SET base_sha=?, merged_sha=? WHERE id=?').run(sha, sha, runId)
+      }
+    }
     // prompt.md stays what it is — the record of the task. The CLI gets a
     // continuation: its old conversation plus what happened since, or, where
-    // nothing can be continued, the whole original task behind a header.
-    const rid = resumable(run.harness) ? await resumeIdFor(run) : null
-    const context = await resumeContext(run)
+    // nothing can be continued, a handover to a fresh agent.
+    //
+    // Two ways back. The conversation itself where the coding agent can continue
+    // one and the operator did not ask for a fresh agent; otherwise a fresh
+    // agent that is handed the whole record (handoverPrompt): the task, every
+    // report, the questions and answers, the state of the worktree.
+    // A CLI finds its conversation by the directory it ran in (claude's
+    // projects folder, opencode's store): where the working directory came
+    // back somewhere else, `--resume` would open it in a place that does not
+    // know it — a fresh agent with the record is the honest way on.
+    const moved = !!run.workdir_effective && workdir !== run.workdir_effective
+    if (moved) addEvent(runId, 'workdir_moved', { from: run.workdir_effective, to: workdir })
+    const rid = resumable(run.harness) && !resumeInfo.fresh && !moved ? await resumeIdFor(run) : null
+    const operator = resumeInfo.reason === 'operator'
+    const instruction = String(resumeInfo.instruction ?? '').trim()
+    const finished = keepStatus || run.status === 'done'
+    let context = await resumeContext({ ...run, workdir_effective: workdir })
+    if (recreated) context = `${fillTemplate(RECREATED_NOTE, { base: repo.base_branch || 'main' })}\n\n${context}`
     let text
     if (rid) {
       resumeArgs = ['--resume', rid]
-      text = String(resumeInfo.text || RESUME_PROMPT).replaceAll('{context}', context)
+      text = operator
+        ? fillTemplate(REVIVE_PROMPT, { context, instruction: instruction || REVIVE_CONTINUE,
+          followup: finished ? ' — the run has reported done once already, so this report counts as a follow-up report' : '' })
+        : fillTemplate(resumeInfo.text || RESUME_PROMPT, { context })
     } else {
-      text = `${RESUME_FRESH_HEADER.replaceAll('{context}', context)}\n\n${fullPrompt}`
+      // The conversation cannot come back (or was not wanted): a claude
+      // transcript under the run id would make `--session-id <run id>` refuse,
+      // so the plugin files the old one away first — the watcher keeps reading
+      // the path it always read.
+      const plugin = getHarness(run.harness)
+      if (typeof plugin?.retireConversation === 'function') {
+        try {
+          const moved = await plugin.retireConversation(run)
+          if (moved) addEvent(runId, 'conversation_retired', { to: moved })
+        } catch (e) { addEvent(runId, 'warn', { retire_conversation: e.message }) }
+      }
+      const why = resumeInfo.fresh ? HANDOVER_WHY.fresh : operator ? HANDOVER_WHY.revived : HANDOVER_WHY.lost
+      const h = handoverPrompt({ run, context, taskPrompt, platformPrompt, why, instruction, finished })
+      const offload = offloadPrompt(run.harness, workdir, h.task, h.platform)
+      text = offload.prompt
+      writeFileSync(join(runDir, 'handover-prompt.md'), [h.task, h.platform].join('\n\n'), { mode: 0o600 })
     }
     promptFile = join(runDir, RESUME_PROMPT_FILE)
     writeFileSync(promptFile, text, { mode: 0o600 })
@@ -1275,9 +1522,9 @@ export async function launchRun(runId) {
     // commits are measured against, and the quota marks are the cost's start.
     // Re-reading either here would make the interrupted half of the work
     // disappear from "what does this run want merged" and from its bill.
-    db.prepare(`UPDATE runs SET status='running', workdir_effective=?, worktree=?,
+    db.prepare(`UPDATE runs SET status=CASE WHEN ? THEN status ELSE 'running' END, workdir_effective=?, worktree=?,
                 branch_expected=COALESCE(branch_expected, ?), resume_attempts=resume_attempts+? WHERE id=?`)
-      .run(workdir, workdir !== repo.path ? workdir : null, branchExpected, resumeInfo.counted ? 1 : 0, runId)
+      .run(keepStatus ? 1 : 0, workdir, workdir !== repo.path ? workdir : null, branchExpected, resumeInfo.counted ? 1 : 0, runId)
   } else {
     const baseSha = await sh('git', ['-C', workdir, 'rev-parse', 'HEAD'])
     const q = claudeQuota()
@@ -1364,12 +1611,12 @@ export async function launchRun(runId) {
           vars: missing.map(m => m.name).join(', '),
         })
         addEvent(runId, 'sandbox:credential_missing', { vars: missing.map(m => m.name) })
-        failRun(runId, reason)
+        fail(reason)
         return { ok: false, error: reason }
       }
       applied = await applySecrets(run, sandbox.spec, pairs)
     } catch (err) {
-      failRun(runId, `Start failed:\n\n${err.message}`)
+      fail(`Start failed:\n\n${err.message}`)
       return { ok: false, error: err.message }
     }
     modelArgs.args = [...rest, ...applied.pairs.flatMap(p => ['--env', `${p.name}=${p.value}`])]
@@ -1417,6 +1664,12 @@ export async function launchRun(runId) {
     if (sandbox.launchOverrides?.mode) args.unshift('--mode', sandbox.launchOverrides.mode)
   }
 
+  // The launch is still in flight: said again before the last slow step, so
+  // the watcher's recovery pass measures from here, not from the start.
+  if (resuming) {
+    resumeInfo.launching_at = new Date().toISOString()
+    try { writeFileSync(join(runDir, RESUME_FILE), JSON.stringify(resumeInfo), { mode: 0o600 }) } catch { /* best effort */ }
+  }
   const r = await sh(env('START_SCRIPT') ?? `${homedir()}/.local/bin/fl-start`, args, { timeout: 120_000 })
   // fl-start's success line ("Session '<name>' started …"); the German wording
   // is still accepted for older installed scripts.
@@ -1430,19 +1683,42 @@ export async function launchRun(runId) {
       // watcher pass launches again — until the cap says it is a crash loop.
       const attempts = db.prepare('SELECT resume_attempts FROM runs WHERE id=?').get(runId)?.resume_attempts ?? 0
       addEvent(runId, 'resume_failed', { attempt: attempts, error: String(error).slice(0, 500) })
+      if (keepStatus) { fail(`Revive failed (fl-start):\n\n${error}`); return { ok: false, error } }
       if (!resumeInfo.counted || attempts < RESUME_MAX) return { ok: false, retry: true, error }
-      failRun(runId, `Resume failed ${attempts} times (fl-start):\n\n${error}`)
+      fail(`Resume failed ${attempts} times (fl-start):\n\n${error}`)
       return { ok: false, error }
     }
-    failRun(runId, `Start failed (fl-start):\n\n${error}`)
+    fail(`Start failed (fl-start):\n\n${error}`)
     return { ok: false, error }
   }
-  db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0 WHERE id=?').run(session, runId)
+  if (resuming) {
+    // Only while the mark is still ours: a revive the watcher took back in the
+    // meantime (reviveFailed) must not come back to life as a session on a run
+    // recorded as closed — nobody would watch it, and retention could remove
+    // the worktree under it. The session just started goes again instead.
+    const took = db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL WHERE id=? AND resume_pending=1')
+      .run(session, runId)
+    if (!took.changes) {
+      // The container first, as the kill route does: its client is the pane.
+      if (sandbox) {
+        try {
+          const { stopRunContainer } = await import('./sessions.mjs')
+          await stopRunContainer(db.prepare('SELECT * FROM runs WHERE id=?').get(runId) ?? run)
+        } catch { /* the reaper is the net under this */ }
+      }
+      await sh('tmux', ['kill-session', '-t', `=${session}`])
+      addEvent(runId, 'revive_failed', { error: 'the resume was taken back before its session started', session })
+      return { ok: false, error: 'the resume was taken back before its session started' }
+    }
+  } else {
+    db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0 WHERE id=?').run(session, runId)
+  }
   addEvent(runId, 'tmux_started', { session })
   if (resuming) {
     try { rmSync(join(runDir, RESUME_FILE), { force: true }) } catch { /* the marker is a courtesy */ }
     addEvent(runId, 'resumed', {
       session, reason: resumeInfo.reason ?? 'session_lost', resume_form: resumeArgs.length ? resumeArgs[1] : 'fresh',
+      ...(resumeInfo.fresh ? { requested: 'fresh' } : {}), ...(recreated ? { worktree_recreated: true } : {}),
       attempt: db.prepare('SELECT resume_attempts FROM runs WHERE id=?').get(runId)?.resume_attempts ?? null,
     })
   }
@@ -1471,6 +1747,34 @@ export async function launchRun(runId) {
  * be able to hold up (or throw out of) the write that records the failure.
  * Muting the run (`telegram_on`) still silences it — notifyRun's own rule.
  */
+/**
+ * A revive of a `done` run that did not come up. Not failRun(): the run's
+ * status and report are the truth about its attempt, and a revive that could
+ * not start changes nothing about that. The mark is taken back so the run is
+ * as it was, the reason is on its record, and the operator who clicked is
+ * shown it by the route.
+ */
+export function reviveFailed(runId, text) {
+  let restore = null
+  try { restore = JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8'))?.restore ?? null } catch { /* no marker */ }
+  // What resumeRun() reset for the session that did not come is put back; the
+  // session is recorded as closed either way, because retention's worktree
+  // cleanup only looks at runs whose session is.
+  const res = db.prepare(`UPDATE runs SET resume_pending=0, tmux_session=COALESCE(tmux_session, ?),
+              tmux_closed_at=COALESCE(tmux_closed_at, ?, datetime('now')),
+              goal_sent_at=COALESCE(goal_sent_at, ?), agent_state=COALESCE(agent_state, ?),
+              agent_state_at=COALESCE(agent_state_at, ?), last_activity_at=COALESCE(?, last_activity_at)
+              WHERE id=? AND resume_pending=1 AND tmux_session IS NULL`)
+    .run(restore?.tmux_session ?? null, restore?.tmux_closed_at ?? null, restore?.goal_sent_at ?? null,
+      restore?.agent_state ?? null, restore?.agent_state_at ?? null, restore?.last_activity_at ?? null, runId)
+  // Only a revive still in flight is taken back — never one whose session
+  // stands by now (a second process, a late caller).
+  if (!res.changes) return false
+  try { rmSync(join(RUNS_DIR, runId, RESUME_FILE), { force: true }) } catch { /* the marker is a courtesy */ }
+  addEvent(runId, 'revive_failed', { error: String(text).slice(0, 500) })
+  return true
+}
+
 export function failRun(runId, text) {
   db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), report_md=? WHERE id=?`)
     .run(text, runId)

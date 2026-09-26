@@ -102,8 +102,40 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   marks, shifts `started_at` by the gap, and launches the CLI in its resume
   form with a continuation prompt that names commits since `base_sha`,
   uncommitted files and the last progress reports. `resumeId()` answers `null`
-  whenever the plugin cannot name THIS run's own conversation — a resume never
-  continues a guessed session; fresh start wins.
+  whenever the plugin cannot name THIS run's own conversation (claude: no
+  transcript under the run id) — a resume never continues a guessed session;
+  fresh start wins.
+- A fresh start of an existing run is a handover (`handoverPrompt()`): the
+  record first (worktree state, every report, progress, questions and
+  answers, operator messages), then the original task, then the instructions
+  with the platform rules inline; `retireConversation()` files a conversation
+  away before the CLI would refuse or reuse its id.
+- The operator revives any `done`/`failed`/`aborted` run that ever had a
+  working directory, as often as wanted, never beside a live agent and never
+  a conflict or archived run (`resumable()` in run-state.mjs, shared by page
+  and route). A revived `done` run keeps its status, `started_at`, report and
+  merge, needs an instruction and opens a follow-up commission; a failed
+  revive of it goes through `reviveFailed()`, never `failRun()`.
+- The Sessions page offers revive only through the run page's form (a link,
+  never a POST — a finished run needs an instruction), for exactly the runs
+  `resumable()` admits.
+- A revive whose worktree retention removed recreates it at the same path
+  (the resume keeps `branch_expected`), because the CLI finds its
+  conversation by that path; a working directory that came back elsewhere is
+  a handover, never a `--resume`. After a merge `base_sha` and `merged_sha`
+  move to the new HEAD (old values on `worktree_recreated`), or the leftovers
+  assessment counts the base's history as the run's.
+- `resumeRun()` claims `resume_pending` with a conditional UPDATE before any
+  await, so two clicks or passes launch one session; a `done` run left
+  pending without a launch in flight (`REVIVE_LAUNCH_GRACE_MS`, longer than
+  recreate plus fl-start) is taken back by the watcher (`reviveFailed()`),
+  and a launch records its session only while the mark is still its own.
+- A resume clears the old life's `pane_died` and `sandbox:released`, or the
+  release sweep frees the new container at once or never again.
+- Untrusted text (instructions, commit subjects) goes into a prompt through
+  `fillTemplate()` — one pass, function replacer — never a string `replace`.
+- A takeover's retired claude transcripts (`<id>.before-*.jsonl`) still count
+  toward the run's tokens.
 
 ## Run definition
 

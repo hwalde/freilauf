@@ -11,7 +11,7 @@
 // reached while the registry is still evaluating. A static import here closes
 // that ring and the first thing to touch it dies in a temporal dead zone. Both
 // places that need the claude windows are async anyway.
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -531,8 +531,35 @@ const plugin = {
    * The id the hub resumes this run's conversation with (runner.mjs,
    * resumeRun): the run id, because that is the session id the hub chose at
    * launch — the same answer resumeCommand() gives a human.
+   *
+   * Only when the transcript is really there: `claude --resume` on a
+   * conversation it cannot find prints an error and exits, and the revived
+   * session is dead on arrival. Its absence (a run launched before
+   * `--session-id`, a removed home) answers null, and the hub hands over to a
+   * fresh agent instead.
    */
-  resumeId(run) { return run?.id ?? null },
+  async resumeId(run) {
+    if (!run?.id) return null
+    const { claudeTranscriptPath } = await import('../watcher.mjs')
+    return existsSync(claudeTranscriptPath(run)) ? run.id : null
+  },
+
+  /**
+   * Before a FRESH agent starts under the same run (runner.mjs, the handover):
+   * the hub launches claude with `--session-id <run id>`, and claude refuses an
+   * id whose transcript exists. The old one is renamed beside itself, so the
+   * record stays and the watcher reads the new conversation at the path it
+   * always reads. Returns the new path, or null when there was nothing.
+   */
+  async retireConversation(run) {
+    if (!run?.id) return null
+    const { claudeTranscriptPath } = await import('../watcher.mjs')
+    const path = claudeTranscriptPath(run)
+    if (!existsSync(path)) return null
+    const to = path.replace(/\.jsonl$/, `.before-${Date.now()}.jsonl`)
+    renameSync(path, to)
+    return to
+  },
 
   /**
    * CLI arguments for fl-start. claude takes model and effort as separate flags.

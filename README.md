@@ -41,7 +41,9 @@ Freilauf does, and it only goes forward.
 
 - **A workspace per run.** Every run gets its own git worktree and its own
   tmux session. Agents never step on each other — or on you — and you can
-  attach to any of them later and read the whole screen.
+  attach to any of them later and read the whole screen. A session that has
+  ended can be revived — the same agent and conversation, or a fresh agent
+  handed the whole record — as often as you like.
 - **Roles, not tickets.** An *agent* is a role with a schedule: the reviewer
   that runs every night, the dead-code hunter on Sundays, the docs keeper after
   every merge. A *single run* is the same form without the name and the
