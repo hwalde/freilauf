@@ -38,7 +38,7 @@ a day on which nothing was released.
   run whose follow-up was still open in its session (behind a full quota it
   waits and comes back once the gate opens). A session ended on purpose — the
   memory cleanup, by hand — and a finished run that only left its screen
-  standing are not brought back by themselves; the Resume button does that.
+  standing are not brought back by themselves; the Revive button does that.
 
 ### Changed
 

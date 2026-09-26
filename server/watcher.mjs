@@ -1468,7 +1468,7 @@ async function retryPendingResumes() {
   const stuck = db.prepare(`SELECT id FROM runs WHERE status = 'done'
                             AND resume_pending = 1 AND tmux_session IS NULL`).all()
   if (stuck.length) {
-    const { reviveFailed, resumeLaunchInFlight, resumeMarker, launchRun } = await import('./runner.mjs')
+    const { reviveFailed, resumeLaunchInFlight, resumeMarker, patchResumeMarker, launchRun } = await import('./runner.mjs')
     for (const row of stuck) {
       if (resumeLaunchInFlight(row.id)) continue
       // A lost follow-up (recoverLostFollowUps) is not a click to take back: it
@@ -1481,6 +1481,16 @@ async function retryPendingResumes() {
         let gate = null
         try { gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null) } catch { gate = null }
         if (gate) continue
+        // The wait behind the gate is time nothing ran: off the follow-up's
+        // clock, as resumeRun() took the downtime off it.
+        const waitedSec = Math.max(0, Math.round((Date.now() - (Date.parse(marker.deferred_at ?? '') || Date.now())) / 1000))
+        if (waitedSec) {
+          db.prepare(`UPDATE runs SET followup_since=datetime(followup_since, '+' || ? || ' seconds')
+                      WHERE id=? AND followup_since IS NOT NULL`).run(waitedSec, row.id)
+        }
+        // Taken off once: a launch that could not be tried is retried next
+        // pass, and must not take the same wait off a second time.
+        patchResumeMarker(row.id, { deferred_at: null })
         try {
           const r = await launchRun(row.id)
           noteResume(row.id, { ...r, reason: 'session_lost' })

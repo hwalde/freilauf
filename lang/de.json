@@ -228,6 +228,7 @@
   "run.events": "Ereignisse",
   "run.none": "keine",
   "run.resuming": "Session verloren — wird in einer neuen fortgesetzt",
+  "run.resuming_gate": "Session verloren — wird fortgesetzt, sobald das Budget-Gate öffnet ({reason})",
   "run.log": "Log (pipe-pane)",
   "run.no_log": "Kein Log.",
   "run.running": "läuft",

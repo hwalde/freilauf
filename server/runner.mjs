@@ -804,6 +804,13 @@ const RESUME_FILE = 'resume.json'
 export function resumeMarker(runId) {
   try { return JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8')) } catch { return null }
 }
+/** Merge `patch` into a run's resume marker; false when there is none. */
+export function patchResumeMarker(runId, patch) {
+  const info = resumeMarker(runId)
+  if (!info) return false
+  try { writeFileSync(join(RUNS_DIR, runId, RESUME_FILE), JSON.stringify({ ...info, ...patch }), { mode: 0o600 }) } catch { return false }
+  return true
+}
 /**
  * How long a resume launch may be in flight before a pending run without a
  * session counts as "the last attempt failed" rather than "somebody is
@@ -1201,7 +1208,10 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   // about the first attempt): it stays `resume_pending`, and the watcher's
   // retryPendingResumes() launches it once the gate opens.
   if (gate && followUpLost) {
-    marker({ launching_at: null })   // waiting is not launching: the retry must not wait out a launch grace
+    // Waiting is not launching (the retry must not wait out a launch grace),
+    // and when the wait began is kept: retryPendingResumes() takes it off the
+    // follow-up's clock too.
+    marker({ launching_at: null, deferred_at: new Date().toISOString() })
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null, resume: true, followup: true })
     return { ok: true, deferred: true }
   }

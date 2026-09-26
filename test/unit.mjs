@@ -7031,9 +7031,14 @@ try {
       const raw = await sh('tmux', ['has-session', '-t', '=fl-einzel-gone'])
       isTrue(se.emptyServerAnswer(raw), `has-session on the empty server says so (${raw.stderr.trim()})`)
       equal(await se.sessionGone('fl-einzel-gone'), true, 'confirmed by the listing: gone')
+      const startMs = await se.tmuxServerStartMs()
+      isTrue(Number.isFinite(startMs) && Math.abs(Date.now() - startMs) < 60_000, `the empty server says when it started (${startMs})`)
       await sh('tmux', ['new-session', '-d', '-s', 'fl-einzel-here'])
       equal(await se.sessionGone('fl-einzel-here'), false, 'a standing session is there')
       equal(await se.sessionGone('fl-einzel-gone'), true, 'and a missing one next to it is gone')
+      await sh('tmux', ['kill-server'])
+      equal(await se.tmuxServerStartMs(), null, 'no server: null, not "no answer"')
+      equal(await se.sessionGone('fl-einzel-here'), true, 'and every session is gone')
     } finally {
       await import('../server/util.mjs').then(({ sh }) => sh('tmux', ['kill-server']))
       try { process.kill(server.pid) } catch { /* already gone with kill-server */ }

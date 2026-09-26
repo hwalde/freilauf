@@ -99,7 +99,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   and a finished run that only left its screen standing is never brought back
   by itself — both are the Revive button's. Behind a closed budget gate or a
   launch that could not be tried the follow-up stays `resume_pending` and is
-  launched again, capped by `RESUME_MAX`.
+  launched again, capped by `RESUME_MAX`; the wait behind the gate comes off
+  `followup_since` too, and the run page names the gate's reason.
 - An empty tmux server (every reboot, `exit-empty` off) is an answer, not
   silence: `sessionGone()` confirms `no current target` with the listing.
 - A pane killed by SIGHUP, SIGKILL or SIGTERM is resumed too (`signalDeath()`

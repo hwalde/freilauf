@@ -2492,12 +2492,23 @@ try {
         r = lauf(f)
         equal(r.resume_pending, 1, 'a second pass behind the gate changes nothing')
         isTrue(!!r.followup_since, 'still open')
+        contains(await (await fetchPath(`/runs/${f}`)).text(), 'budget gate', 'the run page says what it waits for')
+        // The gate stayed shut for two hours: that wait is time nothing ran.
+        const markerPath = join(SB, 'runs', f, 'resume.json')
+        const m = JSON.parse(readFileSync(markerPath, 'utf8'))
+        isTrue(!!m.deferred_at, 'the marker knows when the wait began')
+        writeFileSync(markerPath, JSON.stringify({ ...m, deferred_at: new Date(Date.now() - 2 * 3600_000).toISOString() }))
+        const sinceBefore = Date.parse(r.followup_since.replace(' ', 'T') + 'Z')
         write(0)
         await watcherTick()
         r = lauf(f)
         if (r.tmux_session) sessions.add(r.tmux_session)
         isTrue(!!r.tmux_session && r.resume_pending === 0, 'launched once the gate opened')
         contains(ereignisse(f).join(','), 'resumed', 'resumed')
+        const movedMin = (Date.parse(r.followup_since.replace(' ', 'T') + 'Z') - sinceBefore) / 60_000
+        isTrue(movedMin > 119 && movedMin < 122, `the two hours behind the gate came off the follow-up clock (${movedMin.toFixed(1)} min)`)
+        await watcherTick()
+        isFalse(ereignisse(f).includes('anomaly:followup_overrun'), 'and the relaunched follow-up is not flagged as overrun')
       } finally { write(0) }
     })
     await check('the hub records the live sessions on SIGTERM and still stops within its bound', async () => {
