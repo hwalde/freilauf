@@ -2406,6 +2406,140 @@ try {
       const ev = ereignisse(j.runId)
       contains(ev.join(','), 'resume_refused', 'and the refusal is written on the run')
     })
+    // The record of which sessions are active, and the time the machine was off.
+    await check('a pass records the sessions it saw alive; the downtime after that is taken off the clock', async () => {
+      const k = await laufStarten({ repo_id: repoId, prompt: 'E2E-Downtime: the clock stops while nothing runs' })
+      const s = await sessionMerken(k.runId)
+      await watcherTick()
+      isTrue(!!lauf(k.runId).session_alive_at, 'the live session is on the record')
+      // As a reboot leaves it: started an hour ago, last activity 50 min ago,
+      // last seen alive 10 min ago — then the session is gone.
+      db.prepare(`UPDATE runs SET started_at=datetime('now','-60 minutes'), last_activity_at=datetime('now','-50 minutes'),
+                  session_alive_at=datetime('now','-10 minutes') WHERE id=?`).run(k.runId)
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
+      await watcherTick()
+      const r = lauf(k.runId)
+      if (r.tmux_session) sessions.add(r.tmux_session)
+      const lost = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='session_lost' ORDER BY id DESC`).get(k.runId)
+      isTrue(!!lost, 'resumed')
+      const gap = JSON.parse(lost.payload).gap_s
+      isTrue(gap >= 590 && gap <= 700, `the gap starts at the last sighting, not the last activity (${gap} s)`)
+      const ranMin = (Date.now() - Date.parse(r.started_at.replace(' ', 'T') + 'Z')) / 60_000
+      isTrue(ranMin > 48 && ranMin < 52, `50 minutes of work stay on the clock, the 10 minutes off come off (${ranMin.toFixed(1)})`)
+      equal(r.session_alive_at, null, 'the new session is not on the record until a pass sees it')
+    })
+    // A lost SERVER is simulated by the one fact the watcher reads about it: the
+    // tmux server answering now was started AFTER the session was last seen
+    // alive. Killing a single session while the server stands is the other case
+    // — the memory cleanup, a human — and must stay a deliberate end.
+    const serverStartSec = async () => Number((await sh('tmux', ['display', '-p', '#{start_time}'])).stdout.trim())
+    const doneWithFollowUp = async (prompt, { aliveAt, extra = '' } = {}) => {
+      const k = await laufStarten({ repo_id: repoId, prompt })
+      const s = await sessionMerken(k.runId)
+      db.prepare(`UPDATE runs SET status='done', started_at=datetime('now','-60 minutes'), ended_at=datetime('now','-40 minutes'),
+                  followup_since=datetime('now','-30 minutes'), last_activity_at=datetime('now','-8 minutes'),
+                  session_alive_at=${aliveAt} ${extra} WHERE id=?`).run(k.runId)
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
+      return k.runId
+    }
+    await check('a follow-up whose session a lost server took is resumed; a finished run with an idle session is not', async () => {
+      const before = `datetime(${(await serverStartSec()) - 300}, 'unixepoch')`
+      const f = await doneWithFollowUp('E2E-Followup-lost: working on a follow-up when the machine went down', { aliveAt: before })
+      const idle = await laufStarten({ repo_id: repoId, prompt: 'E2E-Idle-lost: done, only the screen stood' })
+      const is1 = await sessionMerken(idle.runId)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now','-40 minutes'), session_alive_at=${before} WHERE id=?`).run(idle.runId)
+      await sh('tmux', ['kill-session', '-t', `=${is1}`])
+      await watcherTick()
+      const r = lauf(f)
+      if (r.tmux_session) sessions.add(r.tmux_session)
+      equal(r.status, 'done', 'the attempt stays done')
+      isTrue(!!r.tmux_session && !r.tmux_closed_at, 'a new session stands for the follow-up')
+      const lost = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='session_lost'`).get(f)
+      isTrue(!!lost && JSON.parse(lost.payload).followup === true, 'written as a lost follow-up')
+      isTrue(!!r.followup_since, 'the commission is still open')
+      const sinceMin = (Date.now() - Date.parse(r.followup_since.replace(' ', 'T') + 'Z')) / 60_000
+      isTrue(sinceMin > 21 && sinceMin < 24, `the follow-up clock lost the downtime after the last activity (${sinceMin.toFixed(1)})`)
+      contains(readFileSync(join(SB, 'runs', f, 'resume-prompt.md'), 'utf8'), 'follow-up report',
+        'the agent is told its report is a follow-up report')
+      isFalse(ereignisse(idle.runId).includes('session_lost'), 'the idle finished run is not brought back by itself')
+    })
+    await check('a follow-up session killed on its own while the server stands is NOT resumed', async () => {
+      const f = await doneWithFollowUp('E2E-Followup-killed: the cleanup took this session', { aliveAt: `datetime('now')` })
+      await watcherTick()
+      const r = lauf(f)
+      isFalse(ereignisse(f).includes('session_lost'), 'no resume — a deliberate end')
+      equal(r.followup_since, null, 'the commission is closed, as before')
+      isTrue(!!r.tmux_closed_at, 'the session is recorded as closed — the Revive button is the way back')
+    })
+    await check('a lost follow-up behind a closed budget gate waits, and comes back once it opens', async () => {
+      const quota = join(SB, 'quota.json')
+      const write = (pct) => writeFileSync(quota, JSON.stringify({
+        five_hour: { used_percentage: pct, resets_at: 1800000000 },
+        seven_day: { used_percentage: pct }, seven_day_fable: { used_percentage: pct },
+      }))
+      try {
+        const before = `datetime(${(await serverStartSec()) - 300}, 'unixepoch')`
+        const f = await doneWithFollowUp('E2E-Followup-gate: lost behind a full quota', { aliveAt: before })
+        write(100)   // after the start: the gate would otherwise defer the start itself
+        await watcherTick()
+        let r = lauf(f)
+        equal(r.status, 'done', 'still done')
+        equal(r.resume_pending, 1, 'on its way back')
+        isTrue(!!r.followup_since, 'the commission is not abandoned')
+        isFalse(!!r.tmux_closed_at, 'and not closed')
+        contains(ereignisse(f).join(','), 'deferred', 'the wait is written down')
+        await watcherTick()
+        r = lauf(f)
+        equal(r.resume_pending, 1, 'a second pass behind the gate changes nothing')
+        isTrue(!!r.followup_since, 'still open')
+        contains(await (await fetchPath(`/runs/${f}`)).text(), 'budget gate', 'the run page says what it waits for')
+        // The gate stayed shut for two hours: that wait is time nothing ran.
+        const markerPath = join(SB, 'runs', f, 'resume.json')
+        const m = JSON.parse(readFileSync(markerPath, 'utf8'))
+        isTrue(!!m.deferred_at, 'the marker knows when the wait began')
+        writeFileSync(markerPath, JSON.stringify({ ...m, deferred_at: new Date(Date.now() - 2 * 3600_000).toISOString() }))
+        // …and the commission is as old as that: without the shift it would be
+        // far past its 45 minutes the moment the agent is back.
+        db.prepare(`UPDATE runs SET followup_since=datetime(followup_since, '-120 minutes') WHERE id=?`).run(f)
+        r = lauf(f)
+        const sinceBefore = Date.parse(r.followup_since.replace(' ', 'T') + 'Z')
+        write(0)
+        await watcherTick()
+        r = lauf(f)
+        if (r.tmux_session) sessions.add(r.tmux_session)
+        isTrue(!!r.tmux_session && r.resume_pending === 0, 'launched once the gate opened')
+        contains(ereignisse(f).join(','), 'resumed', 'resumed')
+        const movedMin = (Date.parse(r.followup_since.replace(' ', 'T') + 'Z') - sinceBefore) / 60_000
+        isTrue(movedMin > 119 && movedMin < 122, `the two hours behind the gate came off the follow-up clock (${movedMin.toFixed(1)} min)`)
+        await watcherTick()
+        isFalse(ereignisse(f).includes('anomaly:followup_overrun'), 'and the relaunched follow-up is not flagged as overrun')
+      } finally { write(0) }
+    })
+    await check('the hub records the live sessions on SIGTERM and still stops within its bound', async () => {
+      const name = `fl-cc-shutdown-${randomUUID().slice(0, 8)}`
+      sessions.add(name)
+      await sh('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', name])
+      const id = randomUUID()
+      db.prepare(`INSERT INTO runs(id,repo_id,harness,prompt,branch_mode,expected_minutes,status,
+                                   workdir_effective,tmux_session,started_at)
+                  VALUES(?,?,'claude','E2E-Shutdown: on the record when the hub stops','keiner',45,'running',?,?,datetime('now'))`)
+        .run(id, repoId, REPO, name)
+      isFalse(!!lauf(id).session_alive_at, 'not on the record before the stop')
+      const t0 = Date.now()
+      await stopHub()
+      const took = Date.now() - t0
+      // Read before the next start: its first pass would mark the session too.
+      const { DatabaseSync } = await import('node:sqlite')
+      const peek = new DatabaseSync(join(SB, 'data', 'freilauf.db'), { readOnly: true })
+      const alive = peek.prepare('SELECT session_alive_at FROM runs WHERE id=?').get(id)?.session_alive_at
+      peek.close()
+      await startHub()
+      await prepareWatcher()
+      isTrue(took < 3000, `the hub exited within its 2 s bound (${took} ms)`)
+      isTrue(!!alive, 'the live session was put on the record by the shutdown')
+      db.prepare('DELETE FROM runs WHERE id=?').run(id)
+      await sh('tmux', ['kill-session', '-t', `=${name}`])
+    })
     // ---- the OTHER way a restart takes an agent, and the one that cost three runs.
     //
     // A restart, a reboot or the OOM killer kills PROCESSES. Where the tmux

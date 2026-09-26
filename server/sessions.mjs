@@ -401,7 +401,44 @@ export async function sessionAlive(name) {
  */
 export async function sessionGone(name) {
   if (!name) return null
-  return sessionGoneFrom(await sh('tmux', ['has-session', '-t', `=${name}`]))
+  const r = await sh('tmux', ['has-session', '-t', `=${name}`])
+  const gone = sessionGoneFrom(r)
+  if (gone !== null || !emptyServerAnswer(r)) return gone
+  // A server that holds NO session at all — the state `fl-tmux-server` leaves
+  // after every reboot, `exit-empty` off — does not say "can't find session"
+  // but `no current target` (measured, tmux 3.4). Read as "no answer", it kept
+  // every run of a rebooted machine unresumed until some other start happened
+  // to create a session. It is not taken on its own word: the listing is asked
+  // too, and only a listing that answered and lacks the name says "gone".
+  const snap = await tmuxSnapshot()
+  if (!snap.ok) return null
+  return !snap.sessions.some(s => s.name === name)
+}
+
+/**
+ * When the tmux server that answers now was started, in ms since the epoch —
+ * `null` when there is no server, `undefined` when tmux gave no answer.
+ * `display -p` needs no target for a server-wide format, and answers on an
+ * EMPTY server too (measured, tmux 3.4). It is how a lost session is told
+ * apart from a lost SERVER: a server younger than the last sighting of a
+ * session means the machine or the tmux server went away in between.
+ */
+export async function tmuxServerStartMs() {
+  const r = await sh('tmux', ['display', '-p', '#{start_time}'])
+  const verdict = tmuxVerdict(r)
+  if (verdict === 'no_server') return null
+  const raw = verdict === 'ok' ? r.stdout.trim() : ''
+  return raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) * 1000 : undefined
+}
+
+/**
+ * Pure: is this `has-session` answer the one an EMPTY server gives? Separate
+ * from sessionGoneFrom(), because it is not proof by itself — sessionGone()
+ * confirms it with the listing.
+ */
+export function emptyServerAnswer(r) {
+  if (r?.ok) return false
+  return /no current target/i.test(String(r?.stderr ?? '') + String(r?.stdout ?? ''))
 }
 
 /**

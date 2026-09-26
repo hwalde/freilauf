@@ -800,6 +800,17 @@ export const RESUME_MAX = (() => {
 
 /** What resumeRun() writes down for launchRun() to read: why, and with which text. */
 const RESUME_FILE = 'resume.json'
+/** The resume marker of a run, or null. */
+export function resumeMarker(runId) {
+  try { return JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8')) } catch { return null }
+}
+/** Merge `patch` into a run's resume marker; false when there is none. */
+export function patchResumeMarker(runId, patch) {
+  const info = resumeMarker(runId)
+  if (!info) return false
+  try { writeFileSync(join(RUNS_DIR, runId, RESUME_FILE), JSON.stringify({ ...info, ...patch }), { mode: 0o600 }) } catch { return false }
+  return true
+}
 /**
  * How long a resume launch may be in flight before a pending run without a
  * session counts as "the last attempt failed" rather than "somebody is
@@ -851,6 +862,14 @@ export const RESUME_PROMPT = `Your session was interrupted: the tmux session it 
 {context}
 
 Continue the task from where you were. Check \`git status\` and \`git log\` first so you do not redo work that is already committed, then carry on and finish. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed. If you were waiting for a human's answer when the cut came, ask the question again with \`fl-report help\`. If the interruption cost you something you cannot recover, say so in the report.`
+
+/**
+ * Appended to RESUME_PROMPT when the lost session was working on a follow-up
+ * commission of a run that had already reported (watcher.mjs, recoverLostSessions).
+ */
+export const FOLLOWUP_RESUME_NOTE = `
+
+This session was working on a follow-up request when the cut came, and the run has reported done once already. If that follow-up is not finished, finish it and report it — your report counts as a follow-up report, same files, same command. If you had already finished it and were only waiting for the human, do not report again: say in one line that you are back, and wait.`
 
 /**
  * The continuation for a session the OPERATOR brings back (`reason: 'operator'`,
@@ -1071,9 +1090,12 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   instruction = null, fresh = false } = {}) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) return { ok: false, error: 'run not found' }
-  // A `done` run is revived only by the operator (the Revive button): it stays
-  // `done`, and what is launched is a follow-up commission (`keepStatus`).
-  const keepStatus = run.status === 'done' && reason === 'operator'
+  // A `done` run is revived by the operator (the Revive button), or when the
+  // session working on its follow-up (`followup_since`) was lost (watcher.mjs,
+  // recoverLostFollowUps): it stays `done`, and what is launched is a
+  // follow-up commission (`keepStatus`).
+  const followUpLost = run.status === 'done' && reason === 'session_lost' && !!run.followup_since
+  const keepStatus = run.status === 'done' && (reason === 'operator' || followUpLost)
   if (!keepStatus && !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
   if (run.resume_pending && !adoptPending) return { ok: true, pending: true }
   // Reported already: the finish gate's `agent_gone` escalation owns this case.
@@ -1116,7 +1138,7 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   // about its first attempt), so a blocked revive is a refusal the operator
   // reads — and the claim is taken back.
   const { budgetGate } = await import('./scheduler.mjs')
-  if (keepStatus) {
+  if (keepStatus && !followUpLost) {
     let gate = null
     try { gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null) } catch { gate = null }
     if (gate) {
@@ -1125,16 +1147,27 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
       return { ok: false, error: gate.reason }
     }
   }
-  const lastSeen = Math.max(parseDbUtc(run.last_activity_at) || 0, parseDbUtc(run.started_at) || 0)
-  // A finished run's `started_at` measures its first attempt and is not moved.
-  const gapSec = keepStatus ? 0 : lastSeen ? Math.max(0, Math.round((Date.now() - lastSeen) / 1000)) : 0
+  // The downtime begins at the last moment the run is KNOWN to have been alive:
+  // its last activity, or the last pass that saw its session standing — the
+  // later of the two, so the minutes an agent worked silently before the cut
+  // stay on its clock and only the time nothing ran comes off.
+  const lastSeen = Math.max(parseDbUtc(run.last_activity_at) || 0, parseDbUtc(run.started_at) || 0,
+    parseDbUtc(run.session_alive_at) || 0)
+  const downSec = lastSeen ? Math.max(0, Math.round((Date.now() - lastSeen) / 1000)) : 0
+  // A finished run's `started_at` measures its first attempt and is not moved;
+  // a lost follow-up's clock is `followup_since`, and that one is.
+  const gapSec = keepStatus ? 0 : downSec
+  const followUpGap = followUpLost ? downSec : 0
   // The goal starts over with the session: a `/goal` typed into the old one
   // went with it, and the watcher's pending-goal pass delivers it again.
   // …and so does the agent's attention: 'waiting' described a process that is gone.
   db.prepare(`UPDATE runs SET tmux_session=NULL, tmux_closed_at=NULL, resume_pending=1, goal_sent_at=NULL,
-              agent_state=NULL, agent_state_at=NULL,
-              started_at=datetime(started_at, '+' || ? || ' seconds'), last_activity_at=datetime('now') WHERE id=?`)
-    .run(gapSec, runId)
+              agent_state=NULL, agent_state_at=NULL, session_alive_at=NULL,
+              started_at=datetime(started_at, '+' || ? || ' seconds'),
+              followup_since=CASE WHEN followup_since IS NULL THEN NULL
+                                  ELSE datetime(followup_since, '+' || ? || ' seconds') END,
+              last_activity_at=datetime('now') WHERE id=?`)
+    .run(gapSec, followUpGap, runId)
   const { clearAnomalies, notifiedFlags } = await import('./reports.mjs')
   // `exit_without_report` belongs on this list for the same reason the four
   // beside it do: the resume overtakes the statement. The agent's process
@@ -1162,14 +1195,26 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   ])
   // An operator's revive is not a lost session, and the record says which.
   addEvent(runId, reason === 'operator' ? 'revive_started' : 'session_lost', {
-    reason, attempt: run.resume_attempts + 1, gap_s: gapSec,
+    reason, attempt: run.resume_attempts + 1, gap_s: gapSec || followUpGap,
     started_at_before: run.started_at, session: run.tmux_session,
+    ...(followUpLost ? { followup: true, followup_since_before: run.followup_since } : {}),
   })
   // The same gate as at any other start: a resume into an exhausted quota
   // dies at the first API call like a fresh start would. A blocked one waits
   // as `deferred` — with `resume_pending` kept, so the watcher's retry resumes
   // rather than starting afresh. (A revived `done` run was asked above.)
-  const gate = keepStatus ? null : await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
+  const gate = keepStatus && !followUpLost ? null : await budgetGate(run.harness, run.model ?? null, run.provider ?? null)
+  // A lost follow-up has no `deferred` to wait in (its status is the truth
+  // about the first attempt): it stays `resume_pending`, and the watcher's
+  // retryPendingResumes() launches it once the gate opens.
+  if (gate && followUpLost) {
+    // Waiting is not launching (the retry must not wait out a launch grace),
+    // and when the wait began is kept: retryPendingResumes() takes it off the
+    // follow-up's clock too.
+    marker({ launching_at: null, deferred_at: new Date().toISOString() })
+    addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null, resume: true, followup: true })
+    return { ok: true, deferred: true }
+  }
   if (gate) {
     db.prepare(`UPDATE runs SET status='deferred' WHERE id=?`).run(runId)
     addEvent(runId, 'deferred', { reason: gate.reason, resets_at: gate.resets_at ?? null, resume: true })
@@ -1254,7 +1299,13 @@ export async function launchRun(runId) {
   // own revive: failRun() would overwrite its status and its report. A revive
   // that does not come up is written down and taken back instead.
   const keepStatus = resuming && !!resumeInfo.keep_status
-  const fail = (text) => keepStatus ? reviveFailed(runId, text) : failRun(runId, text)
+  // …and one the WATCHER brought back (a follow-up whose session a lost
+  // server took): not the operator's revive, so its end is not called one, and
+  // a launch that could not be tried is retried like any lost session's.
+  const autoFollowUp = keepStatus && resumeInfo.reason === 'session_lost'
+  const fail = (text) => keepStatus
+    ? reviveFailed(runId, text, autoFollowUp ? 'followup_resume_failed' : 'revive_failed')
+    : failRun(runId, text)
   // The operator may revive a run whose worktree retention removed; it is made
   // again below at the same path, which is what lets the CLI find its
   // conversation (claude files it under the working directory).
@@ -1334,7 +1385,7 @@ export async function launchRun(runId) {
       addEvent(runId, 'resume_failed', { attempt: run.resume_attempts, error: String(err.message).slice(0, 500), waiting: 'sandbox_runtime' })
       // A revived `done` run has no watcher pass to wait for: the operator is
       // told now, and clicks again once the runtime is back.
-      if (keepStatus) { fail(err.message); return { ok: false, error: err.message } }
+      if (keepStatus && !autoFollowUp) { fail(err.message); return { ok: false, error: err.message } }
       return { ok: false, retry: true, error: err.message }
     }
     // The same fact on a FRESH start means the opposite thing (§8.1), so it gets
@@ -1455,7 +1506,7 @@ export async function launchRun(runId) {
       text = operator
         ? fillTemplate(REVIVE_PROMPT, { context, instruction: instruction || REVIVE_CONTINUE,
           followup: finished ? ' — the run has reported done once already, so this report counts as a follow-up report' : '' })
-        : fillTemplate(resumeInfo.text || RESUME_PROMPT, { context })
+        : fillTemplate(resumeInfo.text || RESUME_PROMPT, { context }) + (finished ? FOLLOWUP_RESUME_NOTE : '')
     } else {
       // The conversation cannot come back (or was not wanted): a claude
       // transcript under the run id would make `--session-id <run id>` refuse,
@@ -1683,7 +1734,7 @@ export async function launchRun(runId) {
       // watcher pass launches again — until the cap says it is a crash loop.
       const attempts = db.prepare('SELECT resume_attempts FROM runs WHERE id=?').get(runId)?.resume_attempts ?? 0
       addEvent(runId, 'resume_failed', { attempt: attempts, error: String(error).slice(0, 500) })
-      if (keepStatus) { fail(`Revive failed (fl-start):\n\n${error}`); return { ok: false, error } }
+      if (keepStatus && !autoFollowUp) { fail(`Revive failed (fl-start):\n\n${error}`); return { ok: false, error } }
       if (!resumeInfo.counted || attempts < RESUME_MAX) return { ok: false, retry: true, error }
       fail(`Resume failed ${attempts} times (fl-start):\n\n${error}`)
       return { ok: false, error }
@@ -1696,7 +1747,7 @@ export async function launchRun(runId) {
     // meantime (reviveFailed) must not come back to life as a session on a run
     // recorded as closed — nobody would watch it, and retention could remove
     // the worktree under it. The session just started goes again instead.
-    const took = db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL WHERE id=? AND resume_pending=1')
+    const took = db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL, session_alive_at=NULL WHERE id=? AND resume_pending=1')
       .run(session, runId)
     if (!took.changes) {
       // The container first, as the kill route does: its client is the pane.
@@ -1711,7 +1762,7 @@ export async function launchRun(runId) {
       return { ok: false, error: 'the resume was taken back before its session started' }
     }
   } else {
-    db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0 WHERE id=?').run(session, runId)
+    db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, session_alive_at=NULL WHERE id=?').run(session, runId)
   }
   addEvent(runId, 'tmux_started', { session })
   if (resuming) {
@@ -1754,7 +1805,7 @@ export async function launchRun(runId) {
  * as it was, the reason is on its record, and the operator who clicked is
  * shown it by the route.
  */
-export function reviveFailed(runId, text) {
+export function reviveFailed(runId, text, kind = 'revive_failed') {
   let restore = null
   try { restore = JSON.parse(readFileSync(join(RUNS_DIR, runId, RESUME_FILE), 'utf8'))?.restore ?? null } catch { /* no marker */ }
   // What resumeRun() reset for the session that did not come is put back; the
@@ -1771,7 +1822,7 @@ export function reviveFailed(runId, text) {
   // stands by now (a second process, a late caller).
   if (!res.changes) return false
   try { rmSync(join(RUNS_DIR, runId, RESUME_FILE), { force: true }) } catch { /* the marker is a courtesy */ }
-  addEvent(runId, 'revive_failed', { error: String(text).slice(0, 500) })
+  addEvent(runId, kind, { error: String(text).slice(0, 500) })
   return true
 }
 

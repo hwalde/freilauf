@@ -1287,16 +1287,32 @@ export function runRow(r, ctx) {
  * cases where everything is as it should be.
  */
 function integrationLine(r) {
-  // A run whose session was lost and is on its way back (runner.mjs,
-  // resumeRun): between the loss and the new session it has no tmux session,
-  // and a running run with no session would otherwise read as broken.
-  if (r.resume_pending && ['running', 'waiting_help', 'deferred'].includes(r.status)) {
-    return `<div class="dim">${e(t('run.resuming'))}</div>`
-  }
+  const resuming = resumeLine(r)
+  if (resuming) return resuming
   if (r.finish_state) return `<div class="dim">${e(finishText(r.finish_state))}</div>`
   if (!r.merge_status || ['merged', 'nothing'].includes(r.merge_status)) return ''
   if (!['done', 'failed', 'aborted'].includes(r.status)) return ''
   return `<div class="dim">${e(mergeText(r.merge_status))}</div>`
+}
+
+/**
+ * A run whose session was lost and is on its way back (runner.mjs, resumeRun):
+ * between the loss and the new session it has no tmux session, and a running
+ * run with no session would otherwise read as broken. A finished run whose
+ * follow-up a lost server took (watcher.mjs, recoverLostFollowUps) may be
+ * waiting for the budget gate — the line then names the gate's reason. '' for
+ * every other run.
+ */
+function resumeLine(r) {
+  if (r.resume_pending && ['running', 'waiting_help', 'deferred'].includes(r.status)) {
+    return `<div class="dim">${e(t('run.resuming'))}</div>`
+  }
+  if (!(r.resume_pending && r.status === 'done' && r.followup_since && !r.tmux_session)) return ''
+  const last = db.prepare(`SELECT kind, payload FROM events WHERE run_id=?
+                           AND kind IN ('deferred','session_lost') ORDER BY id DESC LIMIT 1`).get(r.id)
+  let reason = null
+  try { if (last?.kind === 'deferred') reason = JSON.parse(last.payload)?.reason ?? null } catch { reason = null }
+  return `<div class="dim">${e(reason ? t('run.resuming_gate', { reason }) : t('run.resuming'))}</div>`
 }
 
 /** The title of the run a conflict run works for — for the one line that explains it. */
@@ -1930,7 +1946,7 @@ export function mergeBlockReason(runId) {
  * ordinary POST forms in the page's own style; the destructive one asks first.
  */
 export function integrationSection(run, repo) {
-  if (repo?.merge_mode !== 'hub' && !run.merge_status && !run.finish_state) return ''
+  if (repo?.merge_mode !== 'hub' && !run.merge_status && !run.finish_state && !resumeLine(run)) return ''
   const terminal = ['done', 'failed', 'aborted'].includes(run.status)
   const zeilen = []
   if (run.finish_state) zeilen.push(`<b>${e(finishText(run.finish_state))}</b>`)
@@ -1978,6 +1994,7 @@ export function integrationSection(run, repo) {
     <b>${e(t('merge.section'))}:</b> ${zeilen.join(' · ') || `<span class="dim">–</span>`}
     ${why ? `<details class="merge-why"><summary>${e(t('merge.why'))}</summary><pre>${e(why)}</pre></details>` : ''}
     ${reviewLine(run)}
+    ${resumeLine(run)}
     ${resume ? `<div class="dim">${e(t('merge.resume'))}: <code>${e(resume)}</code></div>` : ''}
     ${buttons.length ? `<div class="btn-row">${buttons.join('')}</div>` : ''}
   </div>`

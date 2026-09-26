@@ -228,6 +228,7 @@
   "run.events": "事件",
   "run.none": "无",
   "run.resuming": "会话已丢失 — 正在新会话中恢复",
+  "run.resuming_gate": "会话已丢失 — 预算闸门打开后将恢复（{reason}）",
   "run.log": "日志（pipe-pane）",
   "run.no_log": "没有日志。",
   "run.running": "运行中",

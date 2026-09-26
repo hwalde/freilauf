@@ -89,6 +89,20 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   resumed, not aborted; every deliberate end goes through
   `reconcileClosedSession()` and still aborts. A run in the finish gate is not
   resumed (its agent vanishing is `agent_gone`).
+- Every pass (and the hub's shutdown) records which run sessions stand with a
+  live pane (`runs.session_alive_at`); the record is cleared with every new
+  session, so only a session a pass has seen alive counts.
+- A `done` run whose follow-up (`followup_since`) was in such a session is
+  resumed as a follow-up only when the tmux SERVER was lost after the last
+  sighting (`#{start_time}` younger, or no server); a single session killed
+  while the server stands (memory cleanup, a human) stays a deliberate end,
+  and a finished run that only left its screen standing is never brought back
+  by itself — both are the Revive button's. Behind a closed budget gate or a
+  launch that could not be tried the follow-up stays `resume_pending` and is
+  launched again, capped by `RESUME_MAX`; the wait behind the gate comes off
+  `followup_since` too, and the run page names the gate's reason.
+- An empty tmux server (every reboot, `exit-empty` off) is an answer, not
+  silence: `sessionGone()` confirms `no current target` with the listing.
 - A pane killed by SIGHUP, SIGKILL or SIGTERM is resumed too (`signalDeath()`
   reads both the signal field and exit `128+n`); SIGINT is a human and is not,
   SIGSEGV/SIGABRT/SIGQUIT are the agent crashing and are not.
@@ -99,7 +113,10 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   ("could not try" is not "tried and died").
 - One announcement per pass for all resumes, not one per run.
 - A resume reuses the worktree, keeps `prompt.md`, `base_sha` and the quota
-  marks, shifts `started_at` by the gap, and launches the CLI in its resume
+  marks, shifts `started_at` (a follow-up: `followup_since`) by the downtime —
+  measured from the later of the last activity and the last pass that saw the
+  session alive, so the time the machine was off never counts against the
+  expected duration — and launches the CLI in its resume
   form with a continuation prompt that names commits since `base_sha`,
   uncommitted files and the last progress reports. `resumeId()` answers `null`
   whenever the plugin cannot name THIS run's own conversation (claude: no

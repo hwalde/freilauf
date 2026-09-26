@@ -7002,6 +7002,48 @@ try {
     // null is the whole point — the caller must not end a run on it.
     equal(se.sessionGoneFrom({ ok: false, stdout: '', stderr: '', code: 'ETIMEDOUT' }), null, 'a timeout says nothing')
     equal(se.sessionGoneFrom({ ok: false, stdout: '', stderr: 'fork failed: Cannot allocate memory' }), null, 'a failed fork says nothing')
+    isTrue(se.emptyServerAnswer({ ok: false, stdout: '', stderr: 'no current target' }), 'an empty server has its own answer')
+    isFalse(se.emptyServerAnswer({ ok: false, stdout: '', stderr: "can't find session: x" }), 'which a named miss is not')
+    isFalse(se.emptyServerAnswer({ ok: true, stdout: '', stderr: '' }), 'and a success is not')
+  })
+
+  // The reboot case, against a REAL tmux on a private socket: `fl-tmux-server`
+  // leaves a server with no session at all (`exit-empty` off), and there
+  // `has-session` says `no current target`. Read as "no answer", it kept every
+  // run of a rebooted machine unresumed.
+  await check('an empty tmux server reads as "gone", not as "no answer"', async () => {
+    const saved = { TMUX: process.env.TMUX, TMUX_TMPDIR: process.env.TMUX_TMPDIR }
+    const tdir = mkdtempSync(join(sandbox, 'tmux-'))
+    delete process.env.TMUX
+    process.env.TMUX_TMPDIR = tdir
+    const { spawn } = await import('node:child_process')
+    const server = spawn('tmux', ['-f', '/dev/null', '-D'], { stdio: 'ignore', detached: true })
+    let spawnError = null
+    server.on('error', (e) => { spawnError = e })
+    try {
+      const { sh } = await import('../server/util.mjs')
+      let up = false
+      for (let i = 0; i < 50 && !up; i++) {
+        up = (await sh('tmux', ['list-sessions'])).ok
+        if (!up) await new Promise(r => setTimeout(r, 100))
+      }
+      isTrue(up, `the private server answers${spawnError ? ` (tmux could not be started: ${spawnError.message})` : ''}`)
+      const raw = await sh('tmux', ['has-session', '-t', '=fl-einzel-gone'])
+      isTrue(se.emptyServerAnswer(raw), `has-session on the empty server says so (${raw.stderr.trim()})`)
+      equal(await se.sessionGone('fl-einzel-gone'), true, 'confirmed by the listing: gone')
+      const startMs = await se.tmuxServerStartMs()
+      isTrue(Number.isFinite(startMs) && Math.abs(Date.now() - startMs) < 60_000, `the empty server says when it started (${startMs})`)
+      await sh('tmux', ['new-session', '-d', '-s', 'fl-einzel-here'])
+      equal(await se.sessionGone('fl-einzel-here'), false, 'a standing session is there')
+      equal(await se.sessionGone('fl-einzel-gone'), true, 'and a missing one next to it is gone')
+      await sh('tmux', ['kill-server'])
+      equal(await se.tmuxServerStartMs(), null, 'no server: null, not "no answer"')
+      equal(await se.sessionGone('fl-einzel-here'), true, 'and every session is gone')
+    } finally {
+      await import('../server/util.mjs').then(({ sh }) => sh('tmux', ['kill-server']))
+      try { process.kill(server.pid) } catch { /* already gone with kill-server */ }
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    }
   })
 
   // The one-character bug that made the hub's only harness-independent net

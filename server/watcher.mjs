@@ -20,7 +20,7 @@ import { checkHit, checkLlmActive } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
-import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
+import { reconcileClosedSession, tmuxSnapshot, tmuxServerStartMs, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
   sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs, paneTarget } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
@@ -171,6 +171,12 @@ async function runTick() {
   // beat behind, fl-start failed): launched again before anything else looks
   // at them, so the loop below finds them with a session or still pending.
   await retryPendingResumes()
+  // Which sessions are alive right now — and which of those that were are gone
+  // (a reboot, a dead tmux server) while the work in them was still going.
+  try {
+    const snap = await trackLiveSessions()
+    if (snap) await recoverLostFollowUps(snap)
+  } catch (e) { console.error('[watcher] session tracking:', e.message) }
   const active = db.prepare(`SELECT * FROM runs WHERE status IN ('running','waiting_help')`).all()
   for (const run of active) {
     try { await watchRun(run) } catch (e) { console.error(`[watcher] ${run.id}:`, e.message) }
@@ -541,7 +547,9 @@ async function watchFollowUps() {
     }
     // A follow-up that HAS reported is in the gate or being merged — its
     // deadline is the finish gate's (`finish_started_at`), not this clock.
-    if (run.finish_state || run.followup_open) continue
+    // One on its way back (a lost session, waiting on the budget gate) has no
+    // agent working either.
+    if (run.finish_state || run.followup_open || run.resume_pending) continue
     // The agent answered and sits at its prompt (its own hook said so): the
     // commission is open because nobody reported, but nothing is being worked
     // on, and "follow-up exceeds the expected duration" would alarm about a
@@ -1382,6 +1390,60 @@ async function tryResume(run) {
 }
 
 /**
+ * The record of which sessions are ACTIVE: every run whose session this listing
+ * shows standing with a live pane gets `session_alive_at` = now. It is what a
+ * restarted hub reads to know which sessions it has to bring back, and where a
+ * downtime began (resumeRun takes it out of the run's duration). Also called by
+ * hub.mjs on shutdown, so a session started seconds before it is on the record.
+ * Returns the snapshot, or null when tmux gave no answer — nothing is marked then.
+ */
+export async function trackLiveSessions() {
+  const snap = await tmuxSnapshot()
+  if (!snap.ok) return null
+  const mark = db.prepare(`UPDATE runs SET session_alive_at=datetime('now')
+                           WHERE tmux_session=? AND tmux_closed_at IS NULL`)
+  for (const s of snap.sessions) if (!s.dead) mark.run(s.name)
+  return snap
+}
+
+/**
+ * A FINISHED run whose follow-up commission (`followup_since`) was being
+ * worked on in a session that was active and is gone now, and nobody in the
+ * hub closed it. Without this, a reboot ended the commission (retention reads
+ * a vanished session as closed); it is resumed like a running run instead — watchRun() covers those,
+ * this is the case its `status IN ('running','waiting_help')` never sees.
+ * Two answers before it acts, as confirmGone() does: the listing lacks the
+ * name AND has-session says gone.
+ *
+ * Only a lost SERVER counts: the tmux server was started after the session
+ * was last seen alive (a reboot, a crashed server), or there is none. A
+ * session killed on its own while the server kept running — the memory
+ * cleanup, a human — is a deliberate end; closeOldSessions() closes it and
+ * the Revive button is the way back.
+ */
+async function recoverLostFollowUps(snap) {
+  const rows = db.prepare(`SELECT * FROM runs WHERE status = 'done' AND followup_since IS NOT NULL
+                           AND tmux_session IS NOT NULL AND tmux_closed_at IS NULL
+                           AND session_alive_at IS NOT NULL AND COALESCE(resume_pending, 0) = 0
+                           AND finish_state IS NULL`).all()
+  if (!rows.length) return
+  const names = new Set(snap.sessions.map(s => s.name))
+  const lost = rows.filter(run => !names.has(run.tmux_session))
+  if (!lost.length) return
+  const serverStart = await tmuxServerStartMs()
+  if (serverStart === undefined) return
+  const { resumeRun } = await import('./runner.mjs')
+  for (const run of lost) {
+    if (serverStart !== null && !(serverStart > parseDbUtc(run.session_alive_at))) continue
+    if (await sessionGone(run.tmux_session) !== true) continue
+    let r
+    try { r = await resumeRun(run.id, { reason: 'session_lost' }) } catch (e) { r = { ok: false, error: e.message } }
+    if (r.ok || r.retry) noteResume(run.id, { ...r, reason: 'session_lost' })
+    else addEvent(run.id, 'resume_refused', { error: r.error })
+  }
+}
+
+/**
  * A resume that happened somewhere else belongs in this pass's one message too.
  * `reports.mjs` resumes a run whose PANE died without its session going
  * (paneNotTheAgent) — the shape a restart usually has — and before this it was
@@ -1406,8 +1468,39 @@ async function retryPendingResumes() {
   const stuck = db.prepare(`SELECT id FROM runs WHERE status = 'done'
                             AND resume_pending = 1 AND tmux_session IS NULL`).all()
   if (stuck.length) {
-    const { reviveFailed, resumeLaunchInFlight } = await import('./runner.mjs')
-    for (const row of stuck) if (!resumeLaunchInFlight(row.id)) reviveFailed(row.id, 'the revive was interrupted before its session started')
+    const { reviveFailed, resumeLaunchInFlight, resumeMarker, patchResumeMarker, launchRun } = await import('./runner.mjs')
+    for (const row of stuck) {
+      if (resumeLaunchInFlight(row.id)) continue
+      // A lost follow-up (recoverLostFollowUps) is not a click to take back: it
+      // waits for the budget gate or for a launch that could not be tried, and
+      // is launched again — capped by RESUME_MAX inside launchRun().
+      const marker = resumeMarker(row.id)
+      if (marker?.keep_status && marker.reason === 'session_lost') {
+        const run = getRun(row.id)
+        const { budgetGate } = await import('./scheduler.mjs')
+        let gate = null
+        try { gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null) } catch { gate = null }
+        // Behind the gate (again — a relaunch that could not be tried may meet
+        // it a second time): note when this wait began, once.
+        if (gate) { if (!marker.deferred_at) patchResumeMarker(row.id, { deferred_at: new Date().toISOString() }); continue }
+        // The wait behind the gate is time nothing ran: off the follow-up's
+        // clock, as resumeRun() took the downtime off it.
+        const waitedSec = Math.max(0, Math.round((Date.now() - (Date.parse(marker.deferred_at ?? '') || Date.now())) / 1000))
+        if (waitedSec) {
+          db.prepare(`UPDATE runs SET followup_since=datetime(followup_since, '+' || ? || ' seconds')
+                      WHERE id=? AND followup_since IS NOT NULL`).run(waitedSec, row.id)
+        }
+        // Taken off once: a launch that could not be tried is retried next
+        // pass, and must not take the same wait off a second time.
+        patchResumeMarker(row.id, { deferred_at: null })
+        try {
+          const r = await launchRun(row.id)
+          noteResume(row.id, { ...r, reason: 'session_lost' })
+        } catch (e) { console.error(`[watcher] resume ${row.id}:`, e.message) }
+        continue
+      }
+      reviveFailed(row.id, 'the revive was interrupted before its session started')
+    }
   }
   const rows = db.prepare(`SELECT id FROM runs WHERE status IN ('running','waiting_help')
                            AND resume_pending = 1 AND tmux_session IS NULL`).all()

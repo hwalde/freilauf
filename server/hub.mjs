@@ -20,7 +20,7 @@ await loadExternalPlugins()
 const { route } = await import('./web.mjs')
 const { startTerminalServer } = await import('./terminal.mjs')
 const { startScheduler, stopScheduler, tick: schedulerTick } = await import('./scheduler.mjs')
-const { startWatcher, stopWatcher, closeOrphanedRuns, tick: watcherTick } = await import('./watcher.mjs')
+const { startWatcher, stopWatcher, closeOrphanedRuns, tick: watcherTick, trackLiveSessions } = await import('./watcher.mjs')
 const { startIntegrator, stopIntegrator } = await import('./integrate.mjs')
 const { getSetting } = await import('./db.mjs')
 const { seedIfEmpty } = await import('./coding-agents.mjs')
@@ -107,11 +107,20 @@ server.listen(PORT, HOST, () => {
   startHubSocket().catch(e => console.log(`[freilauf] report socket: ${e.message}`))
 })
 
+// Graceful shutdown: the clocks stop first, then the record of which sessions
+// are active is brought up to date (a reboot takes them right after us, and the
+// next start resumes from that record), then the server closes. Bounded by the
+// same 2 s as before — a tmux that does not answer must not hold a stop up.
+let stopping = false
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
+    if (stopping) return
+    stopping = true
     stopScheduler(); stopWatcher(); stopIntegrator(); stopHubSocket()
-    server.close(() => process.exit(0))
-    server.closeAllConnections()
     setTimeout(() => process.exit(0), 2000).unref()
+    trackLiveSessions().catch(() => {}).finally(() => {
+      server.close(() => process.exit(0))
+      server.closeAllConnections()
+    })
   })
 }

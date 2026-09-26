@@ -360,7 +360,12 @@ reboot** ends every tmux session; the hub then **resumes** every run that was
 still working, in a new session (claude, cursor and opencode continue their
 conversation, hermes too; where no conversation can be continued a fresh
 agent takes over and is handed the whole record), and catches up the cron and weekly slots the downtime
-swallowed (Settings → "Catch up missed schedule slots", default 6 hours).
+swallowed (Settings → "Catch up missed schedule slots", default 6 hours). The
+hub keeps a record of which sessions were alive (every watcher pass and its own
+shutdown write it), so a finished run whose follow-up was open in a lost
+session comes back as that follow-up too. The time the machine was off does
+not count against a run's expected duration: its clock is moved on by the
+downtime, measured from the last moment the session was seen alive.
 
 The same holds for the other shape a restart has, and it is the more common
 one: where a session **survives** but the agent's process inside it is killed

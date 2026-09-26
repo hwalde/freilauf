@@ -306,6 +306,13 @@ addColumn('runs', 'telegram_on', 'INTEGER NOT NULL DEFAULT 1')
 // not restarted for ever.
 addColumn('runs', 'resume_pending', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'resume_attempts', 'INTEGER NOT NULL DEFAULT 0')
+// When a watcher pass (or the hub's shutdown) last SAW this run's session
+// standing with a live pane (watcher.mjs, trackLiveSessions). It is the record
+// of which sessions were active, read after a restart to know which to resume
+// (recoverLostSessions), and the moment a downtime began, so the time the
+// machine was off is taken out of the run's duration (runner.mjs, resumeRun).
+// NULL again with every new session: only a session seen alive counts.
+addColumn('runs', 'session_alive_at', 'TEXT')
 // Incidents: the delayed notification (notify_at = when the grace period ends and the
 // alarm becomes due) and whether it was EVER announced (gemeldet_am) — the latter
 // decides whether an auto-resolve also announces the recovery (server/incidents.mjs).

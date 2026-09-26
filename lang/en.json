@@ -228,6 +228,7 @@
   "run.events": "Events",
   "run.none": "none",
   "run.resuming": "session lost — resuming in a new one",
+  "run.resuming_gate": "session lost — resuming once the budget gate opens ({reason})",
   "run.log": "Log (pipe-pane)",
   "run.no_log": "No log.",
   "run.running": "running",
