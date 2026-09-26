@@ -90,11 +90,16 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   `reconcileClosedSession()` and still aborts. A run in the finish gate is not
   resumed (its agent vanishing is `agent_gone`).
 - Every pass (and the hub's shutdown) records which run sessions stand with a
-  live pane (`runs.session_alive_at`); a `done` run whose follow-up
-  (`followup_since`) was in such a session is resumed as a follow-up when the
-  session is gone, a finished run that only left its screen standing is not
-  (the Revive button brings it back). The record is cleared with every new
+  live pane (`runs.session_alive_at`); the record is cleared with every new
   session, so only a session a pass has seen alive counts.
+- A `done` run whose follow-up (`followup_since`) was in such a session is
+  resumed as a follow-up only when the tmux SERVER was lost after the last
+  sighting (`#{start_time}` younger, or no server); a single session killed
+  while the server stands (memory cleanup, a human) stays a deliberate end,
+  and a finished run that only left its screen standing is never brought back
+  by itself — both are the Revive button's. Behind a closed budget gate or a
+  launch that could not be tried the follow-up stays `resume_pending` and is
+  launched again, capped by `RESUME_MAX`.
 - An empty tmux server (every reboot, `exit-empty` off) is an answer, not
   silence: `sessionGone()` confirms `no current target` with the listing.
 - A pane killed by SIGHUP, SIGKILL or SIGTERM is resumed too (`signalDeath()`

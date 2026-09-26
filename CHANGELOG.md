@@ -33,11 +33,12 @@ a day on which nothing was released.
 ### Added
 
 - **The hub keeps a record of which sessions are active** — every watcher
-  pass and the hub's own shutdown write it — and after a restart it resumes
-  exactly those that were working: running runs as before, and now also a
-  finished run whose follow-up was being worked on when the session was lost.
-  A finished run that only left its screen standing is not brought back by
-  itself; its Resume button does that.
+  pass and the hub's own shutdown write it. When a reboot or a crashed tmux
+  server takes them, it resumes running runs as before and now also a finished
+  run whose follow-up was still open in its session (behind a full quota it
+  waits and comes back once the gate opens). A session ended on purpose — the
+  memory cleanup, by hand — and a finished run that only left its screen
+  standing are not brought back by themselves; the Resume button does that.
 
 ### Changed
 

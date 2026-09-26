@@ -7018,6 +7018,8 @@ try {
     process.env.TMUX_TMPDIR = tdir
     const { spawn } = await import('node:child_process')
     const server = spawn('tmux', ['-f', '/dev/null', '-D'], { stdio: 'ignore', detached: true })
+    let spawnError = null
+    server.on('error', (e) => { spawnError = e })
     try {
       const { sh } = await import('../server/util.mjs')
       let up = false
@@ -7025,7 +7027,7 @@ try {
         up = (await sh('tmux', ['list-sessions'])).ok
         if (!up) await new Promise(r => setTimeout(r, 100))
       }
-      isTrue(up, 'the private server answers')
+      isTrue(up, `the private server answers${spawnError ? ` (tmux could not be started: ${spawnError.message})` : ''}`)
       const raw = await sh('tmux', ['has-session', '-t', '=fl-einzel-gone'])
       isTrue(se.emptyServerAnswer(raw), `has-session on the empty server says so (${raw.stderr.trim()})`)
       equal(await se.sessionGone('fl-einzel-gone'), true, 'confirmed by the listing: gone')

@@ -20,7 +20,7 @@ import { checkHit, checkLlmActive } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
-import { reconcileClosedSession, tmuxSnapshot, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
+import { reconcileClosedSession, tmuxSnapshot, tmuxServerStartMs, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
   sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs, paneTarget } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
@@ -547,7 +547,9 @@ async function watchFollowUps() {
     }
     // A follow-up that HAS reported is in the gate or being merged — its
     // deadline is the finish gate's (`finish_started_at`), not this clock.
-    if (run.finish_state || run.followup_open) continue
+    // One on its way back (a lost session, waiting on the budget gate) has no
+    // agent working either.
+    if (run.finish_state || run.followup_open || run.resume_pending) continue
     // The agent answered and sits at its prompt (its own hook said so): the
     // commission is open because nobody reported, but nothing is being worked
     // on, and "follow-up exceeds the expected duration" would alarm about a
@@ -1412,6 +1414,12 @@ export async function trackLiveSessions() {
  * this is the case its `status IN ('running','waiting_help')` never sees.
  * Two answers before it acts, as confirmGone() does: the listing lacks the
  * name AND has-session says gone.
+ *
+ * Only a lost SERVER counts: the tmux server was started after the session
+ * was last seen alive (a reboot, a crashed server), or there is none. A
+ * session killed on its own while the server kept running — the memory
+ * cleanup, a human — is a deliberate end; closeOldSessions() closes it and
+ * the Revive button is the way back.
  */
 async function recoverLostFollowUps(snap) {
   const rows = db.prepare(`SELECT * FROM runs WHERE status = 'done' AND followup_since IS NOT NULL
@@ -1420,9 +1428,13 @@ async function recoverLostFollowUps(snap) {
                            AND finish_state IS NULL`).all()
   if (!rows.length) return
   const names = new Set(snap.sessions.map(s => s.name))
+  const lost = rows.filter(run => !names.has(run.tmux_session))
+  if (!lost.length) return
+  const serverStart = await tmuxServerStartMs()
+  if (serverStart === undefined) return
   const { resumeRun } = await import('./runner.mjs')
-  for (const run of rows) {
-    if (names.has(run.tmux_session)) continue
+  for (const run of lost) {
+    if (serverStart !== null && !(serverStart > parseDbUtc(run.session_alive_at))) continue
     if (await sessionGone(run.tmux_session) !== true) continue
     let r
     try { r = await resumeRun(run.id, { reason: 'session_lost' }) } catch (e) { r = { ok: false, error: e.message } }
@@ -1456,8 +1468,27 @@ async function retryPendingResumes() {
   const stuck = db.prepare(`SELECT id FROM runs WHERE status = 'done'
                             AND resume_pending = 1 AND tmux_session IS NULL`).all()
   if (stuck.length) {
-    const { reviveFailed, resumeLaunchInFlight } = await import('./runner.mjs')
-    for (const row of stuck) if (!resumeLaunchInFlight(row.id)) reviveFailed(row.id, 'the revive was interrupted before its session started')
+    const { reviveFailed, resumeLaunchInFlight, resumeMarker, launchRun } = await import('./runner.mjs')
+    for (const row of stuck) {
+      if (resumeLaunchInFlight(row.id)) continue
+      // A lost follow-up (recoverLostFollowUps) is not a click to take back: it
+      // waits for the budget gate or for a launch that could not be tried, and
+      // is launched again — capped by RESUME_MAX inside launchRun().
+      const marker = resumeMarker(row.id)
+      if (marker?.keep_status && marker.reason === 'session_lost') {
+        const run = getRun(row.id)
+        const { budgetGate } = await import('./scheduler.mjs')
+        let gate = null
+        try { gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null) } catch { gate = null }
+        if (gate) continue
+        try {
+          const r = await launchRun(row.id)
+          noteResume(row.id, { ...r, reason: 'session_lost' })
+        } catch (e) { console.error(`[watcher] resume ${row.id}:`, e.message) }
+        continue
+      }
+      reviveFailed(row.id, 'the revive was interrupted before its session started')
+    }
   }
   const rows = db.prepare(`SELECT id FROM runs WHERE status IN ('running','waiting_help')
                            AND resume_pending = 1 AND tmux_session IS NULL`).all()

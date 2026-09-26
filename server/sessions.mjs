@@ -416,6 +416,22 @@ export async function sessionGone(name) {
 }
 
 /**
+ * When the tmux server that answers now was started, in ms since the epoch —
+ * `null` when there is no server, `undefined` when tmux gave no answer.
+ * `display -p` needs no target for a server-wide format, and answers on an
+ * EMPTY server too (measured, tmux 3.4). It is how a lost session is told
+ * apart from a lost SERVER: a server younger than the last sighting of a
+ * session means the machine or the tmux server went away in between.
+ */
+export async function tmuxServerStartMs() {
+  const r = await sh('tmux', ['display', '-p', '#{start_time}'])
+  const verdict = tmuxVerdict(r)
+  if (verdict === 'no_server') return null
+  const raw = verdict === 'ok' ? r.stdout.trim() : ''
+  return raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) * 1000 : undefined
+}
+
+/**
  * Pure: is this `has-session` answer the one an EMPTY server gives? Separate
  * from sessionGoneFrom(), because it is not proof by itself — sessionGone()
  * confirms it with the listing.

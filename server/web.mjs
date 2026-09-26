@@ -905,7 +905,7 @@ async function api(req, res, url) {
                 last_activity_at=datetime('now'), ended_at=NULL, report_md=NULL, archived_at=NULL,
                 goal_sent_at=NULL, followups=0, followup_md=NULL, followup_open=0, followup_since=NULL,
                 agent_state=NULL, agent_state_at=NULL,
-                tmux_closed_at=NULL, exit_code=NULL, resume_pending=0, resume_attempts=0 WHERE id=?`).run(m[1])
+                tmux_closed_at=NULL, exit_code=NULL, resume_pending=0, resume_attempts=0, session_alive_at=NULL WHERE id=?`).run(m[1])
     // …and so does the integration: everything the finish gate and the
     // integrator wrote about the previous attempt is gone.
     resetIntegration(m[1])
