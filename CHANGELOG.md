@@ -16,13 +16,22 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-26
+
+### Changed
+
+- **The global code-review default has its own page**, Settings → Code
+  review, instead of a block at the bottom of Settings → Merge. The settings
+  page shows it with a one-line summary ("Global default: off" / "on (…)"),
+  and the repo form and the Reviews page link to it.
+
 ## 2026-09-25
 
 ### Added
 
 - **Code review, optional.** Finished work can wait for a reviewer instead of
   landing on the base branch directly. It is set in three places — Settings →
-  Code review (the default for every repo), the repo form (overrides the default,
+  Merge (the default for every repo), the repo form (overrides the default,
   and names the platform) and the agent / single-run form ("repo default",
   "with", "without") — and it only applies to repos where Freilauf
   integrates. The finish gate stays as it was (committed, mergeable); then the

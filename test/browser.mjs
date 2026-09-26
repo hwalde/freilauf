@@ -939,6 +939,22 @@ try {
     await p.close()
   })
 
+  await check('the global code-review default is saved from its own settings page', async () => {
+    const p = await neueSeite('/settings')
+    await p.click('a[href="/settings/review"]')
+    await p.waitForURL('**/settings/review')
+    await p.selectOption('select[name=review_default]', 'on')
+    await Promise.all([p.waitForURL('**/settings/review'), p.click('form[action="/settings/review"] button')])
+    equal(await p.$eval('select[name=review_default]', s => s.value), 'on', 'the choice survives the save')
+    await p.goto(`${sk.base}/settings`)
+    isTrue((await p.textContent('body')).includes('Global default: on'), 'and the settings page says so')
+    await p.goto(`${sk.base}/settings/review`)
+    await p.selectOption('select[name=review_default]', 'off')
+    await Promise.all([p.waitForURL('**/settings/review'), p.click('form[action="/settings/review"] button')])
+    sauber(p)
+    await p.close()
+  })
+
   group('A5b — the branch pattern only matters where a branch is wanted')
 
   await check('the pattern field follows the mode, scoped to its own form', async () => {

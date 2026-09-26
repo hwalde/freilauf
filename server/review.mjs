@@ -637,14 +637,14 @@ export function reviewSettingsSummary() {
 /** Settings → Code review: the global default. */
 export function reviewSettingsFields() {
   const g = globalReview()
-  return `<fieldset class="schedule"><legend>${e(t('review.title'))}</legend>
-    <p class="dim">${e(t('review.settings_intro'))}</p>
+  // Its own page carries the title; the fields need no second one.
+  return `<p class="dim">${e(t('review.settings_intro'))}</p>
     <label>${e(t('review.default'))} <select name="review_default">
       <option value="off" ${g.on ? '' : 'selected'}>${e(t('review.off'))}</option>
       <option value="on" ${g.on ? 'selected' : ''}>${e(t('review.on'))}</option></select></label>
     <label>${e(t('review.platform'))} <select name="review_platform">${platformOptions(g.platform)}</select>
       <span class="dim">${e(t('review.platform_hint'))}</span></label>
-  </fieldset>`
+  `
 }
 
 export function reviewSettingsFromForm(b) {
