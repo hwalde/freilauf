@@ -3,7 +3,7 @@
 //
 // Optional, like the sandbox, and it only exists where the hub integrates
 // (`repos.merge_mode='hub'`). Whether a run is reviewed is decided on three
-// levels — Settings → Merge (global), the repo, the agent / single run — and
+// levels — Settings → Code review (global), the repo, the agent / single run — and
 // frozen into `runs.review_platform` at launch, so the prompt the agent reads
 // and what happens at its end cannot disagree.
 //
@@ -69,7 +69,7 @@ export function platformLabel(id) {
 
 const tri = (v) => (REVIEW_TRISTATE.includes(v) ? v : 'inherit')
 
-/** Settings → Merge: is review on by default, and on which platform. */
+/** Settings → Code review: is review on by default, and on which platform. */
 export function globalReview() {
   return {
     on: getSetting('review_default') === 'on',
@@ -606,7 +606,7 @@ export function reviewsPageBody() {
       <td>${e(t(`merge.${r.merge_status}`) === `merge.${r.merge_status}` ? r.merge_status : t(`merge.${r.merge_status}`))}</td>
       <td class="dim">${e(r.ended_at ? fmtDbUtc(r.ended_at) : '')}</td></tr>`).join('')}</tbody></table>`
   return `<h2>${e(t('review.page_title'))}</h2>
-  <p class="dim">${e(t('review.page_intro'))} <a href="/settings/merge">${e(t('merge.settings_title'))}</a></p>
+  <p class="dim">${e(t('review.page_intro'))} <a href="/settings/review">${e(t('review.global_link'))}</a></p>
   ${rows.length ? table(rows) : `<p class="dim">${e(t('review.none_open'))}</p>`}
   ${done.length ? `<h3>${e(t('review.recent'))}</h3>${table(done)}` : ''}`
 }
@@ -628,7 +628,13 @@ function platformOptions(selected, { inherit = null } = {}) {
   return opts.join('')
 }
 
-/** Settings → Merge: the global default. */
+/** One line for the settings page: what the global default is. */
+export function reviewSettingsSummary() {
+  const g = globalReview()
+  return g.on ? t('review.summary_on', { platform: platformLabel(g.platform) }) : t('review.summary_off')
+}
+
+/** Settings → Code review: the global default. */
 export function reviewSettingsFields() {
   const g = globalReview()
   return `<fieldset class="schedule"><legend>${e(t('review.title'))}</legend>
@@ -659,7 +665,7 @@ export function reviewRepoFields(r = {}) {
       <option value="inherit" ${mode === 'inherit' ? 'selected' : ''}>${e(inheritWord)}</option>
       <option value="on" ${mode === 'on' ? 'selected' : ''}>${e(t('review.on'))}</option>
       <option value="off" ${mode === 'off' ? 'selected' : ''}>${e(t('review.off'))}</option></select>
-      <span class="dim">${e(t('review.repo_mode_hint'))}</span></label>
+      <span class="dim">${e(t('review.repo_mode_hint'))} <a href="/settings/review">${e(t('review.global_link'))}</a></span></label>
     <label>${e(t('review.platform'))} <select name="review_platform">${platformOptions(r.review_platform ?? '', { inherit: t('review.platform_inherit', { platform: platformLabel(g.platform) }) })}</select></label>
     <label>${e(t('review.project'))} <input name="review_project" value="${e(r.review_project ?? '')}" placeholder="acme/app">
       <span class="dim">${e(t('review.project_hint'))}</span></label>`

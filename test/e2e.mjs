@@ -5998,13 +5998,18 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
   const originBranch = async (ref) => (await g(ORIGIN, 'rev-parse', '--verify', '-q', `refs/heads/${ref}`)).stdout.trim()
   const paneOf = async (runId) => (await sh('tmux', ['capture-pane', '-p', '-J', '-S', '-200', '-t', `=${lauf(runId).tmux_session}:`])).stdout
 
-  await check('the three levels are forms: Settings → Merge, the repo, the run', async () => {
-    const r = await postForm('/settings/merge', { harness: '', merge_resolver_prompt: '', review_default: 'on', review_platform: 'internal' }, { asBrowser: true })
-    equal(r.status, 303, 'Settings → Merge saved')
+  await check('the three levels are forms: Settings → Code review, the repo, the run', async () => {
+    const settings = await (await fetchPath('/settings')).text()
+    contains(settings, 'href="/settings/review"', 'the settings page leads to the global default')
+    contains(settings, 'Global default: off', 'and says what it is')
+    const r = await postForm('/settings/review', { review_default: 'on', review_platform: 'internal' }, { asBrowser: true })
+    equal(r.status, 303, 'Settings → Code review saved')
     equal(db.prepare(`SELECT value FROM settings WHERE key='review_default'`).get()?.value, 'on', 'global default stored')
-    const merge = await (await fetchPath('/settings/merge')).text()
-    contains(merge, 'name="review_default"', 'the global field is on the page')
-    await postForm('/settings/merge', { harness: '', merge_resolver_prompt: '', review_default: 'off', review_platform: 'internal' }, { asBrowser: true })
+    const page = await (await fetchPath('/settings/review')).text()
+    contains(page, 'name="review_default"', 'the global field is on its page')
+    contains(await (await fetchPath('/settings')).text(), 'Global default: on (Freilauf (internal))', 'the summary follows the setting')
+    isFalse((await (await fetchPath('/settings/merge')).text()).includes('name="review_default"'), 'and it lives in one place only')
+    await postForm('/settings/review', { review_default: 'off', review_platform: 'internal' }, { asBrowser: true })
     const row = await repoMerge({ review_mode: 'on', review_platform: 'internal', review_project: '' })
     equal(row.review_mode, 'on', 'the repo overrides the global "off"')
     equal(row.review_platform, 'internal', 'with its platform')

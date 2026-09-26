@@ -39,7 +39,7 @@ import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
 import { resumeCommand } from './integrate.mjs'
 import { reviewCard, reviewLine, reviewInUse, openReviews, reviewsPageBody, reviewRepoFields, reviewRepoFromForm,
-  reviewSettingsFields, reviewSettingsFromForm } from './review.mjs'
+  reviewSettingsFields, reviewSettingsFromForm, reviewSettingsSummary } from './review.mjs'
 import { listSessionsSnapshot, sessionMemory, publishSessionMemory, sessionKeepHours, currentKeepMs, paneAlive, archiveSessionKeepHours } from './sessions.mjs'
 import { cleanupSettings, cleanupConfigured, cleanupRunInFlight } from './cleanup.mjs'
 import { attachmentSummary, flowSection, flowAttachFields, mergeFlowsBlock, mergeFlowsHint } from './flows/attach.mjs'
@@ -2710,6 +2710,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.favorites_hint'))}</span></p>
   <p><a class="btn" href="/settings/merge">${e(t('merge.settings_title'))}</a>
      <span class="dim">${e(t('settings.merge_hint', { setup: mergeSettingsSummary() }))}</span></p>
+  <p><a class="btn" href="/settings/review">${e(t('review.title'))}</a>
+     <span class="dim">${e(t('settings.review_hint', { setup: reviewSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/cleanup">${e(t('cleanup.settings_title'))}</a>
      <span class="dim">${e(t('settings.cleanup_hint', { setup: cleanupSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/skills">${e(t('flskills.title'))}</a>
@@ -2911,7 +2913,6 @@ export async function pageMergeSettings(req, res, url) {
     <label>${e(t('merge.resolver_prompt'))}
       <textarea name="merge_resolver_prompt" rows="8">${e(s.merge_resolver_prompt ?? '')}</textarea>
       <span class="dim">${e(t('merge.resolver_prompt_hint'))}</span></label>
-    ${reviewSettingsFields()}
     <div class="btn-row"><button>${e(t('settings.save'))}</button>
       <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
   </form>`
@@ -2940,13 +2941,30 @@ export async function mergeSettingsSave(req, res, url, formBody) {
     }
   }
   setSetting('merge_resolver_prompt', String(b.merge_resolver_prompt ?? ''))
-  // Only when the form carried the block — a body without it changes nothing.
-  if (b.review_default !== undefined) {
-    const rv = reviewSettingsFromForm(b)
-    setSetting('review_default', rv.review_default)
-    setSetting('review_platform', rv.review_platform)
-  }
   redirect(res, '/settings/merge')
+}
+
+/**
+ * Settings → Code review: the GLOBAL default every repo inherits unless it
+ * says otherwise (and every run inherits its repo's answer). Its own page like
+ * Merge and Cleanup, reached from the settings page with a one-line summary.
+ */
+export async function pageReviewSettings(req, res) {
+  const body = `<h2>${e(t('review.title'))}</h2>
+  <form method="post" action="/settings/review" class="settings form-grid">
+    ${reviewSettingsFields()}
+    <div class="btn-row"><button>${e(t('settings.save'))}</button>
+      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
+  </form>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('review.title'), '/settings', body))
+}
+
+export async function reviewSettingsSave(req, res, url, formBody) {
+  const rv = reviewSettingsFromForm(await formBody())
+  setSetting('review_default', rv.review_default)
+  setSetting('review_platform', rv.review_platform)
+  redirect(res, '/settings/review')
 }
 
 /** The Reviews page: every open code review, and the latest decided ones. */

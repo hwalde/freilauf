@@ -1772,5 +1772,9 @@
   "review.col_platform": "平台",
   "review.col_state": "状态",
   "api.archive_review_open": "此运行正在等待未完成的代码评审——请先处理评审；修改请求会发送到它的会话中。",
-  "review.ev_approval_dropped": "批准已撤回——已批准的提交无法再合并"
+  "review.ev_approval_dropped": "批准已撤回——已批准的提交无法再合并",
+  "settings.review_hint": "可选：完成的工作在合并前等待评审。全局默认：{setup}。仓库和单个运行/代理可以覆盖它。",
+  "review.summary_on": "开启（{platform}）",
+  "review.summary_off": "关闭",
+  "review.global_link": "全局默认"
 }

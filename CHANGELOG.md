@@ -22,7 +22,7 @@ a day on which nothing was released.
 
 - **Code review, optional.** Finished work can wait for a reviewer instead of
   landing on the base branch directly. It is set in three places — Settings →
-  Merge (the default for every repo), the repo form (overrides the default,
+  Code review (the default for every repo), the repo form (overrides the default,
   and names the platform) and the agent / single-run form ("repo default",
   "with", "without") — and it only applies to repos where Freilauf
   integrates. The finish gate stays as it was (committed, mergeable); then the

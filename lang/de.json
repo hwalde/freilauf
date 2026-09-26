@@ -1772,5 +1772,9 @@
   "review.col_platform": "Plattform",
   "review.col_state": "Stand",
   "api.archive_review_open": "Dieser Run wartet in einem offenen Code-Review — erst das Review entscheiden; in seine Session gehen die Änderungsanforderungen.",
-  "review.ev_approval_dropped": "Freigabe zurückgezogen — der freigegebene Commit merged nicht mehr"
+  "review.ev_approval_dropped": "Freigabe zurückgezogen — der freigegebene Commit merged nicht mehr",
+  "settings.review_hint": "Optional: Fertige Arbeit wartet vor dem Merge auf eine Freigabe. Globaler Standard: {setup}. Repos und einzelne Runs/Agenten können ihn überschreiben.",
+  "review.summary_on": "an ({platform})",
+  "review.summary_off": "aus",
+  "review.global_link": "Globaler Standard"
 }

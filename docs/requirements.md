@@ -394,7 +394,7 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - Optional and off by default; it only exists under `merge_mode='hub'`, and
   a repo or run without it behaves byte for byte as before.
 - Three levels, nearest wins: run/agent `review` → repo `review_mode` →
-  Settings → Merge `review_default`; the platform comes from the repo, else
+  Settings → Code review `review_default`; the platform comes from the repo, else
   the global setting. `decideReview()` is the one decision, and `launchRun()`
   freezes it into `runs.review_platform` (`NULL` = legacy, not reviewed), so
   the prompt sentence and the end of the run agree.
