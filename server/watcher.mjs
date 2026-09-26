@@ -1480,7 +1480,9 @@ async function retryPendingResumes() {
         const { budgetGate } = await import('./scheduler.mjs')
         let gate = null
         try { gate = await budgetGate(run.harness, run.model ?? null, run.provider ?? null) } catch { gate = null }
-        if (gate) continue
+        // Behind the gate (again — a relaunch that could not be tried may meet
+        // it a second time): note when this wait began, once.
+        if (gate) { if (!marker.deferred_at) patchResumeMarker(row.id, { deferred_at: new Date().toISOString() }); continue }
         // The wait behind the gate is time nothing ran: off the follow-up's
         // clock, as resumeRun() took the downtime off it.
         const waitedSec = Math.max(0, Math.round((Date.now() - (Date.parse(marker.deferred_at ?? '') || Date.now())) / 1000))

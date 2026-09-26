@@ -2498,6 +2498,10 @@ try {
         const m = JSON.parse(readFileSync(markerPath, 'utf8'))
         isTrue(!!m.deferred_at, 'the marker knows when the wait began')
         writeFileSync(markerPath, JSON.stringify({ ...m, deferred_at: new Date(Date.now() - 2 * 3600_000).toISOString() }))
+        // …and the commission is as old as that: without the shift it would be
+        // far past its 45 minutes the moment the agent is back.
+        db.prepare(`UPDATE runs SET followup_since=datetime(followup_since, '-120 minutes') WHERE id=?`).run(f)
+        r = lauf(f)
         const sinceBefore = Date.parse(r.followup_since.replace(' ', 'T') + 'Z')
         write(0)
         await watcherTick()
