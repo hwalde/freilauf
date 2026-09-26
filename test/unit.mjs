@@ -6910,6 +6910,15 @@ try {
     equal(se.finishedAtMs(tot, { status: 'done', ended_at: '1970-01-01 00:00:03' }), 3000, 'the earlier one wins')
     equal(se.finishedAtMs({ dead: true, deadMs: null, createdMs: 7000 }, null), 7000,
       'a dead pane without a timestamp still counts as finished')
+    // A revive keeps the old `ended_at` (it describes the attempt); the session
+    // brought back must be measured from the revive, or retention closes it at
+    // once — which is how the session was gone in the first place.
+    const revived = { status: 'done', ended_at: '2026-08-01 10:00:00', revived_at: '2026-09-25 12:00:00' }
+    equal(se.finishedAtMs(lebt, revived), Date.parse('2026-09-25T12:00:00Z'), 'a revived session counts from its revive')
+    isFalse(se.shouldAutoClose(lebt, revived, 3_600_000, Date.parse('2026-09-25T12:30:00Z')),
+      'and survives the pass after it, however old the run\'s end')
+    isTrue(se.shouldAutoClose(lebt, revived, 3_600_000, Date.parse('2026-09-25T13:30:00Z')),
+      'until the keep time has passed since the revive')
     // An open follow-up commission is a conversation in progress, and
     // `ended_at` there is the FIRST attempt's end — a clock that started
     // before the conversation did. Measured on run 49a26807: reported done
@@ -8519,6 +8528,29 @@ try {
     const j = JSON.parse(HP.cursor.hookFiles({ flReport: '/bin/fl-report' })[0].content)
     equal(j.hooks.beforeSubmitPrompt[0].command, '/bin/fl-report _working prompt', 'a typed follow-up starts a turn, as a prompt')
     equal(j.hooks.stop[0].command, '/bin/fl-report _turn_end', 'and the stop hook stays the turn end')
+  })
+
+  await check('fl-start --no-prompt: the resume form, and not one word sent to the agent', () => {
+    // The operator's plain "Revive agent": whatever text went along would set
+    // the agent working unasked. Fake binaries, so the check needs no CLI.
+    const dir = join(sandbox, 'noprompt'); mkdirSync(join(dir, 'bin'), { recursive: true })
+    for (const b of ['claude', 'opencode', 'hermes', 'cursor-agent']) {
+      writeFileSync(join(dir, 'bin', b), '#!/bin/sh\n'); chmodSync(join(dir, 'bin', b), 0o755)
+    }
+    const script = new URL('../bin/fl-start', import.meta.url).pathname
+    const env = { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir }
+    const line = (h, extra) => execFileSync('bash', [script, '--dry-run', '-H', h, '--resume', 'rid-1', ...extra, 'x', dir],
+      { env, encoding: 'utf8' }).split('\n').find(l => l.startsWith('Command:')) ?? ''
+    const want = { claude: "--resume 'rid-1'", opencode: "--session 'rid-1'", hermes: "--resume 'rid-1'", cursor: "--resume 'rid-1'" }
+    for (const [h, form] of Object.entries(want)) {
+      const quiet = line(h, ['--no-prompt'])
+      contains(quiet, form, `${h}: its own resume form`)
+      isFalse(/prompt>|FL_PROMPT| -q | -- /.test(quiet), `${h}: and no prompt (${quiet.slice(9)})`)
+    }
+    contains(line('claude', ['-p', 'go on']), '"<prompt>"', 'with -p the text still goes along')
+    let refused = false
+    try { execFileSync('bash', [script, '--dry-run', '-H', 'claude', '--no-prompt', 'x', dir], { env, stdio: 'pipe' }) } catch { refused = true }
+    isTrue(refused, '--no-prompt without --resume is refused: there would be nothing to bring back')
   })
 
   await check('hermes: the launch line consents to the hooks, the wrapper maps the events', async () => {

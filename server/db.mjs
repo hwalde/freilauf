@@ -273,6 +273,11 @@ addColumn('runs', 'followup_open', 'INTEGER NOT NULL DEFAULT 0')  // 1 while a f
 // and the watcher holds the run to its expected duration from this moment
 // (watcher.mjs watchFollowUps) — a follow-up that never reports is captured.
 addColumn('runs', 'followup_since', 'TEXT')
+// When the operator last revived this run's agent (runner.mjs, an operator
+// resume). A revive keeps `ended_at` — it is the truth about the attempt — so
+// session retention counts from whichever is later (sessions.mjs,
+// finishedAtMs); otherwise a revived session would be closed on the next pass.
+addColumn('runs', 'revived_at', 'TEXT')
 // What the coding agent's own hooks last said about its attention: 'working'
 // (processing input) or 'waiting' (its turn ended, it sits at its prompt
 // waiting for a human). NULL until the first hook of the session fires, and

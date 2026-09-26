@@ -392,6 +392,7 @@
   "sessions.select_all": "选中所有显示的会话",
   "sessions.end": "结束",
   "sessions.revive": "唤醒",
+  "sessions.to_run": "新代理…",
   "sessions.ended_title": "已结束的会话",
   "sessions.ended_hint": "tmux 会话已不存在的运行。“唤醒”会以该运行的全部设置把代理带回新的会话——延续它自己的对话，或由拿到全部记录的新代理接手。",
   "sessions.ended_none": "没有可唤醒的已结束会话。",

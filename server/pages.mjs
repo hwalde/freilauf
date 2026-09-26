@@ -1702,7 +1702,7 @@ export async function pageRun(req, res, url, id) {
           <button class="danger">${e(t('run.end_session'))}</button></form>
         <span class="dim">${e(t('run.end_session_hint'))}</span></div>` : ''}
   </details>
-  ${reviveBlock(run, live)}
+  ${reviveBlock(run, live, { conversation: await conversationBack(run, live) })}
   ${['failed', 'aborted'].includes(run.status) && !run.resolves_run_id
     // A conflict run is never retried: the way back in is "Merge now" on the
     // run it works for, which starts a fresh one with a fresh branch.
@@ -1739,12 +1739,17 @@ export async function pageRun(req, res, url, id) {
  *
  * Both as often as wanted, with every setting of the run, sandbox included.
  */
-export function reviveBlock(run, live) {
+export function reviveBlock(run, live, { conversation = true } = {}) {
   if (!resumable(run, { live })) return ''
   const action = `/api/runs/${e(run.id)}/resume`
+  // No conversation to bring back: the plain button could only be refused, so
+  // the page says why and leaves the way that works.
+  const plain = conversation
+    ? `<div class="btn-row"><form method="post" action="${action}" class="inline"><button>${e(t('run.resume'))}</button></form>
+      <span class="dim">${e(t('run.resume_hint'))}</span></div>`
+    : `<p class="dim">${e(t('run.revive_no_conversation'))}</p>`
   return `<div class="revive card" id="revive">
-    <div class="btn-row"><form method="post" action="${action}" class="inline"><button>${e(t('run.resume'))}</button></form>
-      <span class="dim">${e(t('run.resume_hint'))}</span></div>
+    ${plain}
     <form method="post" action="${action}" class="revive-new">
       <input type="hidden" name="mode" value="fresh">
       <textarea name="text" rows="2" required placeholder="${e(t('run.takeover_ph'))}"></textarea>
@@ -2484,6 +2489,18 @@ export function endedSessionRuns(limit = 20) {
     .filter(run => resumable(run, { live: false }))
 }
 
+/**
+ * Is there a conversation the plain revive could bring back? The same answer
+ * the route gets (runner.mjs, resumeIdFor), asked only for a run the rule
+ * admits — for claude one `existsSync`, for opencode one read of its store.
+ */
+export async function conversationBack(run, live = false) {
+  if (!resumable(run, { live })) return false
+  const { resumable: harnessResumes, resumeIdFor } = await import('./runner.mjs')
+  if (!harnessResumes(run.harness)) return false
+  try { return !!(await resumeIdFor(run)) } catch { return false }
+}
+
 /** The plain revive as one button; the answer lands on the run's page and its terminal. */
 function reviveButton(run) {
   return `<form method="post" action="/api/runs/${e(run.id)}/resume" class="inline"><button>${e(t('sessions.revive'))}</button></form> `
@@ -2506,7 +2523,8 @@ export function endedSessionsTable(runs) {
       <td>${run.tmux_session ? `<code>${e(run.tmux_session)}</code>` : '<span class="dim">–</span>'}
         <div class="dim">${e(harnessLabel(run.harness))}${run.model ? `/${e(run.model)}` : ''}${run.sandbox ? ` · ${e(t('sessions.ended_sandboxed'))}` : ''}</div></td>
       <td>${when(run.tmux_closed_at ?? run.ended_at)}</td>
-      <td>${reviveButton(run)}</td>
+      <td>${run.conversation === false
+        ? `<a class="btn" href="/runs/${e(run.id)}#revive">${e(t('sessions.to_run'))}</a>` : reviveButton(run)}</td>
     </tr>`).join('')}</tbody></table></div>`
 }
 
@@ -2561,7 +2579,7 @@ export async function pageSessions(req, res, url) {
   <p class="dim">${e(t('sessions.hidden_note', { n: runningCount }))}</p>
   <h3>${e(t('sessions.ended_title'))}</h3>
   <p class="dim">${e(t('sessions.ended_hint'))}</p>
-  ${endedSessionsTable(endedSessionRuns())}`
+  ${endedSessionsTable(await Promise.all(endedSessionRuns().map(async r => ({ ...r, conversation: await conversationBack(r) }))))}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     .end(await layout(req, t('sessions.title'), '/sessions', body))
 }

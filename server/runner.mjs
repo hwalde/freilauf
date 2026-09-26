@@ -853,10 +853,10 @@ export const RESUME_PROMPT = `Your session was interrupted: the tmux session it 
 Continue the task from where you were. Check \`git status\` and \`git log\` first so you do not redo work that is already committed, then carry on and finish. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed. If you were waiting for a human's answer when the cut came, ask the question again with \`fl-report help\`. If the interruption cost you something you cannot recover, say so in the report.`
 
 /**
- * The continuation for a session the OPERATOR brings back (`reason: 'operator'`,
- * the Revive button): nothing was interrupted by accident — the session had
- * ended, and a human wants the agent back. `{instruction}` is what they want
- * now, or the sentence that says to finish the task.
+ * The continuation for a conversation the OPERATOR brings back WITH an
+ * instruction (the API's `text`; a flow). The Revive button sends nothing at
+ * all (`fl-start --no-prompt`) — a text here would set the agent working
+ * unasked — so this is only ever the carrier of what a human wrote.
  */
 export const REVIVE_PROMPT = `Your session had ended, and the operator has brought you back: Freilauf resumed your conversation in a new tmux session. The worktree is exactly as you left it — or, where the platform had already removed it after merging your work, recreated at the same path from the base branch.
 
@@ -889,9 +889,6 @@ const HANDOVER_WHY = {
   revived: 'Its session has ended, the operator wants the work to go on, and its conversation cannot be continued.',
   lost: 'Its session was interrupted (a server restart, an update, a lost tmux server), and its conversation cannot be continued.',
 }
-
-/** What a revived run is told to do when the operator gave no instruction. */
-const REVIVE_CONTINUE = 'No new instruction: continue the original task from where you stopped and finish it.'
 
 /**
  * The handover to a FRESH agent — the second way back when no conversation can
@@ -1483,7 +1480,7 @@ export async function launchRun(runId) {
     } else if (rid) {
       resumeArgs = ['--resume', rid]
       text = operator
-        ? fillTemplate(REVIVE_PROMPT, { context, instruction: instruction || REVIVE_CONTINUE,
+        ? fillTemplate(REVIVE_PROMPT, { context, instruction,
           followup: finished ? ' — the run has ended once already, so this report counts as a follow-up report' : '' })
         : fillTemplate(resumeInfo.text || RESUME_PROMPT, { context })
     } else {
@@ -1730,8 +1727,10 @@ export async function launchRun(runId) {
     // meantime (reviveFailed) must not come back to life as a session on a run
     // recorded as closed — nobody would watch it, and retention could remove
     // the worktree under it. The session just started goes again instead.
-    const took = db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL WHERE id=? AND resume_pending=1')
-      .run(session, runId)
+    const took = db.prepare(`UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL,
+                             revived_at=CASE WHEN ? THEN datetime('now') ELSE revived_at END
+                             WHERE id=? AND resume_pending=1`)
+      .run(session, resumeInfo.reason === 'operator' ? 1 : 0, runId)
     if (!took.changes) {
       // The container first, as the kill route does: its client is the pane.
       if (sandbox) {

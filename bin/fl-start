@@ -464,6 +464,12 @@ AUTONOM=""
 if [[ -n "$NOPROMPT" ]]; then
     [[ -n "$RESUME_ID" ]] || { err "Error: --no-prompt needs --resume (and a harness with a resume form)."; exit 2; }
     [[ -z "$PROMPT" ]] || { err "Error: --no-prompt and -p/-f are mutually exclusive."; exit 2; }
+    # A declared resume form that names the prompt FILE outside a `when: prompt`
+    # group would hand the CLI an empty file as its next turn — refused rather
+    # than guessed at.
+    if [[ -n "$SPEC_MODE" ]] && jq -e '(.resume // []) | map(select(type == "string")) | any(contains("{prompt_file}"))' >/dev/null 2>&1 <<<"$SPEC_JSON"; then
+        err "Error: '$HARNESS''s resume form always passes {prompt_file}; --no-prompt cannot leave it out."; exit 2
+    fi
     AUTONOM=1
 fi
 

@@ -2554,7 +2554,9 @@ try {
       await sh('tmux', ['kill-session', '-t', `=${s2}`])
       sessions.delete(s2)
       writeFileSync(transcript2, '{}\n')
-      db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now'), tmux_closed_at=datetime('now') WHERE id=?`).run(id)
+      // Ended ten days ago — past any session retention, which is exactly why
+      // its session was gone.
+      db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now','-10 days'), tmux_closed_at=datetime('now') WHERE id=?`).run(id)
       equal((await postForm(`/api/runs/${id}/resume`, {})).status, 200, 'a third revive, without an instruction')
       await waitFor(() => !!lauf(id)?.tmux_session && !lauf(id)?.resume_pending, { what: 'the third session', timeoutMs: 20_000 })
       sessions.add(lauf(id).tmux_session)
@@ -2562,6 +2564,12 @@ try {
       const third = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='resumed' ORDER BY id DESC`).get(id)
       equal(JSON.parse(third.payload).resume_form, id, 'its own conversation is back')
       equal(lauf(id).status, 'aborted', 'and the run stays as it ended — what the operator types next is a follow-up')
+      // The watcher's retention pass must not close it again at once.
+      const brought = lauf(id).tmux_session
+      await watcherTick()
+      isTrue((await sh('tmux', ['has-session', '-t', `=${brought}`])).ok, 'the revived session survives the next watcher pass')
+      equal(lauf(id).tmux_closed_at, null, 'and is not recorded as closed')
+      isTrue(!!lauf(id).revived_at, 'retention counts from the revive')
       contains(ereignisse(id).join(','), 'revive_started', 'an operator\'s revive is recorded as one, not as a lost session')
       db.prepare('DELETE FROM runs WHERE id=?').run(id)
     })
@@ -2708,10 +2716,23 @@ try {
                   VALUES(?,?,'claude','E2E-Revive: listed','E2E-ENDED-LISTED','keiner',45,'done','R',?,'fl-gone-listed',
                          datetime('now'),datetime('now'),datetime('now'))`)
         .run(id, repoId, join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`))
-      const html = await (await fetchPath('/sessions')).text()
+      // No conversation yet: the plain button could only be refused, so neither
+      // page offers it — the way that works (a new agent) is what is shown.
+      let html = await (await fetchPath('/sessions')).text()
       contains(html, 'E2E-ENDED-LISTED', 'the run whose session is gone is listed')
-      contains(html, `action="/api/runs/${id}/resume"`, 'with a button that revives it')
-      const page = await (await fetchPath(`/runs/${id}`)).text()
+      isFalse(html.includes(`action="/api/runs/${id}/resume"`), 'without a conversation: no plain revive button')
+      contains(html, `/runs/${id}#revive`, 'but the way to the new agent')
+      let page = await (await fetchPath(`/runs/${id}`)).text()
+      isFalse(page.includes(`action="/api/runs/${id}/resume" class="inline"`), 'the run page does not offer it either')
+      contains(page, 'name="mode" value="fresh"', 'only the new agent, with its instruction field')
+      // With the conversation there, both offer the one-click revive.
+      const { claudeTranscriptPath } = await import('../server/watcher.mjs')
+      const tp = claudeTranscriptPath({ id, workdir_effective: join(SB, 'worktrees', 'e2e', `${id.slice(0, 8)}-detached`), sandbox: 0 })
+      mkdirSync(dirname(tp), { recursive: true })
+      writeFileSync(tp, '{}\n')
+      html = await (await fetchPath('/sessions')).text()
+      contains(html, `action="/api/runs/${id}/resume"`, 'with a conversation: a button that revives it')
+      page = await (await fetchPath(`/runs/${id}`)).text()
       contains(page, `action="/api/runs/${id}/resume" class="inline"`, 'the run page has the plain button')
       contains(page, 'name="mode" value="fresh"', 'and beside it the new agent, with its instruction field')
       db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id=?`).run(id)

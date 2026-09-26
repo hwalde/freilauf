@@ -392,6 +392,7 @@
   "sessions.select_all": "select all shown",
   "sessions.end": "End",
   "sessions.revive": "Revive",
+  "sessions.to_run": "New agent…",
   "sessions.ended_title": "Ended sessions",
   "sessions.ended_hint": "Runs whose tmux session is gone. \"Revive\" brings the agent back into a new session with all the run's settings — its own conversation, or a fresh agent handed the whole record.",
   "sessions.ended_none": "No ended session that could be revived.",

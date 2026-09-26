@@ -392,6 +392,7 @@
   "sessions.select_all": "alle angezeigten auswählen",
   "sessions.end": "Beenden",
   "sessions.revive": "Wiederbeleben",
+  "sessions.to_run": "Neuer Agent …",
   "sessions.ended_title": "Beendete Sessions",
   "sessions.ended_hint": "Läufe, deren tmux-Session nicht mehr existiert. „Wiederbeleben“ holt den Agenten mit allen Einstellungen des Laufs in eine neue Session zurück — mit seinem eigenen Gespräch oder als frischer Agent mit dem ganzen Verlauf.",
   "sessions.ended_none": "Keine beendete Session, die sich wiederbeleben ließe.",

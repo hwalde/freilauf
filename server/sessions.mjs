@@ -183,10 +183,11 @@ export function finishedAtMs(session, run) {
   const candidates = []
   if (session?.deadMs != null) candidates.push(session.deadMs)
   if (!session?.dead && followUpActive(run)) return null
-  if (run?.ended_at) {
-    const ms = parseDbUtc(run.ended_at)
-    if (Number.isFinite(ms)) candidates.push(ms)
-  }
+  // The run's end — or its revive, when that is later: a revived session was
+  // brought back to be talked to, and retention measured from the old end
+  // would close it on the next pass (`ended_at` stays, it describes the attempt).
+  const ends = [run?.ended_at, run?.revived_at].map(v => v ? parseDbUtc(v) : NaN).filter(Number.isFinite)
+  if (ends.length) candidates.push(Math.max(...ends))
   // A dead pane without a usable timestamp still counts as finished; without a
   // reference point it would otherwise stand forever.
   if (!candidates.length && session?.dead) return session.createdMs ?? null

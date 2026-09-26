@@ -122,8 +122,12 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   continues its attempt instead); a failed revive goes through
   `reviveFailed()`, never `failRun()`; a commission opens only with an
   instruction.
-- The Sessions page offers the plain revive button for exactly the runs
-  `resumable()` admits.
+- The plain revive button is shown (run page, Sessions page) only where a
+  conversation can be brought back (`conversationBack()`); elsewhere only
+  "New agent takes over".
+- Session retention counts a revived session from `revived_at`, never from
+  the old `ended_at` (`finishedAtMs()` takes the later), or the next pass
+  closes it again.
 - A revive whose worktree retention removed recreates it at the same path
   (the resume keeps `branch_expected`), because the CLI finds its
   conversation by that path; a working directory that came back elsewhere is
