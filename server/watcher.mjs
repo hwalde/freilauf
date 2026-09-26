@@ -171,6 +171,12 @@ async function runTick() {
   // beat behind, fl-start failed): launched again before anything else looks
   // at them, so the loop below finds them with a session or still pending.
   await retryPendingResumes()
+  // Which sessions are alive right now — and which of those that were are gone
+  // (a reboot, a dead tmux server) while the work in them was still going.
+  try {
+    const snap = await trackLiveSessions()
+    if (snap) await recoverLostFollowUps(snap)
+  } catch (e) { console.error('[watcher] session tracking:', e.message) }
   const active = db.prepare(`SELECT * FROM runs WHERE status IN ('running','waiting_help')`).all()
   for (const run of active) {
     try { await watchRun(run) } catch (e) { console.error(`[watcher] ${run.id}:`, e.message) }
@@ -1379,6 +1385,50 @@ async function tryResume(run) {
   if (r.ok || r.retry) { noteResume(run.id, { ...r, reason: 'session_lost' }); return true }
   addEvent(run.id, 'resume_refused', { error: r.error })
   return false
+}
+
+/**
+ * The record of which sessions are ACTIVE: every run whose session this listing
+ * shows standing with a live pane gets `session_alive_at` = now. It is what a
+ * restarted hub reads to know which sessions it has to bring back, and where a
+ * downtime began (resumeRun takes it out of the run's duration). Also called by
+ * hub.mjs on shutdown, so a session started seconds before it is on the record.
+ * Returns the snapshot, or null when tmux gave no answer — nothing is marked then.
+ */
+export async function trackLiveSessions() {
+  const snap = await tmuxSnapshot()
+  if (!snap.ok) return null
+  const mark = db.prepare(`UPDATE runs SET session_alive_at=datetime('now')
+                           WHERE tmux_session=? AND tmux_closed_at IS NULL`)
+  for (const s of snap.sessions) if (!s.dead) mark.run(s.name)
+  return snap
+}
+
+/**
+ * A FINISHED run whose follow-up commission (`followup_since`) was being
+ * worked on in a session that was active and is gone now, and nobody in the
+ * hub closed it. Without this, a reboot ended the commission (retention reads
+ * a vanished session as closed); it is resumed like a running run instead — watchRun() covers those,
+ * this is the case its `status IN ('running','waiting_help')` never sees.
+ * Two answers before it acts, as confirmGone() does: the listing lacks the
+ * name AND has-session says gone.
+ */
+async function recoverLostFollowUps(snap) {
+  const rows = db.prepare(`SELECT * FROM runs WHERE status = 'done' AND followup_since IS NOT NULL
+                           AND tmux_session IS NOT NULL AND tmux_closed_at IS NULL
+                           AND session_alive_at IS NOT NULL AND COALESCE(resume_pending, 0) = 0
+                           AND finish_state IS NULL`).all()
+  if (!rows.length) return
+  const names = new Set(snap.sessions.map(s => s.name))
+  const { resumeRun } = await import('./runner.mjs')
+  for (const run of rows) {
+    if (names.has(run.tmux_session)) continue
+    if (await sessionGone(run.tmux_session) !== true) continue
+    let r
+    try { r = await resumeRun(run.id, { reason: 'session_lost' }) } catch (e) { r = { ok: false, error: e.message } }
+    if (r.ok || r.retry) noteResume(run.id, { ...r, reason: 'session_lost' })
+    else addEvent(run.id, 'resume_refused', { error: r.error })
+  }
 }
 
 /**

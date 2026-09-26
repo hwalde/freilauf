@@ -13,6 +13,9 @@ change are in `AGENTS.md`.
   exist — use `has-session`.
 - "No server" and "I could not answer" share an exit code; only the stderr
   tells them apart (`tmuxVerdict()`).
+- A running server with NO session answers `has-session -t '=name'` with
+  `no current target`, not `can't find session` — the state after every
+  reboot under `tmux -D`; `list-sessions` there exits 0 with empty output.
 - A dead pane sometimes records neither exit status nor signal nor death
   time, permanently (about one in six); a missing exit code is not a `0`. A
   pane killed by a signal has an empty `pane_dead_status` and a filled

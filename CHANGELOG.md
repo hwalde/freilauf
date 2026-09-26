@@ -18,6 +18,27 @@ a day on which nothing was released.
 
 ## 2026-09-26
 
+### Fixed
+
+- **Runs are resumed right after a reboot again.** On a freshly booted machine
+  the tmux server holds no session yet and answers differently than usual; the
+  hub read that as "tmux gave no answer" and left every interrupted run
+  standing as "running" with an empty terminal until some other run happened
+  to start. Now the runs come back in the first watcher pass.
+- **The time the machine was off no longer counts against a run's expected
+  duration.** The gap is measured from the last moment the session was seen
+  alive, not only from the agent's last activity, and a follow-up's clock is
+  shifted the same way.
+
+### Added
+
+- **The hub keeps a record of which sessions are active** — every watcher
+  pass and the hub's own shutdown write it — and after a restart it resumes
+  exactly those that were working: running runs as before, and now also a
+  finished run whose follow-up was being worked on when the session was lost.
+  A finished run that only left its screen standing is not brought back by
+  itself; its Resume button does that.
+
 ### Changed
 
 - **The global code-review default has its own page**, Settings → Code

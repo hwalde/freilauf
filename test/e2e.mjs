@@ -2406,6 +2406,53 @@ try {
       const ev = ereignisse(j.runId)
       contains(ev.join(','), 'resume_refused', 'and the refusal is written on the run')
     })
+    // The record of which sessions are active, and the time the machine was off.
+    await check('a pass records the sessions it saw alive; the downtime after that is taken off the clock', async () => {
+      const k = await laufStarten({ repo_id: repoId, prompt: 'E2E-Downtime: the clock stops while nothing runs' })
+      const s = await sessionMerken(k.runId)
+      await watcherTick()
+      isTrue(!!lauf(k.runId).session_alive_at, 'the live session is on the record')
+      // As a reboot leaves it: started an hour ago, last activity 50 min ago,
+      // last seen alive 10 min ago — then the session is gone.
+      db.prepare(`UPDATE runs SET started_at=datetime('now','-60 minutes'), last_activity_at=datetime('now','-50 minutes'),
+                  session_alive_at=datetime('now','-10 minutes') WHERE id=?`).run(k.runId)
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
+      await watcherTick()
+      const r = lauf(k.runId)
+      if (r.tmux_session) sessions.add(r.tmux_session)
+      const lost = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='session_lost' ORDER BY id DESC`).get(k.runId)
+      isTrue(!!lost, 'resumed')
+      const gap = JSON.parse(lost.payload).gap_s
+      isTrue(gap >= 590 && gap <= 700, `the gap starts at the last sighting, not the last activity (${gap} s)`)
+      const ranMin = (Date.now() - Date.parse(r.started_at.replace(' ', 'T') + 'Z')) / 60_000
+      isTrue(ranMin > 48 && ranMin < 52, `50 minutes of work stay on the clock, the 10 minutes off come off (${ranMin.toFixed(1)})`)
+      equal(r.session_alive_at, null, 'the new session is not on the record until a pass sees it')
+    })
+    await check('a follow-up whose session was lost is resumed; a finished run with an idle session is not', async () => {
+      const f = await laufStarten({ repo_id: repoId, prompt: 'E2E-Followup-lost: working on a follow-up when the machine went down' })
+      const fs1 = await sessionMerken(f.runId)
+      const idle = await laufStarten({ repo_id: repoId, prompt: 'E2E-Idle-lost: done, only the screen stood' })
+      const is1 = await sessionMerken(idle.runId)
+      db.prepare(`UPDATE runs SET status='done', started_at=datetime('now','-60 minutes'), ended_at=datetime('now','-40 minutes'),
+                  followup_since=datetime('now','-30 minutes'), last_activity_at=datetime('now','-8 minutes'),
+                  session_alive_at=datetime('now','-5 minutes') WHERE id=?`).run(f.runId)
+      db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now','-40 minutes'),
+                  session_alive_at=datetime('now','-5 minutes') WHERE id=?`).run(idle.runId)
+      await sh('tmux', ['kill-session', '-t', `=${fs1}`])
+      await sh('tmux', ['kill-session', '-t', `=${is1}`])
+      await watcherTick()
+      const r = lauf(f.runId)
+      if (r.tmux_session) sessions.add(r.tmux_session)
+      equal(r.status, 'done', 'the attempt stays done')
+      isTrue(!!r.tmux_session && !r.tmux_closed_at, 'a new session stands for the follow-up')
+      const lost = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='session_lost'`).get(f.runId)
+      isTrue(!!lost && JSON.parse(lost.payload).followup === true, 'written as a lost follow-up')
+      const sinceMin = (Date.now() - Date.parse(r.followup_since.replace(' ', 'T') + 'Z')) / 60_000
+      isTrue(sinceMin > 23 && sinceMin < 27, `the follow-up clock lost the 5 minutes off (${sinceMin.toFixed(1)})`)
+      contains(readFileSync(join(SB, 'runs', f.runId, 'resume-prompt.md'), 'utf8'), 'follow-up report',
+        'the agent is told its report is a follow-up report')
+      isFalse(ereignisse(idle.runId).includes('session_lost'), 'the idle finished run is not brought back by itself')
+    })
     // ---- the OTHER way a restart takes an agent, and the one that cost three runs.
     //
     // A restart, a reboot or the OOM killer kills PROCESSES. Where the tmux

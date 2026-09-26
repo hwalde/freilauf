@@ -853,6 +853,14 @@ export const RESUME_PROMPT = `Your session was interrupted: the tmux session it 
 Continue the task from where you were. Check \`git status\` and \`git log\` first so you do not redo work that is already committed, then carry on and finish. Everything the platform rules said still applies: commit your work, write the two report files and run \`fl-report done\` exactly as instructed. If you were waiting for a human's answer when the cut came, ask the question again with \`fl-report help\`. If the interruption cost you something you cannot recover, say so in the report.`
 
 /**
+ * Appended to RESUME_PROMPT when the lost session was working on a follow-up
+ * commission of a run that had already reported (watcher.mjs, recoverLostSessions).
+ */
+export const FOLLOWUP_RESUME_NOTE = `
+
+You were working on a follow-up request when the cut came: the run has reported done once already, so finish that follow-up and report it — your report counts as a follow-up report, same files, same command.`
+
+/**
  * The continuation for a session the OPERATOR brings back (`reason: 'operator'`,
  * the Revive button): nothing was interrupted by accident — the session had
  * ended, and a human wants the agent back. `{instruction}` is what they want
@@ -1071,9 +1079,12 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   instruction = null, fresh = false } = {}) {
   const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
   if (!run) return { ok: false, error: 'run not found' }
-  // A `done` run is revived only by the operator (the Revive button): it stays
-  // `done`, and what is launched is a follow-up commission (`keepStatus`).
-  const keepStatus = run.status === 'done' && reason === 'operator'
+  // A `done` run is revived by the operator (the Revive button), or when the
+  // session working on its follow-up (`followup_since`) was lost (watcher.mjs,
+  // recoverLostFollowUps): it stays `done`, and what is launched is a
+  // follow-up commission (`keepStatus`).
+  const followUpLost = run.status === 'done' && reason === 'session_lost' && !!run.followup_since
+  const keepStatus = run.status === 'done' && (reason === 'operator' || followUpLost)
   if (!keepStatus && !['running', 'waiting_help'].includes(run.status)) return { ok: false, error: `status is ${run.status}` }
   if (run.resume_pending && !adoptPending) return { ok: true, pending: true }
   // Reported already: the finish gate's `agent_gone` escalation owns this case.
@@ -1125,16 +1136,27 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
       return { ok: false, error: gate.reason }
     }
   }
-  const lastSeen = Math.max(parseDbUtc(run.last_activity_at) || 0, parseDbUtc(run.started_at) || 0)
-  // A finished run's `started_at` measures its first attempt and is not moved.
-  const gapSec = keepStatus ? 0 : lastSeen ? Math.max(0, Math.round((Date.now() - lastSeen) / 1000)) : 0
+  // The downtime begins at the last moment the run is KNOWN to have been alive:
+  // its last activity, or the last pass that saw its session standing — the
+  // later of the two, so the minutes an agent worked silently before the cut
+  // stay on its clock and only the time nothing ran comes off.
+  const lastSeen = Math.max(parseDbUtc(run.last_activity_at) || 0, parseDbUtc(run.started_at) || 0,
+    parseDbUtc(run.session_alive_at) || 0)
+  const downSec = lastSeen ? Math.max(0, Math.round((Date.now() - lastSeen) / 1000)) : 0
+  // A finished run's `started_at` measures its first attempt and is not moved;
+  // a lost follow-up's clock is `followup_since`, and that one is.
+  const gapSec = keepStatus ? 0 : downSec
+  const followUpGap = followUpLost ? downSec : 0
   // The goal starts over with the session: a `/goal` typed into the old one
   // went with it, and the watcher's pending-goal pass delivers it again.
   // …and so does the agent's attention: 'waiting' described a process that is gone.
   db.prepare(`UPDATE runs SET tmux_session=NULL, tmux_closed_at=NULL, resume_pending=1, goal_sent_at=NULL,
-              agent_state=NULL, agent_state_at=NULL,
-              started_at=datetime(started_at, '+' || ? || ' seconds'), last_activity_at=datetime('now') WHERE id=?`)
-    .run(gapSec, runId)
+              agent_state=NULL, agent_state_at=NULL, session_alive_at=NULL,
+              started_at=datetime(started_at, '+' || ? || ' seconds'),
+              followup_since=CASE WHEN followup_since IS NULL THEN NULL
+                                  ELSE datetime(followup_since, '+' || ? || ' seconds') END,
+              last_activity_at=datetime('now') WHERE id=?`)
+    .run(gapSec, followUpGap, runId)
   const { clearAnomalies, notifiedFlags } = await import('./reports.mjs')
   // `exit_without_report` belongs on this list for the same reason the four
   // beside it do: the resume overtakes the statement. The agent's process
@@ -1162,8 +1184,9 @@ export async function resumeRun(runId, { reason = 'session_lost', text = null, a
   ])
   // An operator's revive is not a lost session, and the record says which.
   addEvent(runId, reason === 'operator' ? 'revive_started' : 'session_lost', {
-    reason, attempt: run.resume_attempts + 1, gap_s: gapSec,
+    reason, attempt: run.resume_attempts + 1, gap_s: gapSec || followUpGap,
     started_at_before: run.started_at, session: run.tmux_session,
+    ...(followUpLost ? { followup: true, followup_since_before: run.followup_since } : {}),
   })
   // The same gate as at any other start: a resume into an exhausted quota
   // dies at the first API call like a fresh start would. A blocked one waits
@@ -1455,7 +1478,7 @@ export async function launchRun(runId) {
       text = operator
         ? fillTemplate(REVIVE_PROMPT, { context, instruction: instruction || REVIVE_CONTINUE,
           followup: finished ? ' — the run has reported done once already, so this report counts as a follow-up report' : '' })
-        : fillTemplate(resumeInfo.text || RESUME_PROMPT, { context })
+        : fillTemplate(resumeInfo.text || RESUME_PROMPT, { context }) + (finished ? FOLLOWUP_RESUME_NOTE : '')
     } else {
       // The conversation cannot come back (or was not wanted): a claude
       // transcript under the run id would make `--session-id <run id>` refuse,
