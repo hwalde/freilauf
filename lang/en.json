@@ -1784,5 +1784,9 @@
   "review.col_platform": "Platform",
   "review.col_state": "State",
   "api.archive_review_open": "This run waits in an open code review — decide the review first; its session is where change requests go.",
-  "review.ev_approval_dropped": "approval withdrawn — the approved commit no longer merges"
+  "review.ev_approval_dropped": "approval withdrawn — the approved commit no longer merges",
+  "settings.review_hint": "Optional: finished work waits for a reviewer before it is merged. Global default: {setup}. Repos and single runs/agents can override it.",
+  "review.summary_on": "on ({platform})",
+  "review.summary_off": "off",
+  "review.global_link": "Global default"
 }

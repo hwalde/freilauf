@@ -16,6 +16,15 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-09-26
+
+### Changed
+
+- **The global code-review default has its own page**, Settings → Code
+  review, instead of a block at the bottom of Settings → Merge. The settings
+  page shows it with a one-line summary ("Global default: off" / "on (…)"),
+  and the repo form and the Reviews page link to it.
+
 ## 2026-09-25
 
 ### Added

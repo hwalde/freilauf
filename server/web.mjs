@@ -23,7 +23,7 @@ import {
   repoEdit, repoSave, settingsSave,
   codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
-  pageMergeSettings, mergeSettingsSave, pageReviews,
+  pageMergeSettings, mergeSettingsSave, pageReviews, pageReviewSettings, reviewSettingsSave,
   pageCleanupSettings, cleanupSettingsSave,
   pageSkillSettings, skillSettingsSave, skillSettingsSync,
   repoToggle, repoDelete,
@@ -303,6 +303,8 @@ async function dispatch(req, res, url, path, formBody) {
   // the same reason the favorites have one: the provider/model/effort block is
   // driven through #prov, #model and #effort, and those ids exist once per page.
   if (req.method === 'GET' && path === '/reviews') return pageReviews(req, res, url)
+  if (req.method === 'GET' && path === '/settings/review') return pageReviewSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/review') return reviewSettingsSave(req, res, url, formBody)
   if (req.method === 'GET' && path === '/settings/merge') return pageMergeSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/merge') return mergeSettingsSave(req, res, url, formBody)
   // tmux cleanup (Settings → tmux cleanup) — the memory-freeing agent's setup.
