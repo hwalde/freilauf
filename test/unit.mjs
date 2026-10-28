@@ -14432,6 +14432,15 @@ process.stdout.write(JSON.stringify(out))
       contains(line, 'day 4', 'and how long it has been open')
     })
 
+    await check('a note still waiting for its result is not in the digest', () => {
+      db.prepare(`INSERT INTO repos(name, path) VALUES('pending-repo', '/tmp/pending-repo')`).run()
+      const rid = db.prepare(`SELECT id FROM repos WHERE name='pending-repo'`).get().id
+      db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title) VALUES('pendnote-aaaa-bbbb-cccc-000000000000', ?, 'done', 'claude', 'p', 'keiner', 45, 'Still in the gate')`).run(rid)
+      db.prepare(`INSERT INTO report_notes(run_id, state) VALUES('pendnote-aaaa-bbbb-cccc-000000000000', 'waiting')`).run()
+      const input = dg.buildDigestInput(Date.now() - 3_600_000, Date.now() + 60_000)
+      isFalse(input.prompt.includes('Still in the gate'), 'not reported as a run without a result')
+    })
+
     await check('routine is counted for the quiet agent itself, not by accident', () => {
       const before = dg.buildDigestInput(Date.now() - 3_600_000, Date.now() + 60_000).facts.routine
       db.prepare(`INSERT INTO repos(name, path) VALUES('routine2-repo', '/tmp/routine2-repo')`).run()

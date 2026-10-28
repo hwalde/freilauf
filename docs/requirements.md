@@ -578,6 +578,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - The daily digest covers the time since the last one (24 h the first time);
   a hub that was off sends ONE catch-up digest; a slot already past when the
   digest is switched on does not fire.
+- The digest reads only assessed notes (`done`, `fallback`); one still
+  waiting for its result belongs to a later digest.
 - The digest prompt never holds a report: at most five summaries per agent,
   routine agents only as `routine_count`; `quiet`, `open_days`, the counts and
   the missed starts are computed by the hub; what waits for the operator is

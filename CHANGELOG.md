@@ -78,8 +78,9 @@ a day on which nothing was released.
   appear under "waits for you".
 - **The daily digest links what it names and keeps routine short.** Every run
   and agent it mentions is a link; agents whose runs were all unremarkable are
-  folded into the one routine sentence, also on the first day; and it no
-  longer says "nothing waits for you".
+  folded into the one routine sentence, also on the first day; it no longer
+  says "nothing waits for you"; and a run whose assessment is still pending is
+  left for the next digest instead of being told as "no result".
 - **An LLM alert about a provider's server error names the status** instead
   of showing "(HTTP {code})".
 - **The OpenRouter routing of the hub's own LLM jobs is saved again.** On the
