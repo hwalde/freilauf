@@ -175,9 +175,15 @@ function transportText(c) {
     if (c.kind === 'timeout') return t('llm.err_timeout')
     return t('llm.err_transport', { error: c.error })
   }
-  const specific = t(`llm.err_${c.kind}`)
-  if (specific !== `llm.err_${c.kind}`) return specific
-  return t('llm.err_http_other', { code: c.code })
+  // What the vendor said travels along: the status alone guesses ("model not
+  // found") where the vendor knows ("no endpoint supports this request").
+  const said = /HTTP \d{3}: (.+)$/.exec(c.error)?.[1]
+  const tail = said ? ` — ${said}` : ''
+  // The status goes in as a parameter: `llm.err_http_5xx` names it, and a
+  // text that showed "(HTTP {code})" literally said nothing about which one.
+  const specific = t(`llm.err_${c.kind}`, { code: c.code })
+  if (specific !== `llm.err_${c.kind}`) return `${specific}${tail}`
+  return `${t('llm.err_http_other', { code: c.code })}${tail}`
 }
 
 /**
@@ -228,6 +234,9 @@ async function askOne(entry, req) {
     // FRESH resolve (`orRoutingRefresh`): the operator's own config — free
     // routing, a pin, or auto — was already tried and answered unusably, and
     // the 24 h cache would only hand back the same order that just failed.
+    // How much the model may think before it answers (`off` | `low` | …;
+    // null = the model's own default). A source that has no such switch ignores it.
+    reasoning: req.reasoning ?? null,
     servingProvider: auto ? null : (req.servingProvider || null),
     orRouting: auto ? { mode: 'auto' } : (req.orRouting ?? null),
     orRoutingRefresh: auto ? true : undefined,
@@ -281,6 +290,12 @@ async function askOne(entry, req) {
     try {
       answer = await call(userText, autoRound)
     } catch (err) {
+      // The recovery round is a last try on a source that DID answer: when it
+      // fails in transport (the freshly chosen endpoint is gone, a 404), the
+      // failure to report is still the answer problem it was meant to repair.
+      // Reporting the recovery's transport error instead is how an unusable
+      // answer turned into "model not found" and ten rounds of backoff.
+      if (autoRound) break
       // Transport failures are NOT reprompted: a 401, a timeout or a missing
       // binary does not become right by asking the same thing again. They are
       // classified and returned, and the chain walk above decides — next
@@ -289,6 +304,17 @@ async function askOne(entry, req) {
       kind = c.kind
       stage = 'transport'
       error = transportText(c)
+      break
+    }
+
+    // The model spent the whole token limit before it wrote an answer — a
+    // thinking model thinking too long. Asking again (or elsewhere) spends the
+    // same limit the same way, so this is said at once and plainly.
+    if (answer?.truncated && !String(answer?.text ?? '').trim()) {
+      stage = 'parse'
+      kind = 'cut_off'
+      text = ''
+      error = t('llm.err_cut_off')
       break
     }
 
@@ -366,6 +392,8 @@ async function askOne(entry, req) {
  * @param {number} [req.maxTokens]
  * @param {number} [req.temperature]
  * @param {number} [req.timeoutMs]
+ * @param {string} [req.reasoning]        how much a thinking model may think first:
+ *                                        'off' | 'low' | 'medium' | 'high'; null = its default
  * @param {object} [req.retry]            the job's own transport-retry budget
  *                                        ({attempts?, baseMs?, maxMs?, deadlineMs?});
  *                                        missing fields fall back to `llm_retry_*`
@@ -381,7 +409,7 @@ async function askOne(entry, req) {
  */
 export async function llmJson({
   source, model, fallbacks = [], prompt, system, schema, schemaName, purpose = 'llm',
-  servingProvider = null, orRouting = null, maxTokens, temperature, timeoutMs, retry = null,
+  servingProvider = null, orRouting = null, maxTokens, temperature, timeoutMs, retry = null, reasoning = null,
 } = {}) {
   // The chain: primary first, then the fallbacks. A fallback that repeats the
   // primary VERBATIM (same source, same model) is dropped — retrying the
@@ -398,7 +426,7 @@ export async function llmJson({
     chain.push(entry)
   }
 
-  const req = { prompt, system, schema, schemaName, purpose, servingProvider, orRouting, maxTokens, temperature, timeoutMs }
+  const req = { prompt, system, schema, schemaName, purpose, servingProvider, orRouting, maxTokens, temperature, timeoutMs, reasoning }
   const policy = retryPolicy(retry)
   const startedMs = Date.now()
   const pastDeadline = () => policy.deadlineMs != null && Date.now() - startedMs >= policy.deadlineMs

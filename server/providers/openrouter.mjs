@@ -183,6 +183,12 @@ const plugin = {
           json_schema: { name: req.schemaName || 'answer', strict: true, schema: req.schema },
         }
       }
+      // A thinking model may spend the whole `max_tokens` thinking and answer
+      // nothing (measured: deepseek-v4-flash used 4.8k reasoning tokens for one
+      // daily digest, a dated variant more than 8k). OpenRouter's unified
+      // switch: `{enabled:false}` or an effort level.
+      if (req.reasoning === 'off') body.reasoning = { enabled: false }
+      else if (['low', 'medium', 'high'].includes(req.reasoning)) body.reasoning = { effort: req.reasoning }
       // Three shapes reach this one point — the settings pages, the run starts
       // and the flows all resolve through the SAME capability and cache:
       //   orRouting        the requirements config (mode 'auto'), resolved
@@ -221,11 +227,16 @@ const plugin = {
         'HTTP-Referer': 'https://github.com/hwalde/freilauf',
         'X-Title': `Freilauf ${req.purpose || 'request'}`,
       }, { method: 'POST', body: JSON.stringify(body), timeoutMs: req.timeoutMs ?? 60_000 })
-      const raw = j?.choices?.[0]?.message?.content
+      const choice = j?.choices?.[0]
+      const raw = choice?.message?.content
+      const empty = raw === null || raw === undefined || raw === ''
       return {
-        text: typeof raw === 'string' ? raw : JSON.stringify(raw ?? ''),
+        text: typeof raw === 'string' ? raw : (empty ? '' : JSON.stringify(raw)),
         usage: j?.usage ?? null,
         raw: j,
+        // Cut off at the token limit before any answer was written — the layer
+        // above says so instead of complaining about JSON that never came.
+        ...(empty && choice?.finish_reason === 'length' ? { truncated: true } : {}),
       }
     },
   },

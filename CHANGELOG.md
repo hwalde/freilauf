@@ -64,6 +64,23 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **Thinking models no longer swallow the deputy's and the digest's answers.**
+  A model like DeepSeek V4 could spend the whole token limit thinking and
+  answer nothing; the hub then tried again on another serving provider, got a
+  404 there and reported "model not found" after ten rounds of retries. The two
+  jobs now switch thinking off by default (Settings → Reports → *Thinking*), a
+  cut-off answer is reported as exactly that, at once, and an alert shows what
+  the vendor actually said.
+- **A daily digest the model could not write is no longer empty.** The hub now
+  puts it together from the facts itself — what waits for you, what failed,
+  missed starts, what is done, each with its link. Archived runs no longer
+  appear under "waits for you".
+- **The daily digest links what it names and keeps routine short.** Every run
+  and agent it mentions is a link; agents whose runs were all unremarkable are
+  folded into the one routine sentence, also on the first day; and it no
+  longer says "nothing waits for you".
+- **An LLM alert about a provider's server error names the status** instead
+  of showing "(HTTP {code})".
 - **The OpenRouter routing of the hub's own LLM jobs is saved again.** On the
   settings page, choosing "auto" or lifting a pinned serving provider for the
   check, title and extras models was silently not stored — the form's field

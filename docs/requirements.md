@@ -320,6 +320,14 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   whole chain down → exponential backoff with jitter up to
   `llm_retry_attempts` (hard cap 10), first walk always complete. An agent
   source needs no model. `jobRouting()` is the one reader of per-job routing.
+- An answer cut off at the token limit (`truncated`) is a `parse` failure at
+  once, without a repair or recovery round; a recovery round that fails in
+  transport reports the answer problem it was meant to repair, never its own
+  404 — neither starts the transport backoff.
+- A transport error carries the vendor's own words after the status
+  (`HTTP 404: …`, `pluginJson()`), and the alert shows them.
+- A job may say how much a thinking model may think (`jobReasoning()`,
+  `llm_<job>_reasoning`); the deputy and the digest default to `off`.
 - A job may bring its own transport budget (`jobRetry()`: attempts and a
   whole-call deadline, `llm_<job>_retry_*`); unset fields fall back to the
   global policy, and the cap of ten holds for both.
@@ -578,6 +586,13 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   from `scheduleDue()` for cron and weekly schedules only.
 - A digest link exists only for a ref the hub handed out (`r1`, `a1`); an
   unknown ref renders as its words.
+- When the model cannot write the digest, the hub writes it from the same
+  facts (`plainDigest()`): what waits, what failed, missed starts, what is
+  done, each linked — never only a count. An archived run waits for nobody.
+- An agent counts as routine when it ran like yesterday or when every run of
+  it succeeded and the deputy found none worth telling; the prompt holds no
+  `<waiting_for_you>` block when nothing waits, and a "❓" line is removed
+  from the answer then.
 
 ## Attention
 

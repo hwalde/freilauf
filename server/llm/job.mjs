@@ -125,3 +125,18 @@ export function jobRetry(purpose, defaults = null) {
     ...(defaults?.maxMs != null ? { maxMs: defaults.maxMs } : {}),
   }
 }
+
+export const REASONING_CHOICES = ['off', 'low', 'model']
+
+/**
+ * How much the job's model may think before it answers: `llm_<purpose>_reasoning`
+ * — 'off' | 'low' | 'model' (the model's own default, sent as null). Unset is
+ * the caller's default; the deputy and the digest pass 'off', because their
+ * answers are structured and a thinking model can otherwise spend the whole
+ * token limit thinking and answer nothing.
+ */
+export function jobReasoning(purpose, dflt = null) {
+  const v = String(getSetting(`llm_${purpose}_reasoning`) ?? '').trim()
+  const pick = REASONING_CHOICES.includes(v) ? v : dflt
+  return pick === 'model' ? null : pick
+}

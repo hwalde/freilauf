@@ -1412,9 +1412,14 @@ other one; nothing in `server/llm` is skipped for it except the strict prompt.
 | `servingProvider` | OpenRouter's serving-provider pin — `provider: {order:[x], allow_fallbacks:false}`; the value `auto` resolves the best provider per model with default requirements |
 | `orRouting` | an auto-routing config `{mode:'auto', quant_min?, location?, max_in?, max_out?}` — resolved per model through the plugin's `routing` capability and cache; takes precedence over `servingProvider` |
 | `orRoutingRefresh` | OpenRouter only — resolve `orRouting` with `refresh: true`, ignoring the 24 h cache. The `llmJson` recovery round uses it when a `parse`/`validate` failure has already spent the retry budget: the cached order is exactly the one that just answered unusably, so a genuinely different serving provider is what a fresh resolve is asked for |
-| `purpose` | the caller's name (`title`, `check`, `extract`, `extras`); OpenRouter sends it as `X-Title` |
+| `purpose` | the caller's name (`title`, `check`, `extract`, `extras`, `triage`, `digest`); OpenRouter sends it as `X-Title` |
+| `reasoning` | how much a thinking model may think before it answers: `'off'`, `'low'`, `'medium'`, `'high'`, or null for the model's own default. OpenRouter maps it to `reasoning: {enabled:false}` / `{effort}`; a source without such a switch ignores it |
 
-The answer is `{ text, usage, raw }`. **`text` is always a string** — a source
+The answer is `{ text, usage, raw, truncated? }`. `truncated: true` says the
+model reached the token limit before it wrote any answer (OpenRouter:
+`finish_reason: 'length'` with no content) — the layer above then reports a
+cut-off instead of asking again, because the same limit would be spent the same
+way. **`text` is always a string** — a source
 whose API hands back an object stringifies it (claude's `structured_output`,
 cursor's `result`). A transport failure **throws**; it does not return a
 falsy answer, because "the model said nothing" and "the call did not happen"

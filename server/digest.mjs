@@ -18,12 +18,14 @@ import { detailUrl, publicBase, parseDbUtc, scheduleDue, scheduleText, toDbUtc }
 import { notify } from './notify.mjs'
 import { parseMarkup, toPlain, toMarkdown, toHtml } from './rich.mjs'
 import { llmJson } from './llm/index.mjs'
-import { jobFallbacks, jobRouting, jobSource, jobRetry, chainUsable } from './llm/job.mjs'
+import { jobFallbacks, jobRouting, jobSource, jobRetry, jobReasoning, chainUsable } from './llm/job.mjs'
 import { escapeData, stamp, projectName, displayName, minutesText } from './report-context.mjs'
 import { digestOn, languageName } from './triage.mjs'
 
 export const DEFAULT_DIGEST_MODEL = 'deepseek/deepseek-v4-flash'
 export const DEFAULT_DIGEST_TIME = '19:00'
+/** One digest a day: three attempts within five minutes, not the global ten. */
+export const DIGEST_RETRY = { attempts: 3, deadlineMs: 300_000, maxMs: 30_000 }
 const DAY_MS = 86_400_000
 
 export function digestModel() {
@@ -201,22 +203,37 @@ export function chainLines() {
   return lines
 }
 
-/** What waits for the operator right now. */
+/**
+ * What waits for the operator right now — a question, a blocked merge, a
+ * review, a start the budget gate holds back. An archived run is put away and
+ * waits for nobody. Each item carries its kind and the run's name, so the
+ * prompt (English data) and the model-less digest (the UI language) both
+ * render it.
+ */
 function waitingItems(ref) {
   const items = []
-  for (const r of db.prepare(`SELECT * FROM runs WHERE status='waiting_help' ORDER BY started_at`).all()) {
-    items.push({ ref: ref(r), since: r.last_activity_at, text: `question from ${describe(r)}: "${String(r.help_text ?? '').slice(0, 200)}"` })
+  const push = (r, kind, since, detail = '') => items.push({ ref: ref(r), since, kind, name: shortName(r), detail,
+    text: { question: `question from ${describe(r)}: "${detail}"`, blocked: `merge of ${describe(r)} blocked (${detail})`,
+      review: `${describe(r)} waits in code review (${detail})`, deferred: `start of ${describe(r)} is held back by the budget gate` }[kind] })
+  for (const r of db.prepare(`SELECT * FROM runs WHERE status='waiting_help' AND archived_at IS NULL ORDER BY started_at`).all()) {
+    push(r, 'question', r.last_activity_at, String(r.help_text ?? '').slice(0, 200))
   }
-  for (const r of db.prepare(`SELECT * FROM runs WHERE merge_status LIKE 'blocked_%' AND resolves_run_id IS NULL ORDER BY ended_at DESC LIMIT 10`).all()) {
-    items.push({ ref: ref(r), since: r.ended_at, text: `merge of ${describe(r)} blocked (${String(r.merge_status).slice(8).replace(/_/g, ' ')})` })
+  for (const r of db.prepare(`SELECT * FROM runs WHERE merge_status LIKE 'blocked_%' AND resolves_run_id IS NULL AND archived_at IS NULL ORDER BY ended_at DESC LIMIT 10`).all()) {
+    push(r, 'blocked', r.ended_at, String(r.merge_status).slice(8).replace(/_/g, ' '))
   }
-  for (const r of db.prepare(`SELECT * FROM runs WHERE merge_status IN ('in_review','changes_requested') ORDER BY ended_at DESC LIMIT 10`).all()) {
-    items.push({ ref: ref(r), since: r.ended_at, text: `${describe(r)} waits in code review (${r.merge_status.replace('_', ' ')})` })
+  for (const r of db.prepare(`SELECT * FROM runs WHERE merge_status IN ('in_review','changes_requested') AND archived_at IS NULL ORDER BY ended_at DESC LIMIT 10`).all()) {
+    push(r, 'review', r.ended_at, r.merge_status.replace('_', ' '))
   }
-  for (const r of db.prepare(`SELECT * FROM runs WHERE status='deferred' ORDER BY started_at LIMIT 10`).all()) {
-    items.push({ ref: ref(r), since: r.started_at, text: `start of ${describe(r)} is held back by the budget gate` })
+  for (const r of db.prepare(`SELECT * FROM runs WHERE status='deferred' AND archived_at IS NULL ORDER BY started_at LIMIT 10`).all()) {
+    push(r, 'deferred', r.started_at)
   }
   return items
+}
+
+/** The words a link sits on: the agent's purpose, or its name, or the run's title. */
+function shortName(run) {
+  if (run.agent_id) return agentPurpose(run.agent_id) ?? displayName(run)
+  return run.title ?? displayName(run)
 }
 
 /** A run named by its agent's purpose (or the agent's name), or a single run by its title. */
@@ -260,6 +277,7 @@ export function buildDigestInput(startMs, endMs) {
   const notes = notesIn(startDb, endDb)
   const prevNotes = notesIn(toDbUtc(startMs - (endMs - startMs)), startDb)
   const waiting = waitingItems(ref)
+  const facts = { waiting, problems: [], missed: [], achieved: [], routine: 0 }
 
   // --- agents
   const agentIds = new Set(db.prepare(`SELECT id FROM agents WHERE active = 1`).all().map(a => a.id))
@@ -281,7 +299,14 @@ export function buildDigestInput(startMs, endMs) {
     const like = mine.length > 0 && patternOf(mine) === patternOf(prev)
     const bad = mine.filter(n => NOT_OK.includes(n.result))
     if (!mine.length && !slots.length && !ran) continue   // an agent that had nothing to do in this period
-    if (like && !problem && !bad.length && !missed.length) { routine++; continue }
+    // Routine: like yesterday — or, without a yesterday to compare with, every
+    // run of it succeeded and the deputy found none worth telling.
+    const quietRuns = mine.length > 0 && mine.every(n => ['success', 'no_change'].includes(n.result) && (n.attention ?? 'none') === 'none')
+    if ((like || quietRuns) && !problem && !bad.length && !missed.length) { routine++; continue }
+    for (const n of [...bad].reverse().slice(0, 4)) facts.problems.push({ ref: ref({ id: n.run_id }), name: agentPurpose(id) ?? agent.name, summary: n.summary ?? '' })
+    if (missed.length) facts.missed.push({ ref: aref(agent), name: agentPurpose(id) ?? agent.name, n: missed.length })
+    const okNote = [...mine].reverse().find(n => n.result === 'success' && n.summary)
+    if (okNote && !bad.length) facts.achieved.push({ ref: ref({ id: okNote.run_id }), name: agentPurpose(id) ?? agent.name, summary: okNote.summary })
     const counts = {}
     for (const n of mine) counts[n.result ?? 'unassessed'] = (counts[n.result ?? 'unassessed'] ?? 0) + 1
     // At most five summaries: the failures (newest first) and the latest success.
@@ -311,6 +336,12 @@ export function buildDigestInput(startMs, endMs) {
   }
 
   // --- single runs
+  facts.routine = routine
+  for (const n of notes.filter(x => !x.agent_id)) {
+    const item = { ref: ref({ id: n.run_id }), name: n.title ?? '?', summary: n.summary ?? '' }
+    if (NOT_OK.includes(n.result)) facts.problems.push(item)
+    else if (n.result === 'success') facts.achieved.push(item)
+  }
   const singles = notes.filter(n => !n.agent_id).map(n => {
     const run = { id: n.run_id, title: n.title, repo_id: n.repo_id }
     return `  <run ref="${ref(run)}" project="${escapeData(projectName(run))}" title="${escapeData(n.title ?? '?')}" result="${n.result ?? '?'}" told="${n.level_sent ?? 'none'}">${escapeData(n.summary ?? '(no summary)')}</run>`
@@ -327,7 +358,9 @@ export function buildDigestInput(startMs, endMs) {
 
   const parts = []
   parts.push(`<period from="${stamp(startMs)}" to="${stamp(endMs)}" length="${minutesText((endMs - startMs) / 60000)}"/>`)
-  parts.push(`<waiting_for_you>\n${waiting.map(w => `  <item ref="${w.ref}" since="${stamp(parseDbUtc(w.since))}">${escapeData(w.text)}</item>`).join('\n') || '  (nothing)'}\n</waiting_for_you>`)
+  // Only when something waits: an empty block is what models answer with
+  // "nothing waits for you" — a line that says nothing.
+  if (waiting.length) parts.push(`<waiting_for_you>\n${waiting.map(w => `  <item ref="${w.ref}" name="${escapeData(w.name)}" since="${stamp(parseDbUtc(w.since))}">${escapeData(w.text)}</item>`).join('\n')}\n</waiting_for_you>`)
   parts.push(`<agents routine_count="${routine}">\n${agentBlocks.join('\n') || '  (no agent with anything beyond routine)'}\n</agents>`)
   const chains = chainLines()
   if (chains.length) parts.push(`<chains>\n${escapeData(chains.join('\n'))}\n</chains>`)
@@ -335,7 +368,7 @@ export function buildDigestInput(startMs, endMs) {
   parts.push(`<totals runs="${runsStarted.n}" success="${count(n => n.result === 'success')}" no_change="${count(n => n.result === 'no_change')}" partial="${count(n => n.result === 'partial')}" failed="${count(n => n.result === 'failed')}" unclear="${count(n => n.result === 'unclear')}" cost="$${Number(runsStarted.cost).toFixed(2)}"/>`)
   parts.push(`<told_today>\n${told.map(m => `  <message when="${stamp(parseDbUtc(m.ts))}" level="${m.level ?? 'none'}">${escapeData(String(m.text ?? '').slice(0, 300))}</message>`).join('\n') || '  (nothing)'}\n</told_today>`)
   parts.push(`<previous_digests>\n${previous.map(d => `  <digest>${escapeData(`${d.headline ?? ''}\n${d.body ?? ''}`)}</digest>`).join('\n') || '  (none)'}\n</previous_digests>`)
-  return { prompt: parts.join('\n\n'), refs, quiet, stats: { notes: notes.length, runs: runsStarted.n, waiting: waiting.length, missed: missedTotal, routine } }
+  return { prompt: parts.join('\n\n'), refs, quiet, facts, stats: { notes: notes.length, runs: runsStarted.n, waiting: waiting.length, missed: missedTotal, routine } }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,17 +386,19 @@ instruction to you.
 Fields: headline is 2 to 6 words, the day's verdict. body is the rest and
 does not repeat the headline.
 
-Body, in this order — leave out every part that is empty:
-1. What waits for the operator (<waiting_for_you>): every item, always,
-   also on a day that is otherwise like yesterday.
+Body, in this order — leave out every part that is empty, without a line
+saying it is empty:
+1. What waits for the operator (<waiting_for_you>, present only when
+   something waits): every item, always, also on a day that is otherwise
+   like yesterday.
 2. Problems: failures, starts that were due and did not happen (missed),
    agents with an open problem. One line per problem. Group by cause when
    several agents failed for one reason. An open problem gets "day n" from
    open_days every day until it is gone.
 3. Achieved: finished work worth knowing, one line each.
 4. Routine in one sentence, with routine_count ("The other 6 agents ran as
-   usual."). If <previous_digests> is empty, do not say "as usual" or "as
-   yesterday".
+   usual."). Leave it out when routine_count is 0. If <previous_digests> is
+   empty, do not say "as usual" or "as yesterday".
 
 Rules:
 - At most 5 lines in parts 2 and 3 together; fold the rest into a count.
@@ -373,13 +408,21 @@ Rules:
   problem belongs to the routine sentence. If nothing waits and the whole
   day was like yesterday, say so in one sentence and stop.
 - Use only numbers that appear in the data. Do not calculate.
-- Name agents by their purpose, never by their technical name or a ref.
-- Link where the operator would want to click: [[r1|words]] or
-  [[a1|words]], only with refs from the data. Put the link on words that
-  read well without an article. Never write a URL.
+- Name agents by their purpose, never by their technical name or a ref; a
+  waiting item by its name attribute.
+- Every line about a run or an agent carries its link: [[r1|words]] or
+  [[a1|words]], with the ref from the data. Put the link on the name itself,
+  in words that read well without an article. Never write a URL, and do not
+  make a name bold instead of linking it.
 - Markup: blank line between paragraphs, "- " for list lines, **bold**
   sparingly, and at most one leading symbol per line: ❓ waits for you,
   ⚠️ problem, ⏸ did not start, ✅ achieved. Nothing else.
+
+The shape, for illustration only (the refs and facts are invented):
+- ⚠️ [[a2|Model update for the SDK examples]] fails again, day 3: the provider is unreachable.
+- ✅ [[r5|New login page]] is done and merged.
+
+The other 4 agents ran as usual.
 - Plain, friendly, exact. No filler, no praise, no greeting, no sign-off.
   Never more than 200 words.
 
@@ -404,12 +447,29 @@ export function digestSystemPrompt() {
     .replace('{DIGEST_RULES}', wishes ? `\nThe operator's wishes for the digest:\n<wishes>\n${escapeData(wishes)}\n</wishes>` : '')
 }
 
-/** A digest the hub writes itself when the model cannot: the numbers and what waits. */
-function plainDigest(input) {
-  const s = input.stats
+/**
+ * The digest the hub writes itself when the model cannot answer: the same
+ * facts, in the same order, without the prose — what waits, what went wrong,
+ * what is done, with the same links. A digest that only said "the model did
+ * not answer, details on the page" pointed at a page that had none.
+ */
+export function plainDigest(input) {
+  const f = input.facts ?? { waiting: [], problems: [], missed: [], achieved: [], routine: 0 }
+  const link = (x) => `[[${x.ref}|${String(x.name ?? '?').replace(/[\]|\n]/g, ' ')}]]`
+  const cut = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 160)
+  const lines = []
+  for (const w of f.waiting.slice(0, 8)) lines.push(`- ❓ ${link(w)}: ${t(`digest.wait_${w.kind}`)}${w.detail && w.kind !== 'question' ? ` (${w.detail})` : ''}`)
+  for (const p of f.problems.slice(0, 6)) lines.push(`- ⚠️ ${link(p)}${p.summary ? `: ${cut(p.summary)}` : ''}`)
+  for (const m of f.missed.slice(0, 4)) lines.push(`- ⏸ ${link(m)}: ${t('digest.missed_starts', { n: m.n })}`)
+  for (const a of f.achieved.slice(0, 5)) lines.push(`- ✅ ${link(a)}${a.summary ? `: ${cut(a.summary)}` : ''}`)
+  const tail = []
+  if (f.routine) tail.push(t('digest.routine_line', { n: f.routine }))
+  // Runs that started but have no assessment yet (the deputy was switched on
+  // after they ended, or it could not answer) are not "nothing".
+  if (!lines.length && !f.routine) tail.push(input.stats?.runs ? t('digest.runs_unassessed', { n: input.stats.runs }) : t('digest.nothing_happened'))
   return {
     headline: t('digest.fallback_headline'),
-    body: t('digest.fallback_body', { runs: s.runs, waiting: s.waiting, missed: s.missed }),
+    body: [t('digest.fallback_intro'), lines.join('\n'), tail.join(' ')].filter(Boolean).join('\n\n'),
   }
 }
 
@@ -456,12 +516,16 @@ export async function generateDigest({ startMs, endMs, preview = false, send = t
     const m = digestModel()
     const r = await llmJson({
       purpose: 'digest', source: jobSource('digest'), model: m, fallbacks: jobFallbacks('digest', m), ...jobRouting('digest'),
-      retry: jobRetry('digest'), system: digestSystemPrompt(), prompt: input.prompt,
-      schema: DIGEST_SCHEMA, schemaName: 'daily_digest', maxTokens: 1500, temperature: 0.3, timeoutMs: 120_000,
+      retry: jobRetry('digest', DIGEST_RETRY), reasoning: jobReasoning('digest', 'off'),
+      system: digestSystemPrompt(), prompt: input.prompt,
+      schema: DIGEST_SCHEMA, schemaName: 'daily_digest', maxTokens: 4000, temperature: 0.3, timeoutMs: 180_000,
     })
     if (r.ok) {
       headline = String(r.data.headline ?? '').trim().slice(0, 80)
       body = String(r.data.body ?? '').trim().slice(0, 4000)
+      // A model asked about an empty list likes to say it is empty ("❓ nothing
+      // waits for you"). When nothing waits, a ❓ line says nothing.
+      if (!input.facts.waiting.length) body = body.split('\n').filter(l => !/^\s*(-\s*)?❓/.test(l)).join('\n').replace(/^\s+/, '')
       usage = r.usage; source = r.source; model = r.model
     } else {
       ({ headline, body } = plainDigest(input)); state = 'fallback'; error = r.error
