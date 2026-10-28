@@ -99,3 +99,29 @@ export function chainUsable(purpose, primaryModel) {
   }
   return false
 }
+
+/**
+ * The job's own transport-retry budget, or null for "the global one".
+ *
+ * `llm_<purpose>_retry_attempts` and `llm_<purpose>_retry_deadline_ms` — both
+ * optional, both read with the empty-string guard (`Number('')` is 0 and
+ * finite). `defaults` is what the caller wants while the operator has set
+ * nothing: the deputy passes a short budget, a job that passes none keeps the
+ * global policy exactly as before.
+ */
+export function jobRetry(purpose, defaults = null) {
+  const read = (key) => {
+    const raw = String(getSetting(`llm_${purpose}_${key}`) ?? '').trim()
+    if (!raw) return null
+    const n = Number(raw)
+    return Number.isFinite(n) && n >= 0 ? n : null
+  }
+  const attempts = read('retry_attempts') ?? defaults?.attempts ?? null
+  const deadlineMs = read('retry_deadline_ms') ?? defaults?.deadlineMs ?? null
+  if (attempts == null && deadlineMs == null) return null
+  return {
+    ...(attempts != null ? { attempts: Math.floor(attempts) } : {}),
+    ...(deadlineMs != null ? { deadlineMs: Math.floor(deadlineMs) } : {}),
+    ...(defaults?.maxMs != null ? { maxMs: defaults.maxMs } : {}),
+  }
+}

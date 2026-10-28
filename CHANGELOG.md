@@ -16,6 +16,59 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-10-28
+
+### Added
+
+- **The deputy: a model reads every report for you.** Settings → Reports has a
+  new mode, *Deputy*. After every finished run (and every follow-up) an LLM
+  reads the report together with the task, the agent's last runs and the
+  numbers the hub measured (duration and tokens against the usual, merge
+  result, incidents), writes a short summary, and decides whether you hear
+  about it now — as *Info* (silent), *Warning* or *Critical*, in one or two
+  sentences with a link to the run, instead of the full report. Questions,
+  access requests, blocked merges and anything that can lose work still
+  arrive at once and unchanged. When several agents fail for one cause, you
+  get one message; a problem you were already told about is not repeated
+  until it gets worse or three days have passed. If the model cannot answer,
+  failures arrive as one collected short line every ten minutes.
+- **Your own rules for when you want to be told** — a text field in Settings →
+  Reports, pre-filled with a default you can edit, plus extra rules per
+  repository in the repository form. "Test rules" lets the deputy judge your
+  last 30 reports with the text you typed, without saving or sending.
+- **"Report the result" per agent and per single run**: *the deputy decides*,
+  *always report* (every result, in the short form) or *only critical* — in the
+  agent form, the single-run form, Quick Run and on the run page.
+- **The daily digest**: once a day, at a time you choose, a short account of
+  what happened — what waits for you first, then problems (including starts
+  that were due and did not happen), what was achieved, and the routine in one
+  sentence; a day like yesterday is said in one sentence. With links to the
+  runs. Every digest is kept under Settings → Reports → Daily digests, with a
+  preview and "send now".
+- **The modes "Classic" (as before) and "Only urgent"** (no reports at all,
+  only what waits for you or can lose work).
+- **Both models are configurable** like the hub's other LLM jobs: source,
+  model, fallback and OpenRouter routing, plus how often to retry.
+- **The run page shows the deputy's decision**: the level, the rule that
+  decided, the message that was (or would have been) sent, the summary, and
+  "Assess again".
+- **Notifier plugins can render messages richly**: an optional structured
+  body (`rich`: title, paragraphs, lists, links, buttons) and a `priority`;
+  Telegram shows links inside the text and sends info silently. Plugins that
+  do not know the fields send the plain text as before.
+
+### Changed
+
+- Nothing changes after an update until you switch the deputy mode or the
+  daily digest on: the default mode is *Classic*, the digest is off.
+
+### Fixed
+
+- **The OpenRouter routing of the hub's own LLM jobs is saved again.** On the
+  settings page, choosing "auto" or lifting a pinned serving provider for the
+  check, title and extras models was silently not stored — the form's field
+  names and the save did not match.
+
 ## 2026-09-26
 
 ### Fixed

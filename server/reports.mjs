@@ -12,6 +12,7 @@ import { reportIncident, detectorLog, openIncidentsOf } from './incidents.mjs'
 import { typeFromClaudeError, typeFromText, TYPE_TEXT, foreignClaudeSession, isSessionStopped } from './detect.mjs'
 import { getHarness } from './harnesses/index.mjs'
 import { transcriptState } from './cursor-transcript.mjs'
+import { noteReport, routeMessage } from './triage.mjs'
 
 const MAX_REPORT = 200 * 1024   // planning 11: report ≤ 200 kB
 
@@ -689,6 +690,9 @@ export async function handleReport(runId, body, via = 'http') {
       // work to merge the gate holds and the notification happens in the
       // integrator, so the detail has to be in the database already by then.
       if (detail) db.prepare(`UPDATE runs SET report_detail_md=? WHERE id=?`).run(detail, runId)
+      // The deputy's note, before the first await: it must exist whatever the
+      // finish gate does next (server/triage.mjs).
+      noteReport(runId, { seq: 0, type: 'done', short: text, detail })
       const gate = await finishGate(runId, text, via)
       if (gate?.hold) return { ok: true, message: gate.message ?? null }
       db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now'), report_md=?,
@@ -705,6 +709,7 @@ export async function handleReport(runId, body, via = 'http') {
     case 'failed': {
       db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now'), report_md=? WHERE id=?`)
         .run(`**Failed:** ${text}`, runId)
+      noteReport(runId, { seq: 0, type: 'failed', short: text, detail })
       addEvent(runId, 'failed')
       // Never merged automatically — but named: what a failed run left behind is
       // a fact the operator should not have to go looking for.
@@ -1218,12 +1223,14 @@ async function followUpDone(run, text, detail, via) {
   // simply asked again.
   if (run.followup_open && run.finish_state) {
     if (detail) db.prepare(`UPDATE runs SET followup_detail_md=? WHERE id=?`).run(detail, runId)
+    noteReport(runId, { seq: run.followups ?? 0, type: 'followup', detail })
     const gate = await finishGate(runId, '', via)
     if (gate?.hold) return { ok: true, message: gate.message ?? null }
     const fresh = db.prepare('SELECT * FROM runs WHERE id=?').get(runId)
     return completeFollowUp(runId, { mergeLine: gate?.mergeLine ?? null, merged: false, message: true, followups: fresh.followups })
   }
   const n = (run.followups ?? 0) + 1
+  noteReport(runId, { seq: n, type: 'followup', short: text, detail })
   // The commission is answered: the clock stops here and its "longer than
   // expected" statement is retracted. While the gate / merge runs the run still
   // displays as working — through `followup_open`, not through the clock.
@@ -1461,6 +1468,16 @@ export async function notifyRun(runId, type, text, lang = null) {
   const have = db.prepare('SELECT 1 FROM events WHERE run_id = ? AND kind IN (?,?) LIMIT 1').get(runId, flag, legacy)
   // Help calls are never duplicates: every question needs an answer.
   if (have && lang?.dedupe !== false) return false
+  // Which way this message goes (server/triage.mjs): on as always, or to the
+  // deputy, who decides about an end of work and writes the short version — or
+  // nowhere at all in the "urgent only" mode. What waits for a human is never
+  // routed away. The flag is written either way: the hub HAS dealt with it.
+  const route = routeMessage(runId, type, text)
+  if (!route.send) {
+    addEvent(runId, flag, { delivered: false, routed: route.route })
+    addEvent(runId, 'notify_routed', { type, route: route.route })
+    return false
+  }
   // The run's own switch (the checkbox under its terminal). Off means: this
   // message is not sent, and it is written down that it was not — the flag is
   // deliberately NOT set, so switching the box back on lets the same type

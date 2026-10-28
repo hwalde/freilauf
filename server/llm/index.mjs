@@ -98,12 +98,23 @@ function numSetting(key, dflt, max = Infinity) {
   return Math.min(max, n)
 }
 
-/** The transport-retry policy as the operator set it. */
-function retryPolicy() {
+/**
+ * The transport-retry policy as the operator set it — or as the JOB set it.
+ *
+ * A job may bring its own, narrower budget (`retry`, from `jobRetry()` in
+ * job.mjs): the deputy that reads a report must not wait ten rounds on a dead
+ * provider while every other report queues up behind it. Each field the job
+ * leaves out falls back to the global setting, and the hard cap of ten holds
+ * for both. `deadlineMs` is the job's whole-call budget: no new round starts
+ * once it is spent.
+ */
+function retryPolicy(retry = null) {
+  const own = (k) => (retry && Number.isFinite(retry[k]) && retry[k] >= 0 ? retry[k] : null)
   return {
-    attempts: Math.floor(numSetting('llm_retry_attempts', MAX_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS)),
-    baseMs: Math.floor(numSetting('llm_retry_base_ms', 2000, 10 * 60_000)),
-    maxMs: Math.floor(numSetting('llm_retry_max_ms', 30_000, 10 * 60_000)),
+    attempts: Math.min(MAX_RETRY_ATTEMPTS, Math.floor(own('attempts') ?? numSetting('llm_retry_attempts', MAX_RETRY_ATTEMPTS, MAX_RETRY_ATTEMPTS))),
+    baseMs: Math.floor(own('baseMs') ?? numSetting('llm_retry_base_ms', 2000, 10 * 60_000)),
+    maxMs: Math.floor(own('maxMs') ?? numSetting('llm_retry_max_ms', 30_000, 10 * 60_000)),
+    deadlineMs: own('deadlineMs'),
   }
 }
 
@@ -355,6 +366,9 @@ async function askOne(entry, req) {
  * @param {number} [req.maxTokens]
  * @param {number} [req.temperature]
  * @param {number} [req.timeoutMs]
+ * @param {object} [req.retry]            the job's own transport-retry budget
+ *                                        ({attempts?, baseMs?, maxMs?, deadlineMs?});
+ *                                        missing fields fall back to `llm_retry_*`
  * @returns {Promise<{ok:true, data, usage, source, model, repaired?: string[]}
  *                 | {ok:false, error:string, stage:'config'|'transport'|'parse'|'validate',
  *                    answer?: string}>}
@@ -367,7 +381,7 @@ async function askOne(entry, req) {
  */
 export async function llmJson({
   source, model, fallbacks = [], prompt, system, schema, schemaName, purpose = 'llm',
-  servingProvider = null, orRouting = null, maxTokens, temperature, timeoutMs,
+  servingProvider = null, orRouting = null, maxTokens, temperature, timeoutMs, retry = null,
 } = {}) {
   // The chain: primary first, then the fallbacks. A fallback that repeats the
   // primary VERBATIM (same source, same model) is dropped — retrying the
@@ -385,7 +399,9 @@ export async function llmJson({
   }
 
   const req = { prompt, system, schema, schemaName, purpose, servingProvider, orRouting, maxTokens, temperature, timeoutMs }
-  const policy = retryPolicy()
+  const policy = retryPolicy(retry)
+  const startedMs = Date.now()
+  const pastDeadline = () => policy.deadlineMs != null && Date.now() - startedMs >= policy.deadlineMs
 
   let configFail = null        // the PRIMARY entry's config answer, when even the fallbacks cannot rescue the call
   let lastTransport = null     // the newest transport failure — the honest error if the budget runs out
@@ -399,7 +415,7 @@ export async function llmJson({
       // fallback must be tried even at `llm_retry_attempts=0`, or the whole
       // feature would depend on a second setting. Every later walk only runs
       // while the attempt budget lasts.
-      if (round > 0 && transportAttempts >= policy.attempts) return finishTransport()
+      if (round > 0 && (transportAttempts >= policy.attempts || pastDeadline())) return finishTransport()
       const r = await askOne(entry, req)
       if (r.ok) return r
       if (r.stage === 'config') {
@@ -437,7 +453,7 @@ export async function llmJson({
       if (configFail) return fail(configFail.stage, configFail.error)
       return fail('config', 'no model source in the chain is usable')
     }
-    if (transportAttempts >= policy.attempts) return finishTransport()
+    if (transportAttempts >= policy.attempts || pastDeadline()) return finishTransport()
     await sleep(backoffDelayMs(round, policy))
     round++
   }

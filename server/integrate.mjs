@@ -1484,6 +1484,15 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
     ? (await sh('git', ['-C', dir, 'diff', '--name-only', `${beforeSha}..${mergedSha}`]))
       .stdout.split('\n').map(x => x.trim()).filter(Boolean)
     : []
+  // …and how many commits of the run's own came with it (merge commits not
+  // counted) — the size of the work, for the deputy (server/report-context.mjs).
+  // A git that did not answer is "unknown" (null), never "0 commits".
+  let commits = null
+  if (!already && dir && beforeSha && mergedSha) {
+    const c = await sh('git', ['-C', dir, 'rev-list', '--count', '--no-merges', `${beforeSha}..${mergedSha}`])
+    const n = c.ok && c.stdout.trim() !== '' ? Number(c.stdout.trim()) : NaN
+    commits = Number.isInteger(n) ? n : null
+  }
   // Read BEFORE the update: whether this integration belongs to a follow-up
   // report is a fact about the run as it stood when the merge started, and a
   // follow-up's run is 'done' on both sides of the update. A failed run whose
@@ -1494,7 +1503,7 @@ async function finishMerged(runId, tip, repo, { mergedSha = null, beforeSha = nu
               finish_state=NULL, status=CASE WHEN followup_open=1 THEN status ELSE 'done' END,
               ended_at=COALESCE(ended_at, datetime('now')) WHERE id=?`)
     .run(tip, runId)
-  addEvent(runId, 'merged', already ? { already: true, sha: tip, files, followup: followUp } : { sha, files, followup: followUp })
+  addEvent(runId, 'merged', already ? { already: true, sha: tip, files, followup: followUp } : { sha, files, commits, followup: followUp })
   nextCheckAt.delete(runId)
   lastTip.delete(runId)
 

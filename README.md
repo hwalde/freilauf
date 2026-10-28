@@ -84,6 +84,15 @@ Freilauf does, and it only goes forward.
   the project pushes them (`fl-panel`, one HTTP call), Freilauf renders them
   with the time they were measured and never learns what they mean
   ([docs/panels.md](docs/panels.md)).
+- **A deputy instead of a flood of reports.** If you want, a model reads every
+  finished run's report for you — with the task, the agent's last runs and the
+  numbers the hub measured — and decides whether you hear about it now: a
+  silent *Info*, a *Warning* or *Critical*, in one or two sentences with a link
+  to the run. When and when not is up to you: a rules text in plain words, plus
+  rules per repository, and "always report" per agent or run. Once a day a
+  **daily digest** tells what happened — what waits for you first, a routine
+  day in one sentence. Questions and blocked merges still arrive at once. Off
+  by default (Settings → Reports).
 - **A boundary around the agent, if you want one.** A run can work inside a
   container: its own clone instead of your checkout, its own home, and a
   network whose only way out is a proxy that answers a readable 403 for a host
@@ -326,6 +335,12 @@ you expose anything.
 **Can I control the agents from the terminal too?**
 Yes. Every run is a tmux session; `fl-attach` drops you into it, and plain
 `tmux attach` works as well. The browser terminal shows the same session.
+
+**Will my phone ring for every finished run?**
+Only if you want it to. In Settings → Reports the *Deputy* mode lets a model
+read each report and send you only what matters, in one or two sentences, and
+a daily digest sums up the rest; *Only urgent* sends nothing but what waits for
+you. *Classic* — every report in full — stays the default.
 
 **Can I add other notification services?**
 Yes — notifications are plugins. Telegram ships built in, none is required, and

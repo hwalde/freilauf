@@ -107,6 +107,7 @@ only `PASS` ends the task.
 | Starting runs, schedules, budget gate | `server/scheduler.mjs`, `server/quota.mjs` | Scheduling; Quota and gates |
 | Worktree, prompt, launch, resume | `server/runner.mjs`, `bin/fl-start` | Launch and resume |
 | Reports, follow-ups, attention state | `server/reports.mjs`, `bin/fl-report`, `server/hub-socket.mjs`, `server/goal.mjs` | Reports and follow-ups; Attention |
+| The deputy, the daily digest, rich messages | `server/triage.mjs`, `server/digest.mjs`, `server/report-context.mjs`, `server/rich.mjs`, `server/report-pages.mjs` | Notifications: deputy and daily digest (+ `docs/plugins.md`) |
 | Extra skills, the cleanup agent, model catalogs, extras suggestion | `server/zusaetze.mjs`, `server/cleanup.mjs`, `server/models.mjs`, `server/extras-suggest.mjs` | Run definition |
 | Watching, anomalies, incidents | `server/watcher.mjs`, `server/detect.mjs`, `server/incidents.mjs` | Watcher and incidents |
 | Merging into the base branch | `server/integrate.mjs` | Integration |

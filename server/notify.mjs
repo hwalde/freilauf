@@ -32,6 +32,7 @@ import { allPlugins } from './plugins/registry.mjs'
 import { isPluginEnabled, credentialSpec, credentialValue } from './plugins/store.mjs'
 import { pluginFields, pluginSettingValue } from './plugins/settings.mjs'
 import { pluginCtx } from './plugins/context.mjs'
+import { toPlain } from './rich.mjs'
 
 // Where a link points is a fact about this installation, not about a channel,
 // so it lives in util.mjs. Re-exported because most callers that build a
@@ -190,12 +191,22 @@ function safeT(key, fallback) {
  * (docs/plugins.md, "The message"). A bare string is accepted because half the
  * call sites have one and nothing is gained by making them build an object.
  */
+export const PRIORITIES = ['info', 'warning', 'critical']
+
 export function normalizeMessage(message) {
   const m = typeof message === 'string' ? { text: message } : (message ?? {})
   const content = String(m.attachment?.content ?? '')
+  // The structured body is optional and only ever ADDS: `text` stays the
+  // content every channel can render, so a message with `rich` and no text
+  // gets its text made from it here — a plugin that knows nothing about `rich`
+  // still sends the whole message.
+  const rich = m.rich && typeof m.rich === 'object' && Array.isArray(m.rich.blocks) ? m.rich : null
+  const text = String(m.text ?? '') || (rich ? toPlain(rich) : '')
   return {
     kind: String(m.kind ?? 'system'),
-    text: String(m.text ?? ''),
+    text,
+    priority: PRIORITIES.includes(m.priority) ? m.priority : null,
+    rich,
     // Optional pre-rendered HTML. The hub itself never sets it — it composes
     // plain text and lets each channel render — but a caller that has HTML may
     // pass it, and a channel that can use it may prefer it over `text`.
@@ -241,7 +252,24 @@ export async function notify(message) {
   }))
 
   const delivered = results.filter(r => r.ok).length
+  if (delivered > 0) recordSent(msg)
   return { sent: delivered > 0, delivered, results }
+}
+
+/**
+ * What the operator was actually told, from whatever source — the deputy reads
+ * it (server/triage.mjs) so it does not tell the same thing twice. Only what a
+ * channel TOOK is written, and only by the hub process that sent it. Kept 30
+ * days; the prune rides on the write. Never throws: a notification that
+ * reached the phone must not fail over its own bookkeeping.
+ */
+function recordSent(msg) {
+  try {
+    const text = String(msg.text ?? '').slice(0, 1000)
+    db.prepare('INSERT INTO sent_messages(kind, run_id, level, text) VALUES(?,?,?,?)')
+      .run(msg.kind, msg.runId ?? null, msg.priority ?? null, text)
+    db.prepare(`DELETE FROM sent_messages WHERE ts < datetime('now', '-30 days')`).run()
+  } catch { /* bookkeeping only */ }
 }
 
 /**
