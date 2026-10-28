@@ -11,11 +11,11 @@ import { t } from './i18n.mjs'
 import { redirect } from './web-helpers.mjs'
 import { layout, problemPage, llmSourceFields, llmFallbackFields, saveJobRouting } from './pages.mjs'
 import { llmSources } from './llm/sources.mjs'
-import { REASONING_CHOICES } from './llm/job.mjs'
+import { REASONING_CHOICES, MAX_TOKENS_CEILING } from './llm/job.mjs'
 import { parseMarkup, toHtml } from './rich.mjs'
 import {
   notifyMode, digestOn, triageWanted, triageUsable, markTriageSince, NOTIFY_MODES, NOTIFY_RESULT,
-  DEFAULT_TRIAGE_MODEL, TRIAGE_RETRY, askDeputy, decideLevel, reassess, endedByOperator,
+  DEFAULT_TRIAGE_MODEL, TRIAGE_RETRY, DEFAULT_MAX_TOKENS, askDeputy, decideLevel, reassess, endedByOperator,
 } from './triage.mjs'
 import {
   digestTime, digestQuietDays, DEFAULT_DIGEST_MODEL, DIGEST_RETRY, markDigestSince,
@@ -53,6 +53,8 @@ function jobFieldset(prefix, s, sources, { legend, hint, model, defaultModel, mr
       <label>${e(t('reports.reasoning'))} ${select(`${prefix}_reasoning`, REASONING_CHOICES.includes(s[`${prefix}_reasoning`]) ? s[`${prefix}_reasoning`] : 'off',
         REASONING_CHOICES.map(v => [v, t(`reports.reasoning_${v}`)]))}
         <span class="dim">${e(t('reports.reasoning_hint'))}</span></label>
+      <label>${e(t('reports.max_tokens'))} <input name="${prefix}_max_tokens" type="number" min="256" max="${MAX_TOKENS_CEILING}" step="1000" value="${e(s[`${prefix}_max_tokens`] ?? '')}" placeholder="${DEFAULT_MAX_TOKENS}">
+        <span class="dim">${e(t('reports.max_tokens_hint', { n: DEFAULT_MAX_TOKENS }))}</span></label>
       <label>${e(t('reports.retry_attempts'))} <input name="${prefix}_retry_attempts" type="number" min="0" max="10" step="1" value="${e(s[`${prefix}_retry_attempts`] ?? '')}" placeholder="${e(String(retryDefaults?.attempts ?? t('reports.retry_global')))}">
         <span class="dim">${e(t('reports.retry_attempts_hint'))}</span></label>
       <label>${e(t('reports.retry_deadline'))} <input name="${prefix}_retry_deadline_ms" type="number" min="0" step="1000" value="${e(s[`${prefix}_retry_deadline_ms`] ?? '')}" placeholder="${e(String(retryDefaults?.deadlineMs ?? t('reports.retry_global')))}">
@@ -121,7 +123,7 @@ export async function pageReportSettings(req, res) {
 const REPORT_KEYS = ['notify_mode', 'digest_on', 'digest_quiet_days', 'digest_rules']
 // The serving-provider routing is not in this list: `saveJobRouting()` derives
 // `or_provider` and `or_routing` from the mode the form carries.
-const JOB_FIELDS = ['source', 'model', 'fallback', 'fallback_model', 'reasoning', 'retry_attempts', 'retry_deadline_ms']
+const JOB_FIELDS = ['source', 'model', 'fallback', 'fallback_model', 'reasoning', 'max_tokens', 'retry_attempts', 'retry_deadline_ms']
 
 export async function reportSettingsSave(req, res, url, formBody) {
   const b = await formBody()
@@ -149,6 +151,10 @@ export async function reportSettingsSave(req, res, url, formBody) {
       if (!Object.hasOwn(b, k)) continue
       const v = String(b[k] ?? '').trim()
       if (f === 'reasoning' && !REASONING_CHOICES.includes(v)) continue
+      if (f === 'max_tokens' && v !== '' && !(Number.isInteger(Number(v)) && Number(v) >= 256 && Number(v) <= MAX_TOKENS_CEILING)) {
+        problems.push(t('reports.err_max_tokens', { min: 256, max: MAX_TOKENS_CEILING }))
+        continue
+      }
       if ((f === 'retry_attempts' || f === 'retry_deadline_ms') && v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) {
         problems.push(t('reports.err_number', { field: k }))
         continue

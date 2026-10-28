@@ -1949,5 +1949,8 @@
   "llm.kind_cut_off": "answer cut off at the token limit",
   "llm.recovery_failed": "(A last try on another serving provider failed as well: {error})",
   "digest.still_open": "still open, day {n}",
-  "digest.quoted": "\"{text}\""
+  "digest.quoted": "\"{text}\"",
+  "reports.max_tokens": "Token limit",
+  "reports.max_tokens_hint": "Thinking counts against it; only what is used is paid. Empty = {n}.",
+  "reports.err_max_tokens": "Token limit: a whole number from {min} to {max}."
 }

@@ -140,3 +140,20 @@ export function jobReasoning(purpose, dflt = null) {
   const pick = REASONING_CHOICES.includes(v) ? v : dflt
   return pick === 'model' ? null : pick
 }
+
+/** The hard ceiling of `jobMaxTokens()`: far above any answer, low enough that a runaway costs cents. */
+export const MAX_TOKENS_CEILING = 128_000
+
+/**
+ * The job's token limit: `llm_<purpose>_max_tokens`, or the caller's default.
+ * Thinking counts against it — a thinking model measured 21k reasoning tokens
+ * for one deputy question — and only what is used is paid, so the defaults of
+ * the deputy and the digest are generous on purpose. Empty is "not set"
+ * (`Number('')` is 0); anything below 256 is not a usable answer budget.
+ */
+export function jobMaxTokens(purpose, dflt) {
+  const raw = String(getSetting(`llm_${purpose}_max_tokens`) ?? '').trim()
+  if (!raw) return dflt
+  const n = Number(raw)
+  return Number.isInteger(n) && n >= 256 ? Math.min(n, MAX_TOKENS_CEILING) : dflt
+}

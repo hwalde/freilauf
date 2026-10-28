@@ -1949,5 +1949,8 @@
   "llm.kind_cut_off": "Antwort am Token-Limit abgeschnitten",
   "llm.recovery_failed": "(Ein letzter Versuch bei einem anderen Anbieter ist ebenfalls gescheitert: {error})",
   "digest.still_open": "weiterhin offen, Tag {n}",
-  "digest.quoted": "„{text}“"
+  "digest.quoted": "„{text}“",
+  "reports.max_tokens": "Token-Limit",
+  "reports.max_tokens_hint": "Nachdenken zählt mit; bezahlt wird nur, was verbraucht wird. Leer = {n}.",
+  "reports.err_max_tokens": "Token-Limit: eine ganze Zahl von {min} bis {max}."
 }
