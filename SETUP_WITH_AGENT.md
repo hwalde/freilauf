@@ -496,7 +496,14 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
     schedules, watches, merges, records and reports exactly the same, it just
     says nothing out loud. Nothing nags about it, nothing errors, and no step of
     the Welcome wizard requires it. Another channel is a plugin package with
-    `"kind": "notifier"` (see `docs/plugins.md`).
+    `"kind": "notifier"` (see `docs/plugins.md`). **Settings → Reports**
+    (`/settings/reports`) decides what of it reaches the human: *Classic* (every
+    report in full, the default), *Deputy* (a model reads each report and sends
+    only what matters, in one or two sentences with a link — it needs an LLM
+    source with structured outputs, chosen on the same page) or *Only urgent*;
+    plus the human's own rules in plain words, and an optional daily digest at a
+    chosen time. Leave it at the defaults unless the human asks; the rules text
+    is theirs to write.
  6. **Settings → Freilauf skills** (`/settings/skills`) — *optional, and asked
     once in the wizard.* Freilauf ships agent skills of its own under `skills/`
     that teach any coding agent how to drive the hub: find and read runs, create
@@ -641,6 +648,7 @@ If your task is to change Freilauf rather than just run it:
 | Rate limits / provider outages | `server/incidents.mjs`, `server/harnesses/patterns.mjs` |
 | Plugins — coding agents, model providers, notification channels: the contract, in depth | **`docs/plugins.md`** (the one document to hand an agent for this), `server/harnesses/`, `server/providers/`, `server/notifiers/` |
 | Saying something to a human — the facade, the page, the CLI | `server/notify.mjs`, `server/notifications.mjs`, `bin/fl-notify` |
+| Deciding what the human hears — the deputy, the daily digest, rich messages | `server/triage.mjs`, `server/digest.mjs`, `server/report-context.mjs`, `server/rich.mjs`, `server/report-pages.mjs` |
 | Loading, validating, storing and configuring plugins | `server/plugins/` (`registry`, `loader`, `manifest`, `store`, `install`, `discovery`, `settings`, `context`, `web`) |
 | The hub's own LLM calls: sources, fallback chain, structured output, alerts | `server/llm/` (`index` = `llmJson()`, `job` = the per-job chain planner, `sources`, `schema`, `json`, `alerts`) |
 | The first-run wizard | `server/welcome.mjs` |

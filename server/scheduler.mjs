@@ -69,6 +69,65 @@ export function stopScheduler() { clearInterval(timer); timer = null }
  * `fired` debounce, so the tick that runs right after cannot start it again.
  */
 let caughtUp = false
+
+/**
+ * The start protocol: every schedule slot that came due, and what became of it
+ * — started, skipped (with the reason), deferred by the budget gate, failed.
+ * One row per (agent, slot), written as `starting` before the start and
+ * updated with what came of it, so a deferred start
+ * that goes later is ONE slot that ended up started. The daily digest reads it
+ * to say what should have run and did not (server/digest.mjs); a slot with no
+ * row at all is one the scheduler never saw (hub down, pipeline off). Never
+ * throws: the protocol must not cost a start.
+ */
+export function logSlot(agentId, slot, outcome, reason = null, runId = null) {
+  try {
+    db.prepare(`INSERT INTO schedule_log(agent_id, slot, outcome, reason, run_id) VALUES(?,?,?,?,?)
+      ON CONFLICT(agent_id, slot) DO UPDATE SET outcome=excluded.outcome, reason=excluded.reason,
+        run_id=COALESCE(excluded.run_id, schedule_log.run_id), ts=datetime('now')`)
+      .run(agentId, slot, outcome, reason, runId)
+  } catch { /* bookkeeping only */ }
+}
+
+/**
+ * The slot a deferred run came from (if it came from a schedule) ends up
+ * started after all — the same row, not a second one.
+ */
+export function scheduleLogStarted(runId) {
+  try { db.prepare(`UPDATE schedule_log SET outcome='started', reason=NULL, ts=datetime('now') WHERE run_id=? AND outcome='deferred'`).run(runId) } catch { /* bookkeeping */ }
+}
+
+/**
+ * A scheduled start with its protocol entry closed whatever happens: a start
+ * that throws is recorded as `failed` and thrown on, so the slot never stays
+ * `starting` — which the digest would not count as missed.
+ */
+async function startLogged(agent, slot) {
+  try {
+    const r = await startForAgent(agent)
+    logStart(agent, slot, r)
+    return r
+  } catch (err) {
+    logSlot(agent.id, slot, 'failed', String(err?.message ?? err).slice(0, 300))
+    throw err
+  }
+}
+
+/** What a scheduled start came to, in the protocol's words. */
+function logStart(agent, slot, r) {
+  if (!r) return
+  if (r.ok && r.deferred) {
+    const ev = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='deferred' ORDER BY id DESC LIMIT 1`).get(r.runId)
+    let reason = null
+    try { reason = JSON.parse(ev?.payload ?? 'null')?.reason ?? null } catch { reason = null }
+    logSlot(agent.id, slot, 'deferred', reason, r.runId)
+  } else if (r.ok) {
+    logSlot(agent.id, slot, 'started', null, r.runId ?? null)
+  } else {
+    logSlot(agent.id, slot, 'failed', String(r.error ?? '').slice(0, 300), r.runId ?? null)
+  }
+}
+
 async function catchUpMissed(now) {
   if (caughtUp) return
   caughtUp = true
@@ -85,9 +144,11 @@ async function catchUpMissed(now) {
     const why = startBlocked(agent)
     if (why) {
       if (why.runId) addEvent(why.runId, 'schedule_skipped', { agent: agent.name, slot, reason: why.reason, catch_up: true })
+      logSlot(agent.id, slot, 'skipped', why.reason)
       continue
     }
-    const r = await startForAgent(agent)
+    logSlot(agent.id, slot, 'starting')
+    const r = await startLogged(agent, slot)
     if (r?.runId) {
       addEvent(r.runId, 'schedule_catchup', { agent: agent.name, missed_at: missed.toISOString(), last_tick_at: new Date(last).toISOString() })
     }
@@ -140,6 +201,7 @@ export async function tick() {
       AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agent.id)
     if (busy) {
       addEvent(busy.id, 'schedule_skipped', { agent: agent.name, slot })
+      logSlot(agent.id, slot, 'skipped', 'busy')
       continue
     }
     // The repo is switched off. Same shape as the ceiling below: the slot is
@@ -147,6 +209,7 @@ export async function tick() {
     if (repoInactive(agent.repo_id)) {
       const any = db.prepare(`SELECT id FROM runs WHERE repo_id=? ORDER BY started_at DESC LIMIT 1`).get(agent.repo_id)
       if (any) addEvent(any.id, 'schedule_skipped', { agent: agent.name, slot, reason: 'repo_inactive' })
+      logSlot(agent.id, slot, 'skipped', 'repo_inactive')
       continue
     }
     // The repo's own ceiling (repos.max_parallel). The slot is marked as fired
@@ -156,13 +219,17 @@ export async function tick() {
       const any = db.prepare(`SELECT id FROM runs WHERE repo_id=? AND status IN ('running','waiting_help')
         ORDER BY started_at DESC LIMIT 1`).get(agent.repo_id)
       if (any) addEvent(any.id, 'schedule_skipped', { agent: agent.name, slot, reason: 'max_parallel' })
+      logSlot(agent.id, slot, 'skipped', 'max_parallel')
       continue
     }
     // One-off schedules fire exactly once and then switch themselves off.
     if (agent.schedule_kind === 'einmalig') {
       db.prepare(`UPDATE agents SET schedule_kind='manuell', run_at=NULL, updated_at=datetime('now') WHERE id=?`).run(agent.id)
     }
-    await startForAgent(agent)
+    // Written BEFORE the start: a launch can take minutes (a fetch, an image
+    // build), and a slot the digest finds without a row reads as "hub down".
+    logSlot(agent.id, slot, 'starting')
+    await startLogged(agent, slot)
   }
   // Bound the map
   if (fired.size > 500) for (const k of fired.keys()) { if (!k.endsWith(slot)) fired.delete(k) }
@@ -538,6 +605,7 @@ export async function startDeferredRun(runId, { forced = false } = {}) {
   db.prepare(`UPDATE runs SET status='running', started_at=datetime('now'),
               last_activity_at=datetime('now') WHERE id=?`).run(runId)
   addEvent(runId, forced ? 'forced_start' : 'deferred_retry', {})
+  scheduleLogStarted(runId)
   const r = await launchRun(runId)
   if (!r.ok) notifyRun(runId, 'start_failed', `Start after deferral failed: ${r.error}`)
   return r

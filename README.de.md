@@ -89,6 +89,16 @@ das tut Freilauf, und es geht nur vorwärts.
   (`fl-panel`, ein HTTP-Aufruf), Freilauf zeigt sie mit dem Zeitpunkt der
   Messung und erfährt nie, was sie bedeuten
   ([docs/panels.md](docs/panels.md)).
+- **Ein Vertreter statt einer Flut von Reports.** Wenn du willst, liest ein
+  Modell den Report jedes fertigen Laufs für dich — mit der Aufgabe, den
+  letzten Läufen des Agenten und den Zahlen, die der Hub gemessen hat — und
+  entscheidet, ob du ihn jetzt sehen musst: als lautloser *Hinweis*, als
+  *Warnung* oder *Kritisch*, in ein bis zwei Sätzen mit Link zum Lauf. Wann und
+  wann nicht, bestimmst du: ein Regeltext in deinen Worten, Regeln pro
+  Repository und „immer melden“ pro Agent oder Lauf. Einmal am Tag erzählt ein
+  **Tagesbericht**, was los war — zuerst, was auf dich wartet, ein Routinetag in
+  einem Satz. Rückfragen und blockierte Merges kommen weiterhin sofort.
+  Standardmäßig aus (Einstellungen → Berichte).
 - **Eine Grenze um den Agenten, wenn du eine willst.** Ein Lauf kann in einem
   Container arbeiten: mit einem eigenen Klon statt deines Checkouts, einem
   eigenen Home und einem Netz, dessen einziger Weg nach draußen ein Proxy ist,
@@ -348,6 +358,13 @@ irgendetwas erreichbar machst.
 Ja. Jeder Lauf ist eine tmux-Session; `fl-attach` bringt dich hinein, und ein
 schlichtes `tmux attach` geht genauso. Das Browser-Terminal zeigt dieselbe
 Session.
+
+**Klingelt mein Handy bei jedem fertigen Lauf?**
+Nur wenn du es willst. Unter Einstellungen → Berichte liest im Modus
+*Vertreter* ein Modell jeden Report und schickt dir nur, was zählt, in ein bis
+zwei Sätzen; ein Tagesbericht fasst den Rest zusammen. *Nur Dringendes* schickt
+nichts außer dem, was auf dich wartet. *Klassisch* — jeder Report vollständig —
+bleibt der Standard.
 
 **Kann ich weitere Benachrichtigungsdienste hinzufügen?**
 Ja — Benachrichtigungen sind Plugins. Telegram ist eingebaut, keiner ist

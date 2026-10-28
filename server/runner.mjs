@@ -727,7 +727,7 @@ export function splitEnvArgs(args) {
 export function createRun({ repoId, agentId = null, harness, model = null, provider = null,
   orProvider = null, orRouting = null, effort = null, prompt, promptExtra = null, goal = null, branchMode, branchPattern = null,
   keepOnBranch = 0, review = 'inherit', expectedMinutes, skills = null, flows = null, title = null,
-  sandbox = 0, sandboxProfileId = null, sandboxOverrides = '{}', sandboxSpec = null }) {
+  sandbox = 0, sandboxProfileId = null, sandboxOverrides = '{}', sandboxSpec = null, notifyResult = 'auto' }) {
   if (!getHarness(harness)) throw new Error(t('run.unknown_harness', { harness }))
   if (!isHarnessEnabled(harness)) throw new Error(t('run.harness_not_configured', { harness }))
   if (!prompt?.trim()) throw new Error(t('run.empty_prompt'))
@@ -735,8 +735,8 @@ export function createRun({ repoId, agentId = null, harness, model = null, provi
   db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, model, provider, or_provider, or_routing,
               effort, prompt, prompt_extra, goal, branch_mode, branch_pattern, keep_on_branch, review,
               expected_minutes, skills, flows, title,
-              sandbox, sandbox_profile_id, sandbox_overrides, sandbox_spec, worktree_kind, last_activity_at)
-              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,? , datetime('now'))`)
+              sandbox, sandbox_profile_id, sandbox_overrides, sandbox_spec, worktree_kind, notify_result, last_activity_at)
+              VALUES(?,?,?, 'running', ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?,?,? , datetime('now'))`)
     .run(id, repoId, agentId, harness, model, provider, orProvider,
       orRouting ? JSON.stringify(orRouting) : null, effort, prompt, promptExtra,
       goal, branchMode, branchPattern, keepOnBranch ? 1 : 0, REVIEW_TRISTATE.includes(review) ? review : 'inherit',
@@ -744,7 +744,7 @@ export function createRun({ repoId, agentId = null, harness, model = null, provi
       sandbox ? 1 : 0, sandboxProfileId,
       typeof sandboxOverrides === 'string' ? sandboxOverrides : JSON.stringify(sandboxOverrides ?? {}),
       sandboxSpec ? (typeof sandboxSpec === 'string' ? sandboxSpec : JSON.stringify(sandboxSpec)) : null,
-      sandbox ? 'clone' : 'worktree')
+      sandbox ? 'clone' : 'worktree', ['auto', 'always', 'critical'].includes(notifyResult) ? notifyResult : 'auto')
   return id
 }
 
@@ -1747,7 +1747,8 @@ export async function launchRun(runId) {
     // meantime (reviveFailed) must not come back to life as a session on a run
     // recorded as closed — nobody would watch it, and retention could remove
     // the worktree under it. The session just started goes again instead.
-    const took = db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL, session_alive_at=NULL WHERE id=? AND resume_pending=1')
+    const took = db.prepare(`UPDATE runs SET tmux_session=?, resume_pending=0, tmux_closed_at=NULL, session_alive_at=NULL,
+                launch_no=launch_no+1, launched_at=datetime('now') WHERE id=? AND resume_pending=1`)
       .run(session, runId)
     if (!took.changes) {
       // The container first, as the kill route does: its client is the pane.
@@ -1762,7 +1763,10 @@ export async function launchRun(runId) {
       return { ok: false, error: 'the resume was taken back before its session started' }
     }
   } else {
-    db.prepare('UPDATE runs SET tmux_session=?, resume_pending=0, session_alive_at=NULL WHERE id=?').run(session, runId)
+    // `launch_no` counts every launch — start, retry, resume — so the deputy can
+    // tell two ends of one run apart (server/triage.mjs).
+    db.prepare(`UPDATE runs SET tmux_session=?, resume_pending=0, session_alive_at=NULL,
+                launch_no=launch_no+1, launched_at=datetime('now') WHERE id=?`).run(session, runId)
   }
   addEvent(runId, 'tmux_started', { session })
   if (resuming) {

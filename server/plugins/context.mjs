@@ -29,6 +29,7 @@ import { getSetting, setSetting } from '../db.mjs'
 import { credentialValue } from './store.mjs'
 import { pluginFields, pluginSettingKey } from './settings.mjs'
 import { getPlugin, getProvider } from './registry.mjs'
+import { richHelpers } from '../rich.mjs'
 
 /** Vendor calls made from a plugin: 8 seconds, exactly as before. */
 const TIMEOUT_MS = 8_000
@@ -159,5 +160,10 @@ export function pluginCtx(pluginId = null) {
       return true
     },
     log: (msg) => { try { console.log(`[plugin ${id ?? '?'}] ${msg}`) } catch { /* a log line never fails a run */ } },
+    // Renderers for a message's optional structured body (`message.rich`):
+    // `toHtml(rich, {maxLength})`, `toMarkdown(rich)`, `toPlain(rich)`. Handed
+    // over here because a plugin imports nothing of the hub's; a plugin that
+    // must also run against an older hub reads it as `ctx.rich?.`.
+    rich: richHelpers,
   }
 }

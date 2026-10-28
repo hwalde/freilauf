@@ -250,6 +250,7 @@ because the plugin asks `ctx.secret()` instead of reading a fixed name.
 | `setting(key, fallback)` | this plugin's own declared setting value |
 | `setSetting(key, value)` | write one of this plugin's OWN settings — resolved through the same field declaration, so a declared `settingKey` is honoured in both directions and a plugin can never write another plugin's row. A notifier's setup wizard needs it; there is nothing else it could store its token in |
 | `log(msg)` | one fail-soft console line, prefixed with the plugin id |
+| `rich` | `{ toHtml(rich, {maxLength}), toMarkdown(rich), toPlain(rich) }` — the renderers of a notifier message's optional structured body (see "The message"); absent on hubs older than it, so read it as `ctx.rich?.` |
 
 `json` and `registry` used to be `providerCtx()` in models.mjs; they live here
 now and models.mjs delegates, so there is exactly one implementation of the
@@ -1034,15 +1035,46 @@ subject and a body.
 
 ```js
 {
-  kind: 'run' | 'incident' | 'llm_alert' | 'flow' | 'repo' | 'deploy' | 'test' | 'system',
+  kind: 'run' | 'incident' | 'llm_alert' | 'flow' | 'repo' | 'deploy' | 'digest' | 'test' | 'system',
   text: 'the message, plain text, newline-separated',
   html: null,                       // optional pre-rendered HTML; the hub never sets it
   url: 'https://hub…/runs/<id>',    // optional deep link
   linkLabel: 'Open detail page',    // translated label for that link
   runId: '<uuid>' | null,           // the run this is about, when there is one
   attachment: { fileName, content } | null,
+  priority: 'info' | 'warning' | 'critical' | null,   // optional: how loud
+  rich: {                           // optional: the same content, structured
+    title: '⚠️ Warning · project · agent',
+    blocks: [
+      { type: 'paragraph', lines: [[{ text: 'Failed again: ' }, { text: 'the run', url: 'https://…' }]] },
+      { type: 'list', items: [[{ text: 'one', bold: true }], [{ text: 'two' }]] },
+    ],
+    buttons: [{ label: 'Open run', url: 'https://…/runs/<id>' }],
+  } | null,
 }
 ```
+
+**`priority` and `rich` are optional to use, and `text` always carries the
+whole message** — when the hub sends `rich`, it makes `text` from it (links as
+"words (URL)"). The deputy's short messages and the daily digest
+(`server/triage.mjs`, `server/digest.mjs`) send both. A channel that can do
+more renders `rich`: links inside the text, buttons, a bold title, lists — and
+`priority`: `info` is meant to arrive without a sound (Telegram:
+`disable_notification`), `warning` and `critical` with one. The renderers come
+through the context, because a plugin imports nothing of the hub's:
+`ctx.rich?.toHtml(rich, { maxLength })` (Telegram's HTML subset: `<b>`,
+`<a href>`, newlines; shortened block by block, never inside a tag),
+`ctx.rich?.toMarkdown(rich)` and `ctx.rich?.toPlain(rich)`. Read it with `?.`:
+a plugin must also run against a hub that has no `ctx.rich`. What fits where:
+
+| Channel | `rich` | `priority` |
+|---|---|---|
+| Telegram (built in) | `toHtml`, buttons as an inline keyboard | `info` → `disable_notification` |
+| Slack | `mrkdwn` with `<url\|label>`, buttons as Block Kit actions | — |
+| Discord | `toMarkdown`, the level as embed colour | — |
+| ntfy | `toMarkdown`, buttons as `actions` | 1–5 |
+| E-mail | `toHtml` in an HTML body, `title` as subject | — |
+| Webhook | `rich` and `priority` as they are, in the JSON | as is |
 
 Four rules a `send()` must keep:
 

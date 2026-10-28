@@ -403,6 +403,82 @@ BEGIN
   UPDATE runs SET report_token = lower(hex(randomblob(32))) WHERE id = NEW.id;
 END;
 `)
+// ---- the deputy and the daily digest (server/triage.mjs, server/digest.mjs) ----
+// Every launch of a run (start, retry, resume — by hand or automatic) counts up
+// `launch_no`, and `launched_at` says when. A deputy note is keyed on it:
+// `resume_attempts` counts only automatic resumes and a retry resets it, so it
+// cannot tell two ends of one run apart.
+addColumn('runs', 'launch_no', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'launched_at', 'TEXT')
+// "Report the result": 'auto' (the deputy decides) | 'always' | 'critical'.
+// Part of the run definition like every other field; no CHECK, the list is code.
+addColumn('agents', 'notify_result', `TEXT NOT NULL DEFAULT 'auto'`)
+addColumn('runs', 'notify_result', `TEXT NOT NULL DEFAULT 'auto'`)
+// The operator's own notification rules for one repository (free text).
+addColumn('repos', 'notify_rules', 'TEXT')
+db.exec(`
+-- One deputy assessment. kind 'report' = the end of a piece of work, unique per
+-- (run, report number, launch); 'event' = a follow-up that ended without a
+-- report number of its own (abandoned, failed), unique per event; 'interim' =
+-- a message without a report (a run working far longer than expected), no key.
+CREATE TABLE IF NOT EXISTS report_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL DEFAULT 'report',
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL DEFAULT 0,
+  launch_no INTEGER NOT NULL DEFAULT 0,
+  event_id INTEGER,
+  hub_types TEXT NOT NULL DEFAULT '[]',
+  report_short TEXT,
+  report_detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ready_at TEXT,
+  state TEXT NOT NULL DEFAULT 'waiting',
+  summary TEXT, agent_purpose TEXT, result TEXT, cause TEXT, reason TEXT,
+  attention TEXT, message TEXT, level_sent TEXT, sent_at TEXT, silent_why TEXT,
+  source TEXT, model TEXT, tokens_in INTEGER, tokens_out INTEGER, error TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_report_notes_report ON report_notes(run_id, seq, launch_no) WHERE kind = 'report';
+DROP INDEX IF EXISTS idx_report_notes_abandoned;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_report_notes_event ON report_notes(kind, event_id) WHERE kind = 'event';
+CREATE INDEX IF NOT EXISTS idx_report_notes_state ON report_notes(state, id);
+CREATE INDEX IF NOT EXISTS idx_report_notes_created ON report_notes(created_at);
+-- One daily digest per period.
+CREATE TABLE IF NOT EXISTS digests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  state TEXT NOT NULL DEFAULT 'pending',
+  quiet INTEGER NOT NULL DEFAULT 0,
+  preview INTEGER NOT NULL DEFAULT 0,
+  headline TEXT, body TEXT, refs TEXT, sent_at TEXT,
+  source TEXT, model TEXT, tokens_in INTEGER, tokens_out INTEGER, error TEXT
+);
+-- Every message a channel actually took (notify()), kept 30 days: what the
+-- operator was told, from any source, is part of what the deputy reads.
+CREATE TABLE IF NOT EXISTS sent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL DEFAULT (datetime('now')),
+  kind TEXT NOT NULL,
+  run_id TEXT,
+  level TEXT,
+  text TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sent_messages_ts ON sent_messages(ts);
+-- Every schedule slot that came due: started, skipped (with reason), deferred,
+-- or missed because the hub was down. One row per (agent, slot), updated.
+CREATE TABLE IF NOT EXISTS schedule_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL,
+  slot TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  reason TEXT,
+  run_id TEXT,
+  ts TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(agent_id, slot)
+);
+`)
 /**
  * Drop the CHECK rule on `agents.harness` — once, idempotently.
  *

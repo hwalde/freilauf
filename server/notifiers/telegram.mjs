@@ -73,17 +73,32 @@ async function api(ctx, method, body, { timeoutMs = 15_000 } = {}) {
   return { ok: false, reason: 'unreachable', errorKey: 'tg.err_unreachable' }
 }
 
-/** The message itself. `url` becomes the inline "Open detail page" button. */
-async function sendText(ctx, text, url, buttonLabel) {
+/**
+ * The inline keyboard: one button per row. Telegram rejects a button without a
+ * caption or with a URL it cannot open, so only complete pairs go out.
+ */
+function keyboard(buttons) {
+  const rows = (buttons ?? []).filter(b => b?.url && b?.label).slice(0, 4).map(b => [{ text: String(b.label), url: String(b.url) }])
+  return rows.length ? { inline_keyboard: rows } : null
+}
+
+/**
+ * The message itself, as finished HTML. `silent` is Telegram's
+ * `disable_notification`: the message arrives without a sound — what the hub
+ * asks for with `priority: 'info'`.
+ */
+async function sendHtml(ctx, html, buttons, silent = false) {
   const chat = chatId(ctx)
   if (!chat) return { ok: false, reason: 'no chat', errorKey: 'tg.err_no_chat' }
   const body = {
     chat_id: chat,
-    text: shorten(escapeHtml(text), TEXT_MAX),
+    text: html,
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
   }
-  if (url) body.reply_markup = { inline_keyboard: [[{ text: buttonLabel, url }]] }
+  if (silent) body.disable_notification = true
+  const kb = keyboard(buttons)
+  if (kb) body.reply_markup = kb
   return api(ctx, 'sendMessage', body)
 }
 
@@ -251,7 +266,14 @@ const plugin = {
     // deliberately no English literal here to fall back on, because a UI string
     // in a plugin file is a UI string nobody can translate.
     const url = message?.linkLabel ? (message?.url ?? null) : null
-    const first = await sendText(ctx, text, url, message?.linkLabel)
+    // A structured body (`message.rich`) is rendered by the hub's own helper,
+    // handed over in the context — shortened block by block, so a cut never
+    // splits a tag. Without it (an older hub, a plain message) the text is
+    // escaped as it always was.
+    const rich = message?.rich && typeof ctx?.rich?.toHtml === 'function' ? message.rich : null
+    const html = rich ? ctx.rich.toHtml(rich, { maxLength: TEXT_MAX }) : shorten(escapeHtml(text), TEXT_MAX)
+    const buttons = rich?.buttons?.length ? rich.buttons : (url ? [{ label: message.linkLabel, url }] : [])
+    const first = await sendHtml(ctx, html, buttons, message?.priority === 'info')
     if (!first.ok) {
       return { ok: false, error: first.reason ?? 'send failed', errorKey: first.errorKey ?? 'tg.err_send_failed' }
     }

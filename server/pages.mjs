@@ -12,7 +12,7 @@ import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './codin
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
   runTitleField, runStartTimeFields, runStartFromForm,
-  runSetupFields, runSetupFromForm, branchFields, branchContext,
+  runSetupFields, runSetupFromForm, branchFields, branchContext, notifyResultField,
   sandboxRunFields,
   agentNameTaken, moveAgent, deleteAgent, EMPTY_SCHEDULE,
 } from './run-def.mjs'
@@ -65,6 +65,7 @@ import { llmSources, DEFAULT_SOURCE } from './llm/sources.mjs'
 // that module; it is re-exported here so a fragment has ONE place to ask for a
 // piece of a page, whichever module happens to build it.
 export { flowSection }
+import { deputyCard, reportsSettingsSummary } from './report-pages.mjs'
 // Running an agent in a sandbox (SANDBOX.md): the blocks live in
 // server/sandbox/pages.mjs — a subject of its own, and this file is long
 // enough. Everything imported here answers honestly on a machine with no
@@ -304,6 +305,7 @@ function quickRunDialog(repos, selectedRepo) {
     ${runStartTimeFields({})}
     <details class="qr-more"><summary>${e(t('qr.more'))}</summary>
       ${branchFields({ branch_mode: 'keiner' }, branchContext(selectedRepo))}
+      ${notifyResultField({})}
     </details>
     <p class="err" id="qr-error" hidden></p>
     <menu class="qr-actions">
@@ -1667,6 +1669,7 @@ export async function pageRun(req, res, url, id) {
   ${await sandboxCard(run, repo)}
   ${sandboxReconfigureCard(run)}
   ${integrationSection(run, repo)}
+  ${deputyCard(run)}
   ${await reviewCard(run, repo)}
   ${goalCard(run)}
   ${run.help_text
@@ -2594,7 +2597,7 @@ export function sessionsTable(sessions, ctx = {}) {
 // ---------------- settings ----------------
 
 /** The 1/0 select every switch on this page has always been. */
-function onOff(name, on, extra = '') {
+export function onOff(name, on, extra = '') {
   return `<select name="${e(name)}"${extra}>
     <option value="1" ${on ? 'selected' : ''}>${e(t('layout.on'))}</option>
     <option value="0" ${on ? '' : 'selected'}>${e(t('layout.off'))}</option></select>`
@@ -2677,7 +2680,7 @@ function sourceOptionText(src) {
  * before — and here it would send an OpenRouter endpoint tag along with a
  * DeepSeek answer.
  */
-function llmSourceFields(prefix, s, sources) {
+export function llmSourceFields(prefix, s, sources) {
   const key = `${prefix}_source`
   const current = String(s[key] ?? '').trim() || DEFAULT_SOURCE
   const chosen = sources.find(x => x.id === current) ?? null
@@ -2746,7 +2749,7 @@ function llmSourceFields(prefix, s, sources) {
  * one warning. Empty = no fallback — an installation that changes nothing
  * behaves exactly as before.
  */
-function llmFallbackFields(prefix, s, sources) {
+export function llmFallbackFields(prefix, s, sources) {
   const key = `${prefix}_fallback`
   const current = String(s[key] ?? '').trim()
   const chosen = sources.find(x => x.id === current) ?? null
@@ -2790,6 +2793,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.favorites_hint'))}</span></p>
   <p><a class="btn" href="/settings/merge">${e(t('merge.settings_title'))}</a>
      <span class="dim">${e(t('settings.merge_hint', { setup: mergeSettingsSummary() }))}</span></p>
+  <p><a class="btn" href="/settings/reports">${e(t('reports.title'))}</a>
+     <span class="dim">${e(t('settings.reports_hint', { setup: reportsSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/review">${e(t('review.title'))}</a>
      <span class="dim">${e(t('settings.review_hint', { setup: reviewSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/cleanup">${e(t('cleanup.settings_title'))}</a>
@@ -2827,6 +2832,7 @@ export async function pageSettings(req, res, url) {
     <label>${e(t('settings.flow_runs_keep'))} <input name="flow_runs_keep_days" type="number" min="0" step="1" value="${e(String(flowRunKeepDays(s)))}">
       <span class="dim">${e(t('settings.flow_runs_keep_hint'))}</span></label>
     <label>${e(t('settings.prompt_suffix'))} <textarea name="prompt_suffix" rows="12">${e(s.prompt_suffix ?? '')}</textarea></label>
+    <p class="dim">${e(t('settings.llm_reports_pointer'))} <a href="/settings/reports">${e(t('reports.title'))}</a></p>
     <fieldset data-llm-job><legend>${e(t('settings.llm_legend'))}</legend>
       <p class="dim">${e(t('settings.llm_hint'))}${missingKey('llm_check')}</p>
       <label>${e(t('settings.llm_on'))} <select name="llm_check_on"><option value="0" ${s.llm_check_on !== '1' ? 'selected' : ''}>${e(t('layout.off'))}</option><option value="1" ${s.llm_check_on === '1' ? 'selected' : ''}>${e(t('layout.on'))}</option></select></label>
@@ -3903,6 +3909,8 @@ export async function repoEdit(req, res, url) {
     <label>${e(t('repos.path_label'))} <input name="path" value="${e(r.path ?? '')}" placeholder="~/projects/my-project" required></label>
     <label>${e(t('repos.base'))} <input name="base_branch" value="${e(r.base_branch ?? 'main')}"></label>
     <label>${e(t('repos.prompt_label'))} <textarea name="prompt" rows="6">${e(r.prompt ?? '')}</textarea></label>
+    <label>${e(t('repos.notify_rules'))} <textarea name="notify_rules" rows="4" placeholder="${e(t('repos.notify_rules_ph'))}">${e(r.notify_rules ?? '')}</textarea>
+      <span class="dim">${e(t('repos.notify_rules_hint'))}</span></label>
     <label>${e(t('repos.extras_label'))} <textarea name="worktree_extras" rows="5">${e(r.worktree_extras ?? '[]')}</textarea>
       <span class="btn-row"><button type="button" class="ghost" id="extras-find">${e(t('repos.extras_find'))}</button>
       <span class="dim">${e(t('repos.extras_find_hint'))}</span></span></label>
@@ -3957,6 +3965,7 @@ export async function repoSave(req, res, url, formBody) {
   const i = [integ.merge_mode, integ.merge_check, integ.finish_timeout_min, integ.merge_max_attempts,
     integ.conflict_parallel, integ.notify_running, integ.max_parallel,
     integ.review_mode, integ.review_platform, integ.review_project]
+  let savedId = id ? +id : null
   if (id) {
     db.prepare(`UPDATE repos SET name=?, path=?, base_branch=?, worktree_extras=?, prompt=?,
                 merge_mode=?, merge_check=?, finish_timeout_min=?, merge_max_attempts=?,
@@ -3975,12 +3984,18 @@ export async function repoSave(req, res, url, formBody) {
                 conflict_parallel,notify_running,max_parallel,review_mode,review_platform,review_project)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
       .get(b.name.trim(), repoPath, b.base_branch || 'main', b.worktree_extras || '[]', prompt, ...i).id
+    savedId = newId
     if (sandbox) {
       db.prepare(`UPDATE repos SET sandbox_default=?, sandbox_profile_id=?, sandbox_overrides=?,
                   sandbox_image=?, merge_check_sandboxed=? WHERE id=?`)
         .run(sandbox.sandbox_default, sandbox.sandbox_profile_id, sandbox.sandbox_overrides,
           sandbox.sandbox_image, sandbox.merge_check_sandboxed, newId)
     }
+  }
+  // The repository's own notification rules (server/triage.mjs reads them into
+  // the deputy's system prompt). Only when the body carried the field.
+  if (Object.hasOwn(b, 'notify_rules') && savedId) {
+    db.prepare('UPDATE repos SET notify_rules=? WHERE id=?').run(String(b.notify_rules ?? '').trim() || null, savedId)
   }
   redirect(res, '/repos')
 }
@@ -4039,33 +4054,7 @@ export async function settingsSave(req, res, url, formBody) {
   for (const k of settingsKeys()) {
     if (Object.hasOwn(b, k)) setSetting(k, b[k] ?? '')
   }
-  // The LLM jobs' serving-provider routing is THREE form fields (mode + the
-  // pin tag + the auto requirements) but TWO stored values — the same
-  // derivation the run form does in providerFromForm(). Only where the body
-  // actually carried the routing block: the settings page saves a fragment at
-  // a time, and a save of an unrelated section must not reset a configured
-  // routing (the same rule the loop above follows).
-  for (const p of ['title', 'check', 'extras']) {
-    if (!Object.hasOwn(b, `${p}_or_mode`)) continue
-    const mode = b[`${p}_or_mode`]
-    if (mode === 'pin') {
-      setSetting(`llm_${p}_or_provider`, String(b[`${p}_or_provider`] ?? '').trim())
-      setSetting(`llm_${p}_or_routing`, '')
-    } else if (mode === 'auto') {
-      const cfg = parseRoutingConfig({
-        quant_min: b[`${p}_or_quant`] ?? '', location: b[`${p}_or_region`] ?? 'all',
-        max_in: b[`${p}_or_max_in`] ?? '', max_out: b[`${p}_or_max_out`] ?? '',
-      })
-      setSetting(`llm_${p}_or_provider`, '')
-      // A broken requirement stores NOTHING rather than a half config — the
-      // caller then keeps the open routing instead of a config that cannot
-      // resolve; the widget re-opens with the old values for correcting.
-      setSetting(`llm_${p}_or_routing`, cfg?.error ? '' : JSON.stringify(cfg))
-    } else {
-      setSetting(`llm_${p}_or_provider`, '')
-      setSetting(`llm_${p}_or_routing`, '')
-    }
-  }
+  saveJobRouting(b, ['title', 'check', 'extras'])
   // The language takes effect immediately — the redirect below already renders in it.
   if (Object.hasOwn(b, 'ui_language')) setLanguage(b.ui_language ?? 'en')
   // Same for the timezone: an empty value means "auto (per UI language)".
@@ -4077,5 +4066,42 @@ export async function settingsSave(req, res, url, formBody) {
   if (Object.hasOwn(b, 'llm_title_model')) rememberTitleModel(b.llm_title_model)
   if (Object.hasOwn(b, 'llm_extras_model')) rememberExtrasModel(b.llm_extras_model)
   redirect(res, '/settings')
+}
+
+/**
+ * The LLM jobs' serving-provider routing is THREE form fields (mode + the pin
+ * tag + the auto requirements) but TWO stored values — the same derivation the
+ * run form does in providerFromForm(). Only where the body actually carried the
+ * routing block: a settings page saves a fragment at a time, and a save of an
+ * unrelated section must not reset a configured routing. Shared by every page
+ * that renders `llmSourceFields()` (Settings, Settings → Reports).
+ */
+export function saveJobRouting(b, purposes) {
+  for (const p of purposes) {
+    // The fields carry the prefix `llmSourceFields()` renders them with —
+    // `llm_<job>_or_mode`, not `<job>_or_mode`. Reading the unprefixed name
+    // is how the routing of every job was silently never saved: the mode was
+    // never found, so an "auto" choice vanished and a pin could not be lifted.
+    const f = `llm_${p}`
+    if (!Object.hasOwn(b, `${f}_or_mode`)) continue
+    const mode = b[`${f}_or_mode`]
+    if (mode === 'pin') {
+      setSetting(`llm_${p}_or_provider`, String(b[`${f}_or_provider`] ?? '').trim())
+      setSetting(`llm_${p}_or_routing`, '')
+    } else if (mode === 'auto') {
+      const cfg = parseRoutingConfig({
+        quant_min: b[`${f}_or_quant`] ?? '', location: b[`${f}_or_region`] ?? 'all',
+        max_in: b[`${f}_or_max_in`] ?? '', max_out: b[`${f}_or_max_out`] ?? '',
+      })
+      setSetting(`llm_${p}_or_provider`, '')
+      // A broken requirement stores NOTHING rather than a half config — the
+      // caller then keeps the open routing instead of a config that cannot
+      // resolve; the widget re-opens with the old values for correcting.
+      setSetting(`llm_${p}_or_routing`, cfg?.error ? '' : JSON.stringify(cfg))
+    } else {
+      setSetting(`llm_${p}_or_provider`, '')
+      setSetting(`llm_${p}_or_routing`, '')
+    }
+  }
 }
 

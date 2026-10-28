@@ -5251,6 +5251,327 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
   })
 
   // ------------------------------------------------------------------
+  group('Reports: the deputy and the daily digest')
+
+  // The model is a stub provider registered into THIS process (the suite has
+  // no vendor key, and a test must not talk to one), and the channel is a stub
+  // notifier in this process too: the hub process has no channel configured,
+  // so everything it would send classically is a no-op, and everything that
+  // arrives at the sink was sent by the deputy or the digest, driven here by
+  // hand (FREILAUF_TRIAGE_OFF / FREILAUF_DIGEST_OFF keep the hub's own clocks
+  // off).
+  {
+    const { registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+    const { setSetting, getSetting } = await import('../server/db.mjs')
+    const tr = await import('../server/triage.mjs')
+    const dg = await import('../server/digest.mjs')
+    let answer = null          // what the stub model says next (object, or an Error to throw)
+    const asked = []
+    const sink = []
+    registerPlugin({
+      id: 'e2e-deputy', kind: 'provider', label: 'E2E Deputy', envKeys: [],
+      async fetchModels() { return [{ id: 'stub-deputy', name: 'Stub Deputy' }] },
+      llm: {
+        schema: 'prompt',
+        async models() { return [{ id: 'stub-deputy', name: 'Stub Deputy' }] },
+        async complete(ctx, req) {
+          asked.push(req)
+          const a = typeof answer === 'function' ? answer(req) : answer
+          if (a instanceof Error) throw a
+          return { text: JSON.stringify(a), usage: { prompt_tokens: 1000, completion_tokens: 50 } }
+        },
+      },
+    })
+    registerPlugin({ id: 'e2e-sink', kind: 'notifier', label: 'E2E Sink', async send(m) { sink.push(m); return { ok: true } } })
+    const keep = Object.fromEntries(['notify_mode', 'digest_on', 'triage_since', 'llm_triage_source', 'llm_triage_model',
+      'llm_digest_source', 'llm_digest_model', 'llm_alert_on', 'llm_triage_retry_attempts'].map(k => [k, getSetting(k)]))
+    const report = async (runId, body) => {
+      const r = await fetchPath(`/api/runs/${runId}/report`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      })
+      equal(r.status, 200, 'the report endpoint answers')
+      return r.json()
+    }
+    const later = () => Date.now() + 80_000   // past the 70 s of quiet a note waits for
+    const deputy = (o = {}) => ({ summary: 'The agent did its task.', agent_purpose: 'E2E helper', result: 'success',
+      cause: 'none', reason: 'no rule: none', attention: 'none', message: 'Done as usual.', ...o })
+    const notes = (id) => db.prepare('SELECT * FROM report_notes WHERE run_id=? ORDER BY id').all(id)
+
+    try {
+      await check('the pages render: Settings → Reports, the digests, the repo and agent forms', async () => {
+        const s = await (await fetchPath('/settings/reports')).text()
+        for (const name of ['notify_mode', 'notify_rules', 'digest_on', 'digest_time', 'digest_quiet_days', 'digest_rules',
+          'llm_triage_source', 'llm_triage_model', 'llm_triage_fallback', 'llm_digest_source', 'llm_digest_model', 'llm_digest_fallback']) {
+          contains(s, `name="${name}"`, name)
+        }
+        contains(s, 'formaction="/settings/reports/test"', '"Test rules" posts the text as typed')
+        contains(await (await fetchPath('/settings')).text(), 'href="/settings/reports"', 'the settings page links to it')
+        equal((await fetchPath('/digests')).status, 200, 'the digests page')
+        contains(await (await fetchPath(`/repos/edit?id=${repoId}`)).text(), 'name="notify_rules"', 'the repository\'s own rules')
+        contains(await (await fetchPath(`/agents/edit?repo=${repoId}`)).text(), 'name="notify_result"', '"Report the result" on the agent form')
+      })
+
+      await check('the deputy mode cannot be switched on without a usable model source', async () => {
+        // The HUB process knows no stub source and the suite has no OpenRouter key.
+        const r = await postForm('/settings/reports', { notify_mode: 'smart' }, { asBrowser: true })
+        contains(await r.text(), 'Deputy LLM', 'the problem page names what is missing')
+        equal(getSetting('notify_mode') ?? 'classic', 'classic', 'and the mode stayed')
+      })
+
+      setSetting('llm_triage_source', 'provider:e2e-deputy')
+      setSetting('llm_triage_model', 'stub-deputy')
+      setSetting('llm_alert_on', '0')
+      setSetting('notify_mode', 'smart')
+      setSetting('triage_since', new Date(Date.now() - 60_000).toISOString().slice(0, 19).replace('T', ' '))
+      isTrue(tr.triageUsable(), 'the stub source is usable in this process')
+
+      let quietRun = null
+      await check('a routine report: summarised, and nobody is disturbed', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: routine' })
+        quietRun = j.runId
+        await sessionMerken(j.runId)
+        await report(j.runId, { kind: 'done', text: 'Raised 3 dependencies, tests green.', detail: 'All the details.' })
+        const n = notes(j.runId)
+        equal(n.length, 1, 'the report created its note in the hub')
+        equal(n[0].report_short, 'Raised 3 dependencies, tests green.', 'with the short report copied in')
+        contains(ereignisse(j.runId).join(','), 'notify_routed', 'the classic message was routed to the deputy, not sent')
+        answer = deputy()
+        sink.length = 0
+        await tr.triageTick(later())
+        const after = notes(j.runId)[0]
+        equal(after.state, 'done', 'assessed')
+        equal(after.summary, 'The agent did its task.', 'the summary is stored for the history and the digest')
+        equal(after.level_sent, null, 'nothing was sent')
+        equal(sink.filter(x => x.runId === j.runId).length, 0, 'and nothing was sent about it')
+        contains(asked.at(-1).system, 'How to decide', 'the operator\'s rules are in the system half')
+        contains(asked.at(-1).prompt, '<report_short>', 'the report is in the user half')
+      })
+
+      await check('a report worth telling: one short message with the level and a link', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: warning' })
+        await sessionMerken(j.runId)
+        await report(j.runId, { kind: 'failed', text: 'Could not reach OpenRouter.' })
+        answer = deputy({ result: 'failed', cause: 'provider', attention: 'warning', reason: 'Warning: failed twice',
+          message: 'Failed again: the E2E helper cannot reach OpenRouter.' })
+        sink.length = 0
+        await tr.triageTick(later())
+        // Other groups' runs may end in the same minutes and are assessed too —
+        // rightly. What this check is about is the message about THIS run.
+        const mine = sink.filter(x => x.runId === j.runId)
+        equal(mine.length, 1, 'exactly one message about this run')
+        const m = mine[0]
+        equal(m.priority, 'warning', 'with its level')
+        contains(m.rich.title, 'Warning', 'named in the title')
+        contains(m.text, 'Failed again: the E2E helper cannot reach OpenRouter.', 'the deputy\'s sentence is the message')
+        isFalse(m.text.includes('Could not reach OpenRouter.'), 'not the full report')
+        equal(m.rich.buttons[0].url.endsWith(`/runs/${j.runId}`), true, 'one button: the run')
+        equal(m.attachment, null, 'no attachment — the report is behind the link')
+        isTrue(!!notes(j.runId)[0].sent_at, 'recorded as sent')
+        const page = await (await fetchPath(`/runs/${j.runId}`)).text()
+        contains(page, 'Failed again: the E2E helper cannot reach OpenRouter.', 'the run page shows what was sent')
+        contains(page, 'Warning: failed twice', 'and the rule that decided')
+        const told = db.prepare(`SELECT * FROM sent_messages WHERE run_id=? ORDER BY id DESC`).get(j.runId)
+        equal(told?.level, 'warning', 'what was said is recorded for the next assessment')
+      })
+
+      await check('"Always report" on the run: even a routine result arrives, as info', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: always', notify_result: 'always' })
+        await sessionMerken(j.runId)
+        equal(lauf(j.runId).notify_result, 'always', 'the form value reached the run')
+        await report(j.runId, { kind: 'done', text: 'Nothing special.' })
+        answer = deputy()
+        sink.length = 0
+        await tr.triageTick(later())
+        const mine = sink.filter(x => x.runId === j.runId)
+        equal(mine.length, 1, 'sent')
+        equal(mine[0].priority, 'info', 'as info, which rings silently')
+        await postForm(`/api/runs/${j.runId}/notify-result`, { notify_result: 'critical' })
+        equal(lauf(j.runId).notify_result, 'critical', 'the switch on the run page changes the run')
+      })
+
+      await check('the deputy cannot answer: one collected line from facts, not a flood of reports', async () => {
+        answer = new Error('HTTP 503')
+        setSetting('llm_triage_retry_attempts', '1')
+        setSetting('triage_fallback_sent_at', '')
+        const ids = []
+        for (const p of ['deputy: down 1', 'deputy: down 2']) {
+          const j = await laufStarten({ repo_id: String(repoId), prompt: p })
+          await sessionMerken(j.runId)
+          await report(j.runId, { kind: 'failed', text: 'broken' })
+          ids.push(j.runId)
+        }
+        sink.length = 0
+        await tr.triageTick(later())
+        equal(ids.map(id => notes(id)[0].state).join(','), 'fallback,fallback', 'both notes fell back')
+        const batches = sink.filter(x => String(x.rich?.title ?? '').includes('Deputy not reachable'))
+        equal(batches.length, 1, 'ONE message for both')
+        const listed = JSON.stringify(batches[0].rich.blocks[1].items)
+        isTrue(ids.every(id => listed.includes(`/runs/${id}`)), 'listing both runs, each with its link')
+        isTrue(ids.every(id => !!notes(id)[0].sent_at), 'both counted as told')
+        isTrue(ids.every(id => (notes(id)[0].summary ?? '').includes('broken')), 'the summary falls back to the report\'s start')
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: down 3' })
+        await sessionMerken(j.runId)
+        await report(j.runId, { kind: 'failed', text: 'broken again' })
+        sink.length = 0
+        await tr.triageTick(later())
+        equal(sink.filter(x => String(x.rich?.title ?? '').includes('Deputy not reachable')).length, 0,
+          'a third one within ten minutes waits for the next batch')
+        setSetting('llm_triage_retry_attempts', '')
+      })
+
+      await check('a run the operator stopped is summarised, but never announced', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: killed', notify_result: 'always' })
+        await sessionMerken(j.runId)
+        await postForm(`/api/runs/${j.runId}/kill`, {})
+        answer = deputy({ result: 'unclear', attention: 'warning', message: 'Stopped.' })
+        sink.length = 0
+        await tr.triageTick(later())
+        const n = notes(j.runId)
+        equal(n.length, 1, 'the sweep found the end without a report')
+        equal(n[0].silent_why, 'operator', 'and kept it quiet: the operator clicked')
+        equal(sink.filter(x => x.runId === j.runId).length, 0, 'nothing sent, "always" notwithstanding')
+      })
+
+      await check('a question in the deputy mode still goes out at once, untouched', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: help' })
+        await sessionMerken(j.runId)
+        await report(j.runId, { kind: 'help', text: 'Which branch?' })
+        isFalse(ereignisse(j.runId).includes('notify_routed'), 'not routed to the deputy')
+        contains(ereignisse(j.runId).join(','), 'notified:help', 'handled as always')
+        await postForm(`/api/runs/${j.runId}/kill`, {})
+      })
+
+      await check('the daily digest: written from the summaries, links only to what the hub named', async () => {
+        setSetting('llm_digest_source', 'provider:e2e-deputy')
+        setSetting('llm_digest_model', 'stub-deputy')
+        answer = (req) => {
+          const ref = /ref="(r\d+)"/.exec(req.prompt)?.[1] ?? 'r1'
+          return { headline: 'One problem', body: `- ⚠️ The [[${ref}|E2E helper]] failed.\n- [[r999|made up]] link.\n\nThe rest ran as usual.` }
+        }
+        const r = await dg.previewDigest()
+        const row = db.prepare('SELECT * FROM digests WHERE id=?').get(r.id)
+        equal(row.state, 'preview', 'a preview')
+        isTrue(row.preview === 1, 'marked as one — it does not close the period')
+        equal(getSetting('digest_last_end') ?? '', '', 'the period is still open')
+        const digestPrompt = asked.at(-1).prompt
+        contains(digestPrompt, '<waiting_for_you>', 'what waits comes first')
+        isFalse(digestPrompt.includes('All the details.'), 'the model never sees a full report')
+        const page = await (await fetchPath(`/digests/${r.id}`)).text()
+        isTrue(/href="https?:\/\/[^"]*\/runs\/[0-9a-f-]{36}"/.test(page), 'a ref the hub named is a link on the page')
+        contains(page, 'made up', 'an invented ref is shown as words…')
+        isFalse(/href="[^"]*r999/.test(page), '…and never as a link')
+        sink.length = 0
+        setSetting('digest_on', '1')
+        const sent = await dg.sendDigestNow()
+        const digests = sink.filter(x => x.kind === 'digest')
+        equal(digests.length, 1, '"Send now" sends one digest')
+        contains(digests[0].rich.buttons[0].url, `/digests/${sent.id}`, 'with a button to its page')
+        isTrue(!!getSetting('digest_last_end'), 'and closes the period')
+      })
+
+      await check('the deputy card on a routine run says why nothing was sent', async () => {
+        const page = await (await fetchPath(`/runs/${quietRun}`)).text()
+        contains(page, 'The agent did its task.', 'the summary')
+        contains(page, 'not sent', 'and that it stayed quiet')
+      })
+
+      await check('nothing of the deputy lives in memory: a note caught mid-question and a held batch survive', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: restart' })
+        await sessionMerken(j.runId)
+        await report(j.runId, { kind: 'failed', text: 'broken before the restart' })
+        // What a hub killed mid-question leaves behind…
+        db.prepare(`UPDATE report_notes SET state='asking', ready_at=datetime('now') WHERE run_id=?`).run(j.runId)
+        tr.startTriage()   // the hub's start: FREILAUF_TRIAGE_OFF keeps the timer off, the recovery runs
+        equal(notes(j.runId)[0].state, 'pending', 'a question in flight is asked again after a restart')
+        // …and a batch that is not due yet stays in the table.
+        answer = new Error('HTTP 503')
+        setSetting('llm_triage_retry_attempts', '1')
+        setSetting('triage_fallback_sent_at', new Date().toISOString())
+        sink.length = 0
+        await tr.triageTick(later())
+        const held = notes(j.runId)[0]
+        equal(`${held.state}|${held.sent_at ?? 'unsent'}`, 'fallback|unsent', 'the fallback line waits in the table')
+        isTrue(!!held.level_sent, 'marked to be sent')
+        await tr.triageTick(Date.now() + 11 * 60_000)
+        isTrue(!!notes(j.runId)[0].sent_at, 'the next batch, ten minutes on, sends it from the table')
+        setSetting('llm_triage_retry_attempts', '')
+      })
+
+      await check('a retry is a new launch, and its end a new note', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: retry' })
+        await sessionMerken(j.runId)
+        const first = lauf(j.runId).launch_no
+        isTrue(first >= 1, `the start counted (${first})`)
+        await postForm(`/api/runs/${j.runId}/kill`, {})
+        await postForm(`/api/runs/${j.runId}/retry`, {})
+        await waitFor(() => lauf(j.runId).launch_no > first, { what: 'launch_no after retry', timeoutMs: 20_000 })
+        await sessionMerken(j.runId)
+        await report(j.runId, { kind: 'done', text: 'second launch done' })
+        const n = notes(j.runId).filter(x => x.kind === 'report')
+        isTrue(n.some(x => x.launch_no === lauf(j.runId).launch_no && x.report_short === 'second launch done'),
+          'the second launch has its own note')
+      })
+
+      await check('Telegram, through a stub API: HTML with a link, a button, and info without a sound', async () => {
+        const http = await import('node:http')
+        const got = []
+        const server = http.createServer((req, res) => {
+          let body = ''
+          req.on('data', c => { body += c })
+          req.on('end', () => { got.push(JSON.parse(body || '{}')); res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}') })
+        })
+        await new Promise(r => server.listen(0, '127.0.0.1', r))
+        const before = { base: process.env.FREILAUF_TELEGRAM_BASE, token: getSetting('telegram_token'), chat: getSetting('telegram_chat') }
+        // Only THIS process knows the stub's address. The hub process sends
+        // nothing during this check: the deputy runs here.
+        process.env.FREILAUF_TELEGRAM_BASE = `http://127.0.0.1:${server.address().port}`
+        setSetting('telegram_token', '1:e2e'); setSetting('telegram_chat', '42')
+        unregisterPlugin('e2e-sink')
+        try {
+          const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: telegram', notify_result: 'always' })
+          await sessionMerken(j.runId)
+          await report(j.runId, { kind: 'done', text: 'all good' })
+          answer = deputy({ message: 'Done: the <E2E> helper updated 3 files.' })
+          await tr.triageTick(later())
+          const m = got.find(x => String(x.text).includes('the &lt;E2E&gt; helper'))
+          isTrue(!!m, `the message reached the stub (${got.length} call(s))`)
+          contains(m.text, '<b>ℹ️ Info · e2e · ', 'a bold title with the level')
+          equal(m.disable_notification, true, 'info arrives without a sound')
+          isTrue(m.reply_markup.inline_keyboard[0][0].url.endsWith(`/runs/${j.runId}`), 'the button opens the run')
+          equal(m.parse_mode, 'HTML', 'as HTML')
+        } finally {
+          if (before.base === undefined) delete process.env.FREILAUF_TELEGRAM_BASE; else process.env.FREILAUF_TELEGRAM_BASE = before.base
+          setSetting('telegram_token', before.token ?? ''); setSetting('telegram_chat', before.chat ?? '')
+          registerPlugin({ id: 'e2e-sink', kind: 'notifier', label: 'E2E Sink', async send(m) { sink.push(m); return { ok: true } } })
+          server.close()
+        }
+      })
+
+      await check('a real hub restart: the hub\'s own clock recovers a note caught mid-question', async () => {
+        const j = await laufStarten({ repo_id: String(repoId), prompt: 'deputy: hub restart' })
+        await sessionMerken(j.runId)
+        await report(j.runId, { kind: 'failed', text: 'broken across a restart' })
+        db.prepare(`UPDATE report_notes SET state='asking', ready_at=datetime('now') WHERE run_id=?`).run(j.runId)
+        await stopHub()
+        // This once with the deputy's own timer ON in the hub process. The hub
+        // knows no usable model source (the stub lives in this process), so
+        // what its clock does with the recovered note is a fallback line.
+        await startHub({ env: { FREILAUF_TRIAGE_OFF: '0' } })
+        const state = () => db.prepare(`SELECT state FROM report_notes WHERE run_id=? ORDER BY id DESC LIMIT 1`).get(j.runId)?.state
+        await waitFor(() => state() === 'fallback', { what: 'the hub\'s timer to handle the recovered note', timeoutMs: 45_000 })
+        equal(state(), 'fallback', 'recovered from "asking" and handled by the restarted hub, on its own')
+        await stopHub()
+        await startHub()
+      })
+    } finally {
+      for (const [k, v] of Object.entries(keep)) setSetting(k, v ?? '')
+      setSetting('digest_last_end', '')
+      unregisterPlugin('e2e-deputy')
+      unregisterPlugin('e2e-sink')
+    }
+  }
+
+  // ------------------------------------------------------------------
   group('tmux cleanup: the memory-freeing agent')
 
   await check('the cleanup settings page renders the reusable setup block', async () => {
@@ -6307,6 +6628,84 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
     equal(ereignisse(l.id).filter(k => k === 'notified:followup').length, 1, 'announced')
     await flowsTick()
     equal(lauf(l.id).flow_dispatched, 1, 'the "run finished" triggers were evaluated again')
+  })
+
+  // ---- the deputy waits for the integration ----
+  // A report in the finish gate is not a result yet: "merged" or "blocked" is
+  // part of what the operator is told. The deputy reads the run's STATE, so a
+  // run killed in the gate and a merge that ends blocked both get their
+  // assessment — paths no caller announces.
+  await check('the deputy waits for the gate, and assesses an abort in it and a blocked merge', async () => {
+    const { registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+    const { setSetting, getSetting } = await import('../server/db.mjs')
+    const tr = await import('../server/triage.mjs')
+    registerPlugin({
+      id: 'e2e-gate', kind: 'provider', label: 'E2E Gate', envKeys: [],
+      async fetchModels() { return [] },
+      llm: { schema: 'prompt', async models() { return [] },
+        async complete(ctx, req) {
+          const blocked = req.prompt.includes('NOT merged: blocked')
+          return { text: JSON.stringify({ summary: blocked ? 'Merge blocked by a conflict.' : 'Stopped in the gate.',
+            agent_purpose: 'E2E gate', result: 'partial', cause: blocked ? 'merge' : 'unknown', reason: 'no rule: none',
+            attention: 'none', message: 'x' }) }
+        } },
+    })
+    const keep = Object.fromEntries(['notify_mode', 'triage_since', 'llm_triage_source', 'llm_triage_model'].map(k => [k, getSetting(k)]))
+    setSetting('llm_triage_source', 'provider:e2e-gate'); setSetting('llm_triage_model', 'm')
+    setSetting('notify_mode', 'smart')
+    setSetting('triage_since', new Date(Date.now() - 60_000).toISOString().slice(0, 19).replace('T', ' '))
+    const later = (min = 2) => Date.now() + min * 60_000
+    const note = (id) => db.prepare(`SELECT * FROM report_notes WHERE run_id=? AND kind='report' ORDER BY id DESC LIMIT 1`).get(id)
+    try {
+      // 1. held in the gate, then killed there
+      await repoMerge({ finish_timeout_min: '1', merge_max_attempts: '1' })
+      const a = await mergeRun()
+      await writeAndCommit(a.wt, 'gate.txt', 'g\n', 'E2E: gate part')
+      writeFileSync(join(a.wt, 'left.txt'), 'left behind\n')
+      await sendReport(a.id, { kind: 'done', text: 'done, in the gate' })
+      equal(lauf(a.id).finish_state, 'awaiting_commit', 'held in the gate')
+      equal(note(a.id)?.report_short, 'done, in the gate', 'the note exists before the gate decided')
+      await tr.triageTick(later())
+      equal(note(a.id).state, 'waiting', 'and waits: the result is not settled')
+      await postForm(`/api/runs/${a.id}/kill`, {})
+      equal(lauf(a.id).status, 'aborted', 'killed in the gate')
+      await tr.triageTick(later())
+      equal(note(a.id).state, 'done', 'now it is assessed')
+      equal(note(a.id).summary, 'Stopped in the gate.', 'with its summary')
+      equal(note(a.id).silent_why, 'operator', 'and kept quiet: the operator killed it')
+
+      // 2. a conflict with no attempt left: blocked
+      const b = await mergeRun()
+      await writeAndCommit(b.wt, 'README.md', '# Test repo\ndeputy run\n', 'E2E: deputy conflict')
+      await g(REPO, 'fetch', 'origin')
+      await g(REPO, 'reset', '--hard', 'origin/main')
+      writeFileSync(join(REPO, 'README.md'), '# Test repo\ndeputy outside\n')
+      await g(REPO, 'add', '-A')
+      await g(REPO, '-c', 'user.email=e2e@test.local', '-c', 'user.name=E2E', 'commit', '-qm', 'E2E: deputy outside')
+      await g(REPO, 'push', '-q', 'origin', 'main')
+      await sendReport(b.id, { kind: 'done', text: 'changed the readme' })
+      await tr.triageTick(later())
+      equal(note(b.id).state, 'waiting', 'not assessed before the merge decided')
+      await integrate.integrateTick(Date.now() + 5 * 60_000)
+      // The one attempt: a conflict run, which ends without delivering — the
+      // same path as "after the last attempt the hub asks a human".
+      const resolver = db.prepare('SELECT * FROM runs WHERE resolves_run_id=?').get(b.id)
+      isTrue(!!resolver, 'a conflict run took over')
+      await sessionMerken(resolver.id)
+      await tr.triageTick(later())
+      equal(note(b.id).state, 'waiting', 'while the conflict run works, the deputy waits')
+      await postForm(`/api/runs/${resolver.id}/kill`, {})
+      await integrate.integrateTick(Date.now() + 10 * 60_000)
+      await waitFor(() => String(lauf(b.id).merge_status ?? '').startsWith('blocked_'), { what: 'blocked', timeoutMs: 30_000 })
+      equal(db.prepare('SELECT COUNT(*) AS n FROM report_notes WHERE run_id=?').get(resolver.id).n, 0, 'the conflict run itself gets no note')
+      await tr.triageTick(later(3))
+      equal(note(b.id).state, 'done', 'a blocked merge is a settled result')
+      equal(note(b.id).summary, 'Merge blocked by a conflict.', 'and the deputy was told it was blocked')
+    } finally {
+      for (const [k, v] of Object.entries(keep)) setSetting(k, v ?? '')
+      unregisterPlugin('e2e-gate')
+      await repoMerge({ finish_timeout_min: '15', merge_max_attempts: '2' })
+    }
   })
 
   // ------------------------------------------------------------------

@@ -63,6 +63,7 @@ import { resolveIncident, resolveIncidentsOf, incidentById } from './incidents.m
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
 import { flowsTick } from './flows/triggers.mjs'
+import * as reportPages from './report-pages.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -104,6 +105,8 @@ function pickQuickFields(b) {
     keep_on_branch: b.keep_on_branch,
     // The code-review choice sits in the same fieldset, for the same reason.
     review: b.review,
+    // "Report the result" is a property of the task, asked in the dialog too.
+    notify_result: b.notify_result,
   }
 }
 
@@ -303,6 +306,17 @@ async function dispatch(req, res, url, path, formBody) {
   // the same reason the favorites have one: the provider/model/effort block is
   // driven through #prov, #model and #effort, and those ids exist once per page.
   if (req.method === 'GET' && path === '/reviews') return pageReviews(req, res, url)
+  // Settings → Reports: the deputy, the operator's rules and the daily digest
+  // (server/report-pages.mjs), plus the digests themselves.
+  if (req.method === 'GET' && path === '/settings/reports') return reportPages.pageReportSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/reports') return reportPages.reportSettingsSave(req, res, url, formBody)
+  if (req.method === 'POST' && path === '/settings/reports/reset-rules') return reportPages.reportRulesReset(req, res, url)
+  if (req.method === 'POST' && path === '/settings/reports/test') return reportPages.reportRulesTest(req, res, url, formBody)
+  if (req.method === 'GET' && path === '/settings/reports/test') return reportPages.pageRulesTest(req, res, url)
+  if (req.method === 'GET' && path === '/digests') return reportPages.pageDigests(req, res, url)
+  if (req.method === 'POST' && path === '/digests/preview') return reportPages.digestPreviewAction(req, res, url)
+  if (req.method === 'POST' && path === '/digests/send') return reportPages.digestSendAction(req, res, url)
+  if (req.method === 'GET' && (m = path.match(/^\/digests\/(\d+)$/))) return reportPages.pageDigest(req, res, url, m[1])
   if (req.method === 'GET' && path === '/settings/review') return pageReviewSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/review') return reviewSettingsSave(req, res, url, formBody)
   if (req.method === 'GET' && path === '/settings/merge') return pageMergeSettings(req, res, url)
@@ -683,6 +697,14 @@ async function api(req, res, url) {
       addEvent(run.id, on ? 'notify_on' : 'notify_off', {})
     }
     return answer(req, res, 200, { ok: true, notify_on: on, telegram_on: on }, `/runs/${run.id}`)
+  }
+  // The deputy's card on the run page: "report the result" for THIS run, and
+  // "assess again" (shown, never stored or sent) — server/report-pages.mjs.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/notify-result$/))) {
+    return reportPages.runNotifyResultSave(req, res, url, () => form(req), m[1])
+  }
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/reassess$/))) {
+    return reportPages.runReassess(req, res, url, () => form(req), m[1])
   }
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/kill$/))) {
     const run = getRun(m[1])

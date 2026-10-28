@@ -788,6 +788,27 @@ export function sandboxOf(def = {}) {
 }
 
 /**
+ * "Report the result": what the deputy (server/triage.mjs) may do with this
+ * run's end. `auto` = the deputy decides; `always` = the operator hears about
+ * every result, in the deputy's short form; `critical` = only what the deputy
+ * calls critical. The same list is `NOTIFY_RESULT` in triage.mjs (a unit test
+ * holds the two together — importing it here would pull the LLM layer into
+ * every module that renders a form).
+ */
+export const NOTIFY_RESULTS = ['auto', 'always', 'critical']
+
+export function notifyResultOf(v) { return NOTIFY_RESULTS.includes(v) ? v : 'auto' }
+
+/** The select, in every form that defines a run (agent, single run, Quick Run). */
+export function notifyResultField(a = {}) {
+  const cur = notifyResultOf(a.notify_result ?? a.notifyResult)
+  return `<label>${e(t('runform.notify_result'))} <select name="notify_result">
+      ${NOTIFY_RESULTS.map(v => `<option value="${v}" ${cur === v ? 'selected' : ''}>${e(t(`runform.notify_result_${v}`))}</option>`).join('')}
+    </select>
+    <span class="dim">${e(t('runform.notify_result_hint'))}</span></label>`
+}
+
+/**
  * The definition as form fields — embedded IDENTICALLY by the agent form and
  * the single-run form. `a` is an agent row, a remembered choice or {}.
  */
@@ -798,6 +819,7 @@ export function runDefFields(a = {}, ctx = {}) {
   ${goalFields(a)}
   ${branchFields(a, ctx)}
   <label>${e(t('runform.expected'))} <input type="number" name="expected_minutes" min="1" value="${a.expected_minutes ?? DEFAULT_EXPECTED_MINUTES}"></label>
+  ${notifyResultField(a)}
   ${skillFelder(a.skills)}
   ${flowAttachFields(a.flows)}`
 }
@@ -975,6 +997,7 @@ export async function runDefFromForm(b, problems = []) {
     keepOnBranch,
     review,
     expectedMinutes: +b.expected_minutes || DEFAULT_EXPECTED_MINUTES,
+    notifyResult: notifyResultOf(b.notify_result),
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
   }
@@ -1065,6 +1088,7 @@ export function defFromAgent(agent) {
     sandboxProfileId: agent.sandbox_profile_id ?? null,
     sandboxOverrides: agent.sandbox_overrides ?? '{}',
     expectedMinutes: agent.expected_minutes,
+    notifyResult: notifyResultOf(agent.notify_result),
     skills: agent.skills ?? null,
     flows: agent.flows ?? null,
   }
@@ -1092,25 +1116,26 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
     db.prepare(`UPDATE agents SET name=?, harness=?, model=?, prompt=?, goal=?, branch_mode=?, branch_pattern=?,
                 keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_slots=?, schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, or_routing=?, effort=?,
-                skills=?, flows=?, sandbox=?, sandbox_profile_id=?, sandbox_overrides=?, review=?,
+                skills=?, flows=?, sandbox=?, sandbox_profile_id=?, sandbox_overrides=?, review=?, notify_result=?,
                 active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
       def.keepOnBranch ? 1 : 0,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
       def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
       sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', reviewOfDef(def),
-      active, id)
+      notifyResultOf(def.notifyResult), active, id)
     return id
   }
   const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_slots,schedule_weeks,schedule_anchor,run_at,
-              provider,or_provider,or_routing,effort,skills,flows,sandbox,sandbox_profile_id,sandbox_overrides,review,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              provider,or_provider,or_routing,effort,skills,flows,sandbox,sandbox_profile_id,sandbox_overrides,review,notify_result,active)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
     def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
-    sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', reviewOfDef(def), active)
+    sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', reviewOfDef(def),
+    notifyResultOf(def.notifyResult), active)
   return Number(r.lastInsertRowid)
 }
 

@@ -22,6 +22,8 @@ const { startTerminalServer } = await import('./terminal.mjs')
 const { startScheduler, stopScheduler, tick: schedulerTick } = await import('./scheduler.mjs')
 const { startWatcher, stopWatcher, closeOrphanedRuns, tick: watcherTick, trackLiveSessions } = await import('./watcher.mjs')
 const { startIntegrator, stopIntegrator } = await import('./integrate.mjs')
+const { startTriage, stopTriage } = await import('./triage.mjs')
+const { startDigest, stopDigest } = await import('./digest.mjs')
 const { getSetting } = await import('./db.mjs')
 const { seedIfEmpty } = await import('./coding-agents.mjs')
 const { subscriptionUsage } = await import('./usage.mjs')
@@ -57,6 +59,12 @@ server.listen(PORT, HOST, () => {
   // The finish gate's own timer: it wakes every 5 s, much denser than the
   // watcher, because an agent told "commit first" usually does it in seconds.
   startIntegrator()
+  // The deputy reads finished reports (every 15 s) and the daily digest checks
+  // its hour (every minute) — both do nothing until switched on in Settings →
+  // Reports, and the test suites own both clocks (FREILAUF_TRIAGE_OFF,
+  // FREILAUF_DIGEST_OFF).
+  startTriage()
+  startDigest()
   // The pipeline state comes from the DB. Access from the outside is NOT a
   // setting of this process — it is freilauf-vpn.service, which deliberately does
   // not start on its own (fail-closed) and is switched with `freilauf on|off`.
@@ -116,7 +124,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     if (stopping) return
     stopping = true
-    stopScheduler(); stopWatcher(); stopIntegrator(); stopHubSocket()
+    stopScheduler(); stopWatcher(); stopIntegrator(); stopTriage(); stopDigest(); stopHubSocket()
     setTimeout(() => process.exit(0), 2000).unref()
     trackLiveSessions().catch(() => {}).finally(() => {
       server.close(() => process.exit(0))

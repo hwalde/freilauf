@@ -15,6 +15,7 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 [Pages and live channel](#pages-and-live-channel) · [Panels](#panels) ·
 [Integration](#integration) · [Code review](#code-review) ·
 [Reports and follow-ups](#reports-and-follow-ups) ·
+[Notifications: deputy and daily digest](#notifications-deputy-and-daily-digest) ·
 [Attention](#attention) · [Watcher and incidents](#watcher-and-incidents) ·
 [Sessions](#sessions) · [Repos and archive](#repos-and-archive) ·
 [Skills](#skills) · [Tests](#tests)
@@ -319,8 +320,12 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   whole chain down → exponential backoff with jitter up to
   `llm_retry_attempts` (hard cap 10), first walk always complete. An agent
   source needs no model. `jobRouting()` is the one reader of per-job routing.
+- A job may bring its own transport budget (`jobRetry()`: attempts and a
+  whole-call deadline, `llm_<job>_retry_*`); unset fields fall back to the
+  global policy, and the cap of ten holds for both.
 - Alerts: one per failure signature per window, a global hourly ceiling,
-  suppressed counts named in the next message, no alert for `config`.
+  suppressed counts named in the next message, no alert for `config` (the
+  deputy's own one-time "no source" message is the documented exception).
 - A coding agent as source declares `overhead: true` and the UI says so.
 
 ## Pages and live channel
@@ -501,6 +506,78 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   channel; the suppressed message is written as `notify_muted` and the
   notified flag is not set.
 - A message names the run first (title, agent, repo, harness/model).
+
+## Notifications: deputy and daily digest
+
+- `routeFor()` (`server/triage.mjs`, `ROUTES`) decides every `notifyRun()`
+  type; a type the table does not know is urgent:
+
+  | Route | Types | In the smart mode |
+  |---|---|---|
+  | urgent | `help`, `access`, `merge_blocked`, `review_changes`, `review_resolver`, `aborted_unmerged`, `followup_unmerged`, `unpushed`, `start_failed`, `max_runtime` | sent at once, unchanged (also in "urgent only") |
+  | deputy | `done`, `failed`, `followup`, `followup_failed`, `exit_without_report`, `pane_died` | the deputy decides |
+  | interim | `overrun`, `followup_overrun` | the deputy decides, without a report |
+  | digest | `deferred`, `resolving`, `review_merged`, `review_closed` | only in the digest; judged like interim while the digest is off |
+- The modes: `classic` sends as always, `smart` lets the deputy decide,
+  `urgent` sends only the urgent route; an update stays `classic` with the
+  digest off, so nothing changes and nothing costs until the operator
+  switches it on.
+- Every end of a piece of work gets one `report_notes` row while the deputy
+  or the digest is on, also muted, blocked, aborted and conflict-free runs:
+  a report creates its note synchronously before the first `await`, ends
+  without a report are found by `sweep()`; only runs that ended after
+  `triage_since` are swept, and a conflict run gets none.
+- A note's key is (run, report number, `launch_no`); `launch_no` counts every
+  launch (start, retry, resume), so a second launch is a second note; a
+  follow-up that failed or was abandoned has an `event` note keyed on its
+  event, because it has no report number of its own.
+- A note is assessed when `resultFixed()` holds (ended, out of the finish
+  gate, no follow-up open, no conflict run working — or blocked, kept on its
+  branch, in review) and 70 s passed without a non-deputy event, or 6 h after
+  it was created; one at a time, oldest first.
+- The deputy's system prompt carries the operator's rules (general, then the
+  repository's, which win for what they cover); the user prompt carries only
+  data, every quoted text masked (`escapeData`) so a report cannot close its
+  tag; numbers and comparisons are computed by the hub, and 0 tokens reads as
+  "unknown".
+- `decideLevel()`: outside the smart mode nothing is sent; the run's mute
+  switch wins over everything; a run or follow-up the operator ended
+  (`aborted {by:'user'}`, `aborted {source:'web'}`, `followup_abandoned` from
+  the page) is summarised but never announced; "always" turns none into info
+  for reports, never for an interim check; "only critical" sends critical
+  only.
+- A deputy message is the level, project and name, the deputy's sentences
+  and one button to the run — no attachment; the model never writes a URL.
+- The deputy has its own transport budget (3 attempts within 2 minutes unless
+  set); when it cannot answer, the hub writes a fallback line from facts for a
+  failure (or for "always"), and the lines are sent as ONE message at most
+  every 10 minutes, from the table, so a restart loses none; "only critical"
+  does not hold a failure line back (without the deputy nobody can say a
+  failure is not critical); the note's summary falls back to the start of the
+  short report.
+- Switching the deputy or the digest on again expires what was left open when
+  it was switched off; nothing older than `triage_since` is assessed or sent.
+- A digest counts the schedule slots of its period shifted back by five
+  minutes, so a slot whose start is still being written belongs to the next
+  digest and no slot is counted twice.
+- The smart mode cannot be switched on without a usable source; when the
+  source disappears later the deputy says so once itself — the one exception
+  to "no alert for `config`" in the LLM layer.
+- `notify()` records every message a channel took in `sent_messages` (30
+  days); the deputy reads it as "what the operator was told", from any source.
+- The daily digest covers the time since the last one (24 h the first time);
+  a hub that was off sends ONE catch-up digest; a slot already past when the
+  digest is switched on does not fire.
+- The digest prompt never holds a report: at most five summaries per agent,
+  routine agents only as `routine_count`; `quiet`, `open_days`, the counts and
+  the missed starts are computed by the hub; what waits for the operator is
+  always in it.
+- The scheduler writes every due slot to `schedule_log` (one row per agent
+  and slot, `starting` before the start and updated with what came of it, also
+  when a deferred start goes later); slots the scheduler never saw are added
+  from `scheduleDue()` for cron and weekly schedules only.
+- A digest link exists only for a ref the hub handed out (`r1`, `a1`); an
+  unknown ref renders as its words.
 
 ## Attention
 

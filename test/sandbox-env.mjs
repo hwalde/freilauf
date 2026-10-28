@@ -478,6 +478,12 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // ones. The hub goes on watching on the paths that are driven by an
       // event (a report, a hook) — only the clock moves to the suite.
       FREILAUF_WATCHER_OFF: '1',
+      // …and the deputy's and the daily digest's clocks (server/triage.mjs,
+      // server/digest.mjs): both call a model and send messages, so a suite
+      // drives them by hand (`triageTick()`, `digestTick()`) and the hub's own
+      // timers stay off.
+      FREILAUF_TRIAGE_OFF: '1',
+      FREILAUF_DIGEST_OFF: '1',
       FREILAUF_QUOTA_JSON: join(SB, 'quota.json'),
       // The report socket of §7.6 resolves to $XDG_RUNTIME_DIR/freilauf/hub.sock
       // when nothing names it — a path OUTSIDE the sandbox that a live hub and
@@ -628,6 +634,8 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.FREILAUF_WORKTREES_DIR = join(SB, 'worktrees')
     process.env.FREILAUF_INTEGRATE_DIR = join(SB, 'integrate')
     process.env.FREILAUF_INTEGRATOR_OFF = '1'
+    process.env.FREILAUF_TRIAGE_OFF = '1'
+    process.env.FREILAUF_DIGEST_OFF = '1'
     process.env.FREILAUF_QUOTA_JSON = join(SB, 'quota.json')
     process.env.FREILAUF_HUB_SOCKET = join(SB, 'hub.sock')
     process.env.FREILAUF_REPORT_SCRIPT = join(PROJECT, 'bin', 'fl-report')
