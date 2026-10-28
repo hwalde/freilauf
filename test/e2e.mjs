@@ -5302,7 +5302,8 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
         const s = await (await fetchPath('/settings/reports')).text()
         for (const name of ['notify_mode', 'notify_rules', 'digest_on', 'digest_time', 'digest_quiet_days', 'digest_rules',
           'llm_triage_source', 'llm_triage_model', 'llm_triage_fallback', 'llm_triage_reasoning',
-          'llm_digest_source', 'llm_digest_model', 'llm_digest_fallback', 'llm_digest_reasoning']) {
+          'llm_digest_source', 'llm_digest_model', 'llm_digest_fallback', 'llm_digest_reasoning',
+          'llm_triage_max_tokens', 'llm_digest_max_tokens']) {
           contains(s, `name="${name}"`, name)
         }
         contains(s, 'formaction="/settings/reports/test"', '"Test rules" posts the text as typed')

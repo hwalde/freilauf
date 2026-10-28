@@ -329,7 +329,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - A job may say how much a thinking model may think (`jobReasoning()`,
   `llm_<job>_reasoning`); the deputy and the digest default to `off`, and the
   OpenRouter adapter falls back to `effort: low` (remembered per model) when an
-  endpoint refuses `off` with "reasoning is mandatory".
+  endpoint refuses `off` with "reasoning is mandatory". Their token limit
+  (`jobMaxTokens()`, `llm_<job>_max_tokens`, default 32,000, capped) and a
+  five-minute call timeout leave a thinking model room to finish.
 - A job may bring its own transport budget (`jobRetry()`: attempts and a
   whole-call deadline, `llm_<job>_retry_*`); unset fields fall back to the
   global policy, and the cap of ten holds for both.

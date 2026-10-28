@@ -18,9 +18,9 @@ import { detailUrl, publicBase, parseDbUtc, scheduleDue, scheduleText, toDbUtc }
 import { notify } from './notify.mjs'
 import { parseMarkup, toPlain, toMarkdown, toHtml } from './rich.mjs'
 import { llmJson } from './llm/index.mjs'
-import { jobFallbacks, jobRouting, jobSource, jobRetry, jobReasoning, chainUsable } from './llm/job.mjs'
+import { jobFallbacks, jobRouting, jobSource, jobRetry, jobReasoning, jobMaxTokens, chainUsable } from './llm/job.mjs'
 import { escapeData, stamp, projectName, displayName, minutesText } from './report-context.mjs'
-import { digestOn, languageName } from './triage.mjs'
+import { digestOn, languageName, DEFAULT_MAX_TOKENS } from './triage.mjs'
 
 export const DEFAULT_DIGEST_MODEL = 'deepseek/deepseek-v4-flash'
 export const DEFAULT_DIGEST_TIME = '19:00'
@@ -498,6 +498,18 @@ export function stripEmptyWaiting(body, somethingWaits) {
   return String(body ?? '').split('\n').filter(l => !/^\s*(-\s*)?❓/.test(l)).join('\n').replace(/^\s+/, '')
 }
 
+/**
+ * The headline is its own field and the title of the message; a body that
+ * opens with it again (measured: "**Mostly fine**" as its first line) says it
+ * twice.
+ */
+export function stripRepeatedHeadline(body, headline) {
+  const norm = (x) => String(x ?? '').replace(/[*#_]/g, '').replace(/[.!:]+$/, '').trim().toLowerCase()
+  const lines = String(body ?? '').split('\n')
+  if (headline && lines.length && norm(lines[0]) === norm(headline)) return lines.slice(1).join('\n').replace(/^\s+/, '')
+  return body
+}
+
 /** The rich message of a digest. */
 export function digestMessage(row, refs) {
   const blocks = parseMarkup(row.body ?? '', refs)
@@ -543,12 +555,12 @@ export async function generateDigest({ startMs, endMs, preview = false, send = t
       purpose: 'digest', source: jobSource('digest'), model: m, fallbacks: jobFallbacks('digest', m), ...jobRouting('digest'),
       retry: jobRetry('digest', DIGEST_RETRY), reasoning: jobReasoning('digest', 'off'),
       system: digestSystemPrompt(), prompt: input.prompt,
-      schema: DIGEST_SCHEMA, schemaName: 'daily_digest', maxTokens: 4000, temperature: 0.3, timeoutMs: 180_000,
+      schema: DIGEST_SCHEMA, schemaName: 'daily_digest', maxTokens: jobMaxTokens('digest', DEFAULT_MAX_TOKENS), temperature: 0.3, timeoutMs: 300_000,
     })
     if (r.ok) {
       headline = String(r.data.headline ?? '').trim().slice(0, 80)
       body = String(r.data.body ?? '').trim().slice(0, 4000)
-      body = stripEmptyWaiting(body, input.facts.waiting.length > 0)
+      body = stripRepeatedHeadline(stripEmptyWaiting(body, input.facts.waiting.length > 0), headline)
       usage = r.usage; source = r.source; model = r.model
     } else {
       ({ headline, body } = plainDigest(input)); state = 'fallback'; error = r.error

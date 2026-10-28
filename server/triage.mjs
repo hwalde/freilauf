@@ -29,7 +29,7 @@ import { detailUrl, parseDbUtc } from './util.mjs'
 import { notify } from './notify.mjs'
 import { toPlain } from './rich.mjs'
 import { llmJson } from './llm/index.mjs'
-import { chainUsable, jobFallbacks, jobRouting, jobSource, jobRetry, jobReasoning } from './llm/job.mjs'
+import { chainUsable, jobFallbacks, jobRouting, jobSource, jobRetry, jobReasoning, jobMaxTokens } from './llm/job.mjs'
 import {
   escapeData, clip, cutSentence, stamp, runFactLines, projectName, displayName,
 } from './report-context.mjs'
@@ -42,8 +42,10 @@ export const NOTIFY_MODES = ['classic', 'smart', 'urgent']
 export const NOTIFY_RESULT = ['auto', 'always', 'critical']
 /** The default model: cheap, structured outputs, the same as the title's. */
 export const DEFAULT_TRIAGE_MODEL = 'deepseek/deepseek-v4-flash'
-/** The deputy's own transport budget: 3 attempts within 2 minutes. */
-export const TRIAGE_RETRY = { attempts: 3, deadlineMs: 120_000, maxMs: 20_000 }
+/** The deputy's own transport budget: 3 attempts; no new round after 10 minutes. */
+export const TRIAGE_RETRY = { attempts: 3, deadlineMs: 600_000, maxMs: 20_000 }
+/** Token limit of the deputy and the digest unless set: room for a thinking model. */
+export const DEFAULT_MAX_TOKENS = 32_000
 
 /** classic (every report, as always) | smart (the deputy decides) | urgent (only what waits for a human). */
 export function notifyMode() {
@@ -528,10 +530,11 @@ export async function askDeputy(note, run, { rulesOverride = null } = {}) {
     prompt: userPrompt(note, run),
     schema: TRIAGE_SCHEMA,
     schemaName: 'deputy_assessment',
-    // Room for a model that thinks anyway (not every one honours the switch).
-    maxTokens: 3000,
+    // Room to think: only what is used is paid, and a model that thinks
+    // (measured: up to 21k reasoning tokens, 2 minutes) must not be cut off.
+    maxTokens: jobMaxTokens('triage', DEFAULT_MAX_TOKENS),
     temperature: 0.2,
-    timeoutMs: 60_000,
+    timeoutMs: 300_000,
   })
   if (!r.ok) return { ok: false, error: r.error }
   return { ok: true, data: sanitize(r.data), usage: r.usage ?? null, source: r.source, model: r.model }

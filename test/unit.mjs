@@ -14278,6 +14278,18 @@ process.stdout.write(JSON.stringify(out))
       } finally { unregisterPlugin('unit-5xx') }
     })
 
+    await check('jobMaxTokens: generous default, the setting when valid, never Number("") = 0', async () => {
+      const { jobMaxTokens, MAX_TOKENS_CEILING } = await import('../server/llm/job.mjs')
+      equal(jobMaxTokens('digest', 32000), 32000, 'unset: the caller\'s default')
+      setSetting('llm_digest_max_tokens', '8000')
+      equal(jobMaxTokens('digest', 32000), 8000, 'set: the setting')
+      setSetting('llm_digest_max_tokens', '0')
+      equal(jobMaxTokens('digest', 32000), 32000, 'a budget of 0 is no budget')
+      setSetting('llm_digest_max_tokens', '999999999')
+      equal(jobMaxTokens('digest', 32000), MAX_TOKENS_CEILING, 'capped')
+      setSetting('llm_digest_max_tokens', '')
+    })
+
     await check('jobReasoning: off by default for the caller who asks, "model" means its own default', () => {
       equal(jobReasoning('digest', 'off'), 'off', 'the caller\'s default')
       setSetting('llm_digest_reasoning', 'model')
@@ -14389,6 +14401,11 @@ process.stdout.write(JSON.stringify(out))
         equal(r.stage, 'parse', 'still the answer problem')
         contains(r.error, 'Insufficient credits', 'and what the last try ran into')
       } finally { or.llm.complete = saved.complete; or.routing.resolve = saved.resolve; setSetting('llm_alert_on', '1') }
+    })
+
+    await check('a body that repeats the headline loses that first line, and only then', () => {
+      equal(dg.stripRepeatedHeadline('**Mostly fine.**\n\n- ✅ done', 'Mostly fine'), '- ✅ done', 'the repeat goes')
+      equal(dg.stripRepeatedHeadline('- ✅ done', 'Mostly fine'), '- ✅ done', 'anything else stays')
     })
 
     await check('a "nothing waits" line goes when nothing waits — and stays out of the way otherwise', () => {

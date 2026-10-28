@@ -1949,5 +1949,8 @@
   "llm.kind_cut_off": "答案在 token 上限处被截断",
   "llm.recovery_failed": "（在另一个服务提供商处的最后一次尝试也失败了：{error}）",
   "digest.still_open": "仍未解决，第 {n} 天",
-  "digest.quoted": "“{text}”"
+  "digest.quoted": "“{text}”",
+  "reports.max_tokens": "Token 上限",
+  "reports.max_tokens_hint": "思考也计入其中；只按实际使用量计费。留空 = {n}。",
+  "reports.err_max_tokens": "Token 上限：{min} 到 {max} 之间的整数。"
 }
