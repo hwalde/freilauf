@@ -29,7 +29,7 @@ import { detailUrl, parseDbUtc } from './util.mjs'
 import { notify } from './notify.mjs'
 import { toPlain } from './rich.mjs'
 import { llmJson } from './llm/index.mjs'
-import { chainUsable, jobFallbacks, jobRouting, jobSource, jobRetry } from './llm/job.mjs'
+import { chainUsable, jobFallbacks, jobRouting, jobSource, jobRetry, jobReasoning } from './llm/job.mjs'
 import {
   escapeData, clip, cutSentence, stamp, runFactLines, projectName, displayName,
 } from './report-context.mjs'
@@ -523,11 +523,13 @@ export async function askDeputy(note, run, { rulesOverride = null } = {}) {
     fallbacks: jobFallbacks('triage', model),
     ...jobRouting('triage'),
     retry: jobRetry('triage', TRIAGE_RETRY),
+    reasoning: jobReasoning('triage', 'off'),
     system: systemPrompt(run, { rulesOverride }),
     prompt: userPrompt(note, run),
     schema: TRIAGE_SCHEMA,
     schemaName: 'deputy_assessment',
-    maxTokens: 1200,
+    // Room for a model that thinks anyway (not every one honours the switch).
+    maxTokens: 3000,
     temperature: 0.2,
     timeoutMs: 60_000,
   })

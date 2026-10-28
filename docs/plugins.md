@@ -242,7 +242,7 @@ because the plugin asks `ctx.secret()` instead of reading a fixed name.
 
 | Member | What it does |
 |---|---|
-| `json(url, headers = {}, init = {})` | `fetch` with `AbortSignal.timeout` (8 s default, `init.timeoutMs` overrides — an LLM completion needs more than a catalog fetch). A non-2xx answer throws `HTTP <status>`, the one error shape every caller in the hub matches on. The signal is set **after** the init spread, so an init object cannot disarm the timeout |
+| `json(url, headers = {}, init = {})` | `fetch` with `AbortSignal.timeout` (8 s default, `init.timeoutMs` overrides — an LLM completion needs more than a catalog fetch). A non-2xx answer throws `HTTP <status>`, the one error shape every caller in the hub matches on, followed by `: <message>` when the vendor's body names one (`error.message`, `message`) — the hub's LLM alert shows that tail, so an adapter that throws its own errors should keep the same shape. The signal is set **after** the init spread, so an init object cannot disarm the timeout |
 | `registry()` | the cached models.dev snapshot (6 h; parallel askers share one request; a failed refresh keeps serving the previous snapshot) |
 | `provider(id)` | another **provider's** descriptor, or `null` — resolved through the registry at **call** time |
 | `env` | `process.env`, for legacy reads — prefer `secret()` |
@@ -1412,9 +1412,14 @@ other one; nothing in `server/llm` is skipped for it except the strict prompt.
 | `servingProvider` | OpenRouter's serving-provider pin — `provider: {order:[x], allow_fallbacks:false}`; the value `auto` resolves the best provider per model with default requirements |
 | `orRouting` | an auto-routing config `{mode:'auto', quant_min?, location?, max_in?, max_out?}` — resolved per model through the plugin's `routing` capability and cache; takes precedence over `servingProvider` |
 | `orRoutingRefresh` | OpenRouter only — resolve `orRouting` with `refresh: true`, ignoring the 24 h cache. The `llmJson` recovery round uses it when a `parse`/`validate` failure has already spent the retry budget: the cached order is exactly the one that just answered unusably, so a genuinely different serving provider is what a fresh resolve is asked for |
-| `purpose` | the caller's name (`title`, `check`, `extract`, `extras`); OpenRouter sends it as `X-Title` |
+| `purpose` | the caller's name (`title`, `check`, `extract`, `extras`, `triage`, `digest`); OpenRouter sends it as `X-Title` |
+| `reasoning` | how much a thinking model may think before it answers: `'off'`, `'low'`, `'medium'`, `'high'`, or null for the model's own default. OpenRouter maps it to `reasoning: {enabled:false}` / `{effort}`; a source without such a switch ignores it |
 
-The answer is `{ text, usage, raw }`. **`text` is always a string** — a source
+The answer is `{ text, usage, raw, truncated? }`. `truncated: true` says the
+model reached the token limit before it wrote any answer (OpenRouter:
+`finish_reason: 'length'` with no content) — the layer above then reports a
+cut-off instead of asking again, because the same limit would be spent the same
+way. **`text` is always a string** — a source
 whose API hands back an object stringifies it (claude's `structured_output`,
 cursor's `result`). A transport failure **throws**; it does not return a
 falsy answer, because "the model said nothing" and "the call did not happen"

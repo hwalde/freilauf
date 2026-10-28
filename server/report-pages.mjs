@@ -11,13 +11,14 @@ import { t } from './i18n.mjs'
 import { redirect } from './web-helpers.mjs'
 import { layout, problemPage, llmSourceFields, llmFallbackFields, saveJobRouting } from './pages.mjs'
 import { llmSources } from './llm/sources.mjs'
+import { REASONING_CHOICES } from './llm/job.mjs'
 import { parseMarkup, toHtml } from './rich.mjs'
 import {
   notifyMode, digestOn, triageWanted, triageUsable, markTriageSince, NOTIFY_MODES, NOTIFY_RESULT,
   DEFAULT_TRIAGE_MODEL, TRIAGE_RETRY, askDeputy, decideLevel, reassess, endedByOperator,
 } from './triage.mjs'
 import {
-  digestTime, digestQuietDays, DEFAULT_DIGEST_MODEL, markDigestSince,
+  digestTime, digestQuietDays, DEFAULT_DIGEST_MODEL, DIGEST_RETRY, markDigestSince,
   previewDigest, sendDigestNow, getDigest,
 } from './digest.mjs'
 import { displayName, projectName } from './report-context.mjs'
@@ -49,6 +50,9 @@ function jobFieldset(prefix, s, sources, { legend, hint, model, defaultModel, mr
         <datalist id="${prefix}-mru">${[...new Set([defaultModel, ...mruList(mru)])].map(m => `<option value="${e(m)}">`).join('')}</datalist>
         <span class="dim">${e(model)}</span></label>
       ${llmFallbackFields(prefix, s, sources)}
+      <label>${e(t('reports.reasoning'))} ${select(`${prefix}_reasoning`, REASONING_CHOICES.includes(s[`${prefix}_reasoning`]) ? s[`${prefix}_reasoning`] : 'off',
+        REASONING_CHOICES.map(v => [v, t(`reports.reasoning_${v}`)]))}
+        <span class="dim">${e(t('reports.reasoning_hint'))}</span></label>
       <label>${e(t('reports.retry_attempts'))} <input name="${prefix}_retry_attempts" type="number" min="0" max="10" step="1" value="${e(s[`${prefix}_retry_attempts`] ?? '')}" placeholder="${e(String(retryDefaults?.attempts ?? t('reports.retry_global')))}">
         <span class="dim">${e(t('reports.retry_attempts_hint'))}</span></label>
       <label>${e(t('reports.retry_deadline'))} <input name="${prefix}_retry_deadline_ms" type="number" min="0" step="1000" value="${e(s[`${prefix}_retry_deadline_ms`] ?? '')}" placeholder="${e(String(retryDefaults?.deadlineMs ?? t('reports.retry_global')))}">
@@ -103,7 +107,7 @@ export async function pageReportSettings(req, res) {
     ${jobFieldset('llm_digest', s, sources, {
       legend: t('reports.digest_llm_legend'), hint: t('reports.digest_llm_hint'),
       model: t('reports.digest_model_hint', { model: DEFAULT_DIGEST_MODEL }), defaultModel: DEFAULT_DIGEST_MODEL,
-      mru: DIGEST_MRU, retryDefaults: null,
+      mru: DIGEST_MRU, retryDefaults: DIGEST_RETRY,
     })}
     <div class="btn-row"><button>${e(t('settings.save'))}</button>
       <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
@@ -117,7 +121,7 @@ export async function pageReportSettings(req, res) {
 const REPORT_KEYS = ['notify_mode', 'digest_on', 'digest_quiet_days', 'digest_rules']
 // The serving-provider routing is not in this list: `saveJobRouting()` derives
 // `or_provider` and `or_routing` from the mode the form carries.
-const JOB_FIELDS = ['source', 'model', 'fallback', 'fallback_model', 'retry_attempts', 'retry_deadline_ms']
+const JOB_FIELDS = ['source', 'model', 'fallback', 'fallback_model', 'reasoning', 'retry_attempts', 'retry_deadline_ms']
 
 export async function reportSettingsSave(req, res, url, formBody) {
   const b = await formBody()
@@ -144,6 +148,7 @@ export async function reportSettingsSave(req, res, url, formBody) {
       const k = `${p}_${f}`
       if (!Object.hasOwn(b, k)) continue
       const v = String(b[k] ?? '').trim()
+      if (f === 'reasoning' && !REASONING_CHOICES.includes(v)) continue
       if ((f === 'retry_attempts' || f === 'retry_deadline_ms') && v !== '' && !(Number.isFinite(Number(v)) && Number(v) >= 0)) {
         problems.push(t('reports.err_number', { field: k }))
         continue
@@ -240,7 +245,7 @@ export async function pageRulesTest(req, res, url) {
 export async function pageDigests(req, res) {
   const rows = db.prepare(`SELECT * FROM digests ORDER BY id DESC LIMIT 60`).all()
   const list = rows.map(d => `<tr><td><a href="/digests/${d.id}">${e(fmtDbUtc(d.period_end))}</a></td>
-      <td>${e(d.headline ?? '')}</td><td class="dim">${e(t(`digest.state_${d.state}`))}${d.preview ? ` · ${e(t('digest.preview_mark'))}` : ''}</td></tr>`).join('')
+      <td>${e(d.headline ?? '')}</td><td class="dim">${e(t(`digest.state_${d.state}`))}${d.preview && d.state !== 'preview' ? ` · ${e(t('digest.preview_mark'))}` : ''}</td></tr>`).join('')
   const off = !digestOn() ? `<p class="dim">${e(t('digest.off_hint'))} <a href="/settings/reports">${e(t('reports.title'))}</a></p>` : ''
   const body = `<h2>${e(t('digest.page_title'))}</h2>
   ${off}

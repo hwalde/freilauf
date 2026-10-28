@@ -46,12 +46,24 @@ const REGISTRY_MS = 6 * 60 * 60 * 1000
  * spread so an init object can never accidentally disarm the timeout.
  *
  * A non-2xx answer throws `HTTP <status>` — the one error shape every caller in
- * the hub already matches on.
+ * the hub already matches on — followed by what the vendor itself said, when it
+ * said something (`HTTP 404: No endpoints found …`). The status alone was how a
+ * "no endpoint can serve this request" read as "model not found" in an alert.
  */
 export async function pluginJson(url, headers = {}, init = {}) {
   const { timeoutMs = TIMEOUT_MS, ...rest } = init ?? {}
   const res = await fetch(url, { ...rest, headers, signal: AbortSignal.timeout(timeoutMs) })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) {
+    let said = ''
+    try {
+      const body = await res.text()
+      let j = null
+      try { j = JSON.parse(body) } catch { j = null }
+      said = String(j?.error?.message ?? j?.message ?? (typeof j?.error === 'string' ? j.error : '') ?? '')
+    } catch { said = '' }
+    said = said.replace(/\s+/g, ' ').trim().slice(0, 200)
+    throw new Error(said ? `HTTP ${res.status}: ${said}` : `HTTP ${res.status}`)
+  }
   return res.json()
 }
 

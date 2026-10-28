@@ -14183,6 +14183,267 @@ process.stdout.write(JSON.stringify(out))
     })
   }
 
+  // ------------------------------------------------------------------
+  group('Notifications: a thinking model, a vendor\'s own words, a digest without the model')
+  {
+    const db = (await import('../server/db.mjs')).default
+    const { setSetting } = await import('../server/db.mjs')
+    const http = await import('node:http')
+    const { llmJson } = await import('../server/llm/index.mjs')
+    const { jobReasoning } = await import('../server/llm/job.mjs')
+    const { registerPlugin, unregisterPlugin, getPlugin } = await import('../server/plugins/registry.mjs')
+    const { pluginJson } = await import('../server/plugins/context.mjs')
+    const dg = await import('../server/digest.mjs')
+    const schema = { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] }
+    const serve = async (handler) => {
+      const server = http.createServer((req, res) => { let b = ''; req.on('data', c => { b += c }); req.on('end', () => handler(req, res, b)) })
+      await new Promise(r => server.listen(0, '127.0.0.1', r))
+      return { server, url: `http://127.0.0.1:${server.address().port}` }
+    }
+    setSetting('llm_alert_on', '0')
+
+    await check('a vendor error carries what the vendor said, after the status', async () => {
+      const { server, url } = await serve((req, res) => res.writeHead(404, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ error: { message: 'No endpoints found that support the requested parameters', code: 404 } })))
+      try {
+        let msg = ''
+        try { await pluginJson(url, {}, { method: 'POST', body: '{}' }) } catch (err) { msg = err.message }
+        equal(msg, 'HTTP 404: No endpoints found that support the requested parameters', 'status first, then the vendor\'s words')
+        isTrue(/HTTP (\d{3})/.test(msg), 'the shape every caller matches on still matches')
+      } finally { server.close() }
+    })
+
+    await check('the OpenRouter adapter sends the thinking switch and reports a cut-off answer', async () => {
+      const bodies = []
+      const { server, url } = await serve((req, res, b) => {
+        bodies.push(JSON.parse(b))
+        res.writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: null } }], usage: { completion_tokens: 3000 } }))
+      })
+      const before = process.env.FREILAUF_OPENROUTER_BASE
+      process.env.FREILAUF_OPENROUTER_BASE = url
+      try {
+        const or = getPlugin('openrouter')
+        const { pluginCtx } = await import('../server/plugins/context.mjs')
+        const off = await or.llm.complete(pluginCtx('openrouter'), { model: 'm', prompt: 'q', reasoning: 'off' })
+        await or.llm.complete(pluginCtx('openrouter'), { model: 'm', prompt: 'q', reasoning: 'low' })
+        await or.llm.complete(pluginCtx('openrouter'), { model: 'm', prompt: 'q' })
+        equal(JSON.stringify(bodies[0].reasoning), '{"enabled":false}', '"off" switches thinking off')
+        equal(JSON.stringify(bodies[1].reasoning), '{"effort":"low"}', '"low" is an effort level')
+        equal(bodies[2].reasoning, undefined, 'nothing asked, nothing sent — the model\'s default')
+        equal(`${off.text}|${off.truncated}`, '|true', 'no content at the token limit is a cut-off, not an empty JSON string')
+      } finally {
+        if (before === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = before
+        server.close()
+      }
+    })
+
+    await check('a cut-off answer is said once and plainly: no repair round, no retries', async () => {
+      let calls = 0
+      registerPlugin({ id: 'unit-thinker', kind: 'provider', label: 'Unit Thinker', envKeys: [], async fetchModels() { return [] },
+        llm: { schema: 'native', async models() { return [] }, async complete() { calls++; return { text: '', truncated: true } } } })
+      try {
+        const r = await llmJson({ purpose: 'digest', source: 'provider:unit-thinker', model: 'm', prompt: 'q', schema })
+        equal(`${r.ok}|${r.stage}`, 'false|parse', 'an answer problem, not an outage')
+        contains(r.error, 'token', 'naming the token limit')
+        equal(calls, 1, 'asked exactly once')
+      } finally { unregisterPlugin('unit-thinker') }
+    })
+
+    await check('a recovery round that fails in transport reports the answer problem it was meant to fix', async () => {
+      const or = getPlugin('openrouter')
+      const saved = { complete: or.llm.complete, resolve: or.routing?.resolve }
+      let calls = 0
+      or.llm.complete = async (ctx, req) => {
+        calls++
+        if (req.orRoutingRefresh) throw new Error('HTTP 404: No endpoints found')
+        return { text: 'Sure, here you go: not JSON at all' }
+      }
+      or.routing.resolve = async () => ({ ok: true, order: ['x'] })
+      try {
+        const r = await llmJson({ purpose: 'digest', source: 'provider:openrouter', model: 'm', prompt: 'q', schema })
+        equal(r.stage, 'parse', 'the stage is the answer\'s, not the recovery\'s 404')
+        equal(calls, 3, 'first try, one repair, one recovery round — and no ten rounds of backoff')
+      } finally { or.llm.complete = saved.complete; or.routing.resolve = saved.resolve }
+    })
+
+    await check('a 5xx names its status in the text, never a raw placeholder', async () => {
+      registerPlugin({ id: 'unit-5xx', kind: 'provider', label: 'Unit 5xx', envKeys: [], async fetchModels() { return [] },
+        llm: { schema: 'native', async models() { return [] }, async complete() { throw new Error('HTTP 503: overloaded') } } })
+      try {
+        const r = await llmJson({ purpose: 'digest', source: 'provider:unit-5xx', model: 'm', prompt: 'q', schema, retry: { attempts: 1 } })
+        contains(r.error, '503', 'the status')
+        contains(r.error, 'overloaded', 'and what the vendor said')
+        isFalse(r.error.includes('{code}'), 'no placeholder')
+      } finally { unregisterPlugin('unit-5xx') }
+    })
+
+    await check('jobReasoning: off by default for the caller who asks, "model" means its own default', () => {
+      equal(jobReasoning('digest', 'off'), 'off', 'the caller\'s default')
+      setSetting('llm_digest_reasoning', 'model')
+      equal(jobReasoning('digest', 'off'), null, '"as the model likes" sends nothing')
+      setSetting('llm_digest_reasoning', 'low')
+      equal(jobReasoning('digest', 'off'), 'low', 'a level')
+      setSetting('llm_digest_reasoning', 'nonsense')
+      equal(jobReasoning('digest', 'off'), 'off', 'junk is the default')
+      setSetting('llm_digest_reasoning', '')
+    })
+
+    await check('the digest without the model lists the facts, with links', () => {
+      const d = dg.plainDigest({ facts: {
+        waiting: [{ ref: 'r1', name: 'Dead code cleaner', kind: 'blocked', detail: 'conflict' }],
+        problems: [{ ref: 'r2', name: 'Model update', summary: 'Could not reach the provider.' }],
+        missed: [{ ref: 'a1', name: 'Docs sweep', n: 2 }],
+        achieved: [{ ref: 'r3', name: 'Login page', summary: 'Rebuilt and merged.' }], routine: 4 } })
+      contains(d.body, '[[r1|Dead code cleaner]]', 'what waits, linked')
+      contains(d.body, '[[r2|Model update]]: Could not reach the provider.', 'what went wrong, with its summary')
+      contains(d.body, '[[a1|Docs sweep]]', 'the missed starts')
+      contains(d.body, '[[r3|Login page]]', 'what is done')
+      contains(d.body, '4', 'and the routine as a count')
+      contains(dg.plainDigest({ facts: { waiting: [], problems: [], missed: [], achieved: [], routine: 0 }, stats: { runs: 0 } }).body, 'Nothing happened', 'an empty period says so')
+      contains(dg.plainDigest({ facts: { waiting: [], problems: [], missed: [], achieved: [], routine: 0 }, stats: { runs: 7 } }).body, '7 run(s) started',
+        'runs without an assessment are not "nothing"')
+    })
+
+    await check('an agent whose runs the deputy found unremarkable is routine, even on the first day', () => {
+      db.prepare(`INSERT INTO repos(name, path) VALUES('routine-repo', '/tmp/routine-repo')`).run()
+      const rid = db.prepare(`SELECT id FROM repos WHERE name='routine-repo'`).get().id
+      db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode) VALUES(?, 'quiet-watcher', 'claude', 'p', 'keiner')`).run(rid)
+      const aid = db.prepare(`SELECT id FROM agents WHERE name='quiet-watcher'`).get().id
+      db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, prompt, branch_mode, expected_minutes) VALUES('quietrun-aaaa-bbbb-cccc-000000000000', ?, ?, 'done', 'claude', 'p', 'keiner', 45)`).run(rid, aid)
+      db.prepare(`INSERT INTO report_notes(run_id, result, attention, summary, state) VALUES('quietrun-aaaa-bbbb-cccc-000000000000', 'success', 'none', 'All checks ok.', 'done')`).run()
+      const input = dg.buildDigestInput(Date.now() - 3_600_000, Date.now() + 60_000)
+      isFalse(input.prompt.includes('All checks ok.'), 'its summary is not handed over')
+      isTrue(input.facts.routine >= 1, 'it is counted as routine')
+    })
+
+    await check('an archived run waits for nobody', () => {
+      db.prepare(`INSERT INTO repos(name, path) VALUES('wait-repo', '/tmp/wait-repo')`).run()
+      const repoId = db.prepare(`SELECT id FROM repos WHERE name='wait-repo'`).get().id
+      const mk = (id, archived) => db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, merge_status, ended_at, archived_at)
+        VALUES(?, ?, 'done', 'claude', 'p', 'keiner', 45, ?, 'blocked_conflict', datetime('now','-60 days'), ?)`).run(id, repoId, id.slice(0, 8), archived)
+      mk('waitarch-aaaa-bbbb-cccc-000000000000', '2026-09-01 00:00:00')
+      mk('waitopen-aaaa-bbbb-cccc-000000000000', null)
+      const input = dg.buildDigestInput(Date.now() - 86_400_000, Date.now())
+      isFalse(input.prompt.includes('waitarch'), 'the archived blocked merge is not listed')
+      contains(input.prompt, 'name="waitopen"', 'the open one is, with its name')
+    })
+    setSetting('llm_alert_on', '1')
+  }
+
+  // ------------------------------------------------------------------
+  group('Notifications: thinking that cannot be switched off, and the digest\'s empty parts')
+  {
+    const db = (await import('../server/db.mjs')).default
+    const { setSetting } = await import('../server/db.mjs')
+    const http = await import('node:http')
+    const { getPlugin, registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+    const { pluginCtx } = await import('../server/plugins/context.mjs')
+    const { llmJson } = await import('../server/llm/index.mjs')
+    const dg = await import('../server/digest.mjs')
+
+    await check('a model that cannot stop thinking is asked for "a little" — and remembered', async () => {
+      const bodies = []
+      const server = http.createServer((req, res) => {
+        let b = ''; req.on('data', c => { b += c })
+        req.on('end', () => {
+          const body = JSON.parse(b); bodies.push(body)
+          if (body.reasoning?.enabled === false) {
+            res.writeHead(400, { 'content-type': 'application/json' })
+              .end(JSON.stringify({ error: { message: 'Reasoning is mandatory for this endpoint and cannot be disabled.', code: 400 } }))
+          } else {
+            res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '{"a":"hi"}' } }] }))
+          }
+        })
+      })
+      await new Promise(r => server.listen(0, '127.0.0.1', r))
+      const before = process.env.FREILAUF_OPENROUTER_BASE
+      process.env.FREILAUF_OPENROUTER_BASE = `http://127.0.0.1:${server.address().port}`
+      try {
+        const or = getPlugin('openrouter')
+        const a = await or.llm.complete(pluginCtx('openrouter'), { model: 'unit/mandatory-thinker', prompt: 'q', reasoning: 'off' })
+        equal(a.text, '{"a":"hi"}', 'the answer arrives')
+        equal(bodies.map(b => JSON.stringify(b.reasoning)).join(' '), '{"enabled":false} {"effort":"low"}', 'off was refused, low was taken')
+        bodies.length = 0
+        await or.llm.complete(pluginCtx('openrouter'), { model: 'unit/mandatory-thinker', prompt: 'q', reasoning: 'off' })
+        equal(bodies.length, 1, 'the next call asks once')
+        equal(JSON.stringify(bodies[0].reasoning), '{"effort":"low"}', 'and asks for "low" straight away')
+      } finally {
+        if (before === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = before
+        server.close()
+      }
+    })
+
+    await check('a failed recovery round is named, not hidden', async () => {
+      const or = getPlugin('openrouter')
+      const saved = { complete: or.llm.complete, resolve: or.routing.resolve }
+      or.llm.complete = async (ctx, req) => {
+        if (req.orRoutingRefresh) throw new Error('HTTP 402: Insufficient credits')
+        return { text: 'prose, not JSON' }
+      }
+      or.routing.resolve = async () => ({ ok: true, order: ['x'] })
+      setSetting('llm_alert_on', '0')
+      try {
+        const r = await llmJson({ purpose: 'digest', source: 'provider:openrouter', model: 'm', prompt: 'q',
+          schema: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] } })
+        equal(r.stage, 'parse', 'still the answer problem')
+        contains(r.error, 'Insufficient credits', 'and what the last try ran into')
+      } finally { or.llm.complete = saved.complete; or.routing.resolve = saved.resolve; setSetting('llm_alert_on', '1') }
+    })
+
+    await check('a "nothing waits" line goes when nothing waits — and stays out of the way otherwise', () => {
+      const body = '- ❓ Nothing waits for you.\n- ⚠️ [[r1|Model update]] failed.\n\nThe rest ran as usual.'
+      equal(dg.stripEmptyWaiting(body, false), '- ⚠️ [[r1|Model update]] failed.\n\nThe rest ran as usual.', 'gone, the rest untouched')
+      equal(dg.stripEmptyWaiting(body, true), body, 'when something waits, nothing is touched')
+    })
+
+    await check('the prompt has a waiting block only when something waits, and then before the agents', () => {
+      const waitingNow = db.prepare(`SELECT id, archived_at FROM runs WHERE archived_at IS NULL AND (status IN ('waiting_help','deferred')
+        OR merge_status LIKE 'blocked_%' OR merge_status IN ('in_review','changes_requested'))`).all()
+      db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id IN (${waitingNow.map(() => '?').join(',') || "''"})`).run(...waitingNow.map(r => r.id))
+      try {
+        const empty = dg.buildDigestInput(Date.now() - 86_400_000, Date.now())
+        isFalse(empty.prompt.includes('<waiting_for_you>'), 'no block when nothing waits')
+        db.prepare(`INSERT INTO repos(name, path) VALUES('ask-repo', '/tmp/ask-repo')`).run()
+        const rid = db.prepare(`SELECT id FROM repos WHERE name='ask-repo'`).get().id
+        db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, help_text)
+          VALUES('askrun00-aaaa-bbbb-cccc-000000000000', ?, 'waiting_help', 'claude', 'p', 'keiner', 45, 'Asking run', 'Which branch?')`).run(rid)
+        const full = dg.buildDigestInput(Date.now() - 86_400_000, Date.now())
+        const i = full.prompt.indexOf('<waiting_for_you>')
+        isTrue(i >= 0 && i < full.prompt.indexOf('<agents'), 'the block is there, before the agents')
+        contains(dg.plainDigest(full).body, 'Which branch?', 'and a question keeps its words in the digest without the model')
+        db.prepare(`UPDATE runs SET status='done', archived_at=datetime('now') WHERE id='askrun00-aaaa-bbbb-cccc-000000000000'`).run()
+      } finally {
+        for (const r of waitingNow) db.prepare('UPDATE runs SET archived_at=? WHERE id=?').run(r.archived_at, r.id)
+      }
+    })
+
+    await check('an open problem with no run today stays in the digest without the model', () => {
+      db.prepare(`INSERT INTO repos(name, path) VALUES('open-repo', '/tmp/open-repo')`).run()
+      const rid = db.prepare(`SELECT id FROM repos WHERE name='open-repo'`).get().id
+      db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode) VALUES(?, 'still-broken', 'claude', 'p', 'keiner')`).run(rid)
+      const aid = db.prepare(`SELECT id FROM agents WHERE name='still-broken'`).get().id
+      db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, prompt, branch_mode, expected_minutes) VALUES('brokenrn-aaaa-bbbb-cccc-000000000000', ?, ?, 'failed', 'claude', 'p', 'keiner', 45)`).run(rid, aid)
+      db.prepare(`INSERT INTO report_notes(run_id, result, cause, summary, state, created_at) VALUES('brokenrn-aaaa-bbbb-cccc-000000000000', 'failed', 'credentials', 'Login expired.', 'done', datetime('now','-3 days'))`).run()
+      db.prepare(`INSERT INTO schedule_log(agent_id, slot, outcome) VALUES(?, ?, 'started')`).run(aid, new Date(Date.now() - 3_600_000).toISOString().slice(0, 16))
+      const input = dg.buildDigestInput(Date.now() - 86_400_000, Date.now())
+      const line = dg.plainDigest(input).body.split('\n').find(l => l.includes('Login expired.'))
+      isTrue(!!line, 'listed, with its last summary')
+      contains(line, 'day 4', 'and how long it has been open')
+    })
+
+    await check('routine is counted for the quiet agent itself, not by accident', () => {
+      const before = dg.buildDigestInput(Date.now() - 3_600_000, Date.now() + 60_000).facts.routine
+      db.prepare(`INSERT INTO repos(name, path) VALUES('routine2-repo', '/tmp/routine2-repo')`).run()
+      const rid = db.prepare(`SELECT id FROM repos WHERE name='routine2-repo'`).get().id
+      db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode) VALUES(?, 'quiet-two', 'claude', 'p', 'keiner')`).run(rid)
+      const aid = db.prepare(`SELECT id FROM agents WHERE name='quiet-two'`).get().id
+      db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, prompt, branch_mode, expected_minutes) VALUES('quiettwo-aaaa-bbbb-cccc-000000000000', ?, ?, 'done', 'claude', 'p', 'keiner', 45)`).run(rid, aid)
+      db.prepare(`INSERT INTO report_notes(run_id, result, attention, summary, state) VALUES('quiettwo-aaaa-bbbb-cccc-000000000000', 'no_change', 'none', 'Nothing to do.', 'done')`).run()
+      equal(dg.buildDigestInput(Date.now() - 3_600_000, Date.now() + 60_000).facts.routine, before + 1, 'exactly one more')
+    })
+  }
+
 } finally {
   rmSync(sandbox, { recursive: true, force: true })
 }
