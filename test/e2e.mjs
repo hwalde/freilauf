@@ -5312,6 +5312,14 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
         contains(await (await fetchPath(`/agents/edit?repo=${repoId}`)).text(), 'name="notify_result"', '"Report the result" on the agent form')
       })
 
+      await check('"Thinking" is saved from the form, and junk is not', async () => {
+        await postForm('/settings/reports', { llm_triage_reasoning: 'low', llm_digest_reasoning: 'nonsense' }, { asBrowser: true })
+        equal(getSetting('llm_triage_reasoning'), 'low', 'a choice from the list is stored')
+        isFalse(getSetting('llm_digest_reasoning') === 'nonsense', 'a value outside it is not')
+        contains(await (await fetchPath('/settings/reports')).text(), 'name="llm_digest_reasoning"', 'the field is on the page')
+        setSetting('llm_triage_reasoning', ''); setSetting('llm_digest_reasoning', '')
+      })
+
       await check('the deputy mode cannot be switched on without a usable model source', async () => {
         // The HUB process knows no stub source and the suite has no OpenRouter key.
         const r = await postForm('/settings/reports', { notify_mode: 'smart' }, { asBrowser: true })
@@ -5455,7 +5463,11 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
         isTrue(row.preview === 1, 'marked as one — it does not close the period')
         equal(getSetting('digest_last_end') ?? '', '', 'the period is still open')
         const digestPrompt = asked.at(-1).prompt
-        isTrue(digestPrompt.indexOf('<waiting_for_you>') < digestPrompt.indexOf('<agents'), 'what waits comes first')
+        const waitsNow = db.prepare(`SELECT COUNT(*) AS n FROM runs WHERE archived_at IS NULL AND (status IN ('waiting_help','deferred')
+          OR (merge_status LIKE 'blocked_%' AND resolves_run_id IS NULL) OR merge_status IN ('in_review','changes_requested'))`).get().n
+        const wi = digestPrompt.indexOf('<waiting_for_you>')
+        if (waitsNow) isTrue(wi >= 0 && wi < digestPrompt.indexOf('<agents'), `something waits (${waitsNow}): the block is there, before the agents`)
+        else equal(wi, -1, 'nothing waits: no block for the model to say so')
         isFalse(digestPrompt.includes('All the details.'), 'the model never sees a full report')
         const page = await (await fetchPath(`/digests/${r.id}`)).text()
         isTrue(/href="https?:\/\/[^"]*\/runs\/[0-9a-f-]{36}"/.test(page), 'a ref the hub named is a link on the page')
@@ -5484,7 +5496,9 @@ echo "SCHWARM_DROSSEL result=OK gleichzeitig=$3"
           isTrue(row.body.split('\n').some(l => /^- (❓|⚠️|⏸|✅) /.test(l)), 'one line per fact')
           const page = await (await fetchPath(`/digests/${r.id}`)).text()
           isTrue(/href="https?:\/\/[^"]*\/runs\/[0-9a-f-]{36}"/.test(page), 'and the page shows them as links')
-          isFalse(page.includes('Vorschau · Vorschau') || page.includes('preview · preview'), 'the state is named once')
+          const list = await (await fetchPath('/digests')).text()
+          contains(list, `/digests/${r.id}`, 'the preview is listed')
+          isFalse(/preview\s*·\s*preview|Vorschau\s*·\s*Vorschau/i.test(list), 'and its state is named once on the list')
         } finally { setSetting('llm_digest_retry_attempts', '') }
       })
 

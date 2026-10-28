@@ -708,7 +708,7 @@
   "llm.kind_http_401": "authentication failed",
   "llm.kind_http_402": "insufficient credits",
   "llm.kind_http_403": "access denied",
-  "llm.kind_http_404": "model not found",
+  "llm.kind_http_404": "not found (the model, or an endpoint that can serve the request)",
   "llm.kind_http_429": "rate limit",
   "llm.kind_http_5xx": "provider server error",
   "llm.err_parse": "The model answered, but its text could not be read as JSON ({note}).",
@@ -1931,12 +1931,12 @@
   "deputy.back": "Back to the run",
   "settings.llm_reports_pointer": "The models of the deputy and of the daily digest are set under Settings → Reports.",
   "deputy.why_stale": "switched on again after it was off — old news",
-  "llm.err_cut_off": "The model used its whole token limit before it wrote an answer (a thinking model thinking too long). Switch its thinking off or down for this job, or choose a model without long thinking.",
+  "llm.err_cut_off": "The model used its whole token limit before it wrote an answer (a thinking model thinking too long). Where the job has a \"Thinking\" setting (Settings → Reports), turn it off or down; otherwise choose a model without long thinking.",
   "reports.reasoning": "Thinking",
   "reports.reasoning_off": "off (recommended)",
   "reports.reasoning_low": "a little",
   "reports.reasoning_model": "as the model likes",
-  "reports.reasoning_hint": "Thinking models (e.g. DeepSeek V4) can spend thousands of tokens and minutes thinking before they answer — or run out of tokens and answer nothing. The answers here are structured, so thinking is rarely needed. Not every model honours the switch.",
+  "reports.reasoning_hint": "Thinking models (e.g. DeepSeek V4) can spend thousands of tokens and minutes thinking before they answer — or run out of tokens and answer nothing. The answers here are structured, so thinking is rarely needed. Only OpenRouter sources act on this; a model that cannot switch thinking off is asked for \"a little\" instead, and a few models ignore it entirely.",
   "digest.fallback_intro": "The model did not answer, so the hub put this together itself — the facts, without the prose.",
   "digest.wait_question": "waits for your answer",
   "digest.wait_blocked": "merge blocked",
@@ -1945,5 +1945,8 @@
   "digest.missed_starts": "{n} due start(s) did not happen",
   "digest.routine_line": "{n} more agent(s) ran as usual.",
   "digest.nothing_happened": "Nothing happened in this period.",
-  "digest.runs_unassessed": "{n} run(s) started in this period; none of them has an assessment yet."
+  "digest.runs_unassessed": "{n} run(s) started in this period; none of them has an assessment yet.",
+  "llm.kind_cut_off": "answer cut off at the token limit",
+  "llm.recovery_failed": "(A last try on another serving provider failed as well: {error})",
+  "digest.still_open": "still open, day {n}"
 }

@@ -16,6 +16,9 @@ import {
 /** The chat-completions endpoint. Overridable so the e2e suite can stub it. */
 const CHAT_URL = () => env('OPENROUTER_BASE') ?? 'https://openrouter.ai/api/v1/chat/completions'
 
+/** Models whose endpoint refused to switch reasoning off — asked for `effort: 'low'` instead. */
+const REASONING_MANDATORY = new Set()
+
 /**
  * The credential, resolved the way the operator configured it.
  *
@@ -187,7 +190,11 @@ const plugin = {
       // nothing (measured: deepseek-v4-flash used 4.8k reasoning tokens for one
       // daily digest, a dated variant more than 8k). OpenRouter's unified
       // switch: `{enabled:false}` or an effort level.
-      if (req.reasoning === 'off') body.reasoning = { enabled: false }
+      // Many models cannot switch it off at all and answer HTTP 400 "Reasoning
+      // is mandatory" (measured: R1, GPT-5-mini, Gemini 3.5 Flash Lite,
+      // gpt-oss, Claude Sonnet 5.5) — they all accept `effort: 'low'`, which
+      // is then used, once found out, for that model from here on.
+      if (req.reasoning === 'off') body.reasoning = REASONING_MANDATORY.has(req.model) ? { effort: 'low' } : { enabled: false }
       else if (['low', 'medium', 'high'].includes(req.reasoning)) body.reasoning = { effort: req.reasoning }
       // Three shapes reach this one point — the settings pages, the run starts
       // and the flows all resolve through the SAME capability and cache:
@@ -221,12 +228,22 @@ const plugin = {
           if (r.ok) body.provider = { order: r.order, allow_fallbacks: false }
         } catch { /* free routing is the old behaviour and stays reachable */ }
       }
-      const j = await ctx.json(CHAT_URL(), {
+      const headers = {
         Authorization: `Bearer ${key}`,
         'content-type': 'application/json',
         'HTTP-Referer': 'https://github.com/hwalde/freilauf',
         'X-Title': `Freilauf ${req.purpose || 'request'}`,
-      }, { method: 'POST', body: JSON.stringify(body), timeoutMs: req.timeoutMs ?? 60_000 })
+      }
+      const send = () => ctx.json(CHAT_URL(), headers, { method: 'POST', body: JSON.stringify(body), timeoutMs: req.timeoutMs ?? 60_000 })
+      let j
+      try {
+        j = await send()
+      } catch (err) {
+        if (!(body.reasoning?.enabled === false && /HTTP 400/.test(err?.message ?? '') && /reasoning/i.test(err?.message ?? ''))) throw err
+        REASONING_MANDATORY.add(req.model)
+        body.reasoning = { effort: 'low' }
+        j = await send()
+      }
       const choice = j?.choices?.[0]
       const raw = choice?.message?.content
       const empty = raw === null || raw === undefined || raw === ''

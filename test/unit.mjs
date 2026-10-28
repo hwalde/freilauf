@@ -14331,6 +14331,119 @@ process.stdout.write(JSON.stringify(out))
     setSetting('llm_alert_on', '1')
   }
 
+  // ------------------------------------------------------------------
+  group('Notifications: thinking that cannot be switched off, and the digest\'s empty parts')
+  {
+    const db = (await import('../server/db.mjs')).default
+    const { setSetting } = await import('../server/db.mjs')
+    const http = await import('node:http')
+    const { getPlugin, registerPlugin, unregisterPlugin } = await import('../server/plugins/registry.mjs')
+    const { pluginCtx } = await import('../server/plugins/context.mjs')
+    const { llmJson } = await import('../server/llm/index.mjs')
+    const dg = await import('../server/digest.mjs')
+
+    await check('a model that cannot stop thinking is asked for "a little" — and remembered', async () => {
+      const bodies = []
+      const server = http.createServer((req, res) => {
+        let b = ''; req.on('data', c => { b += c })
+        req.on('end', () => {
+          const body = JSON.parse(b); bodies.push(body)
+          if (body.reasoning?.enabled === false) {
+            res.writeHead(400, { 'content-type': 'application/json' })
+              .end(JSON.stringify({ error: { message: 'Reasoning is mandatory for this endpoint and cannot be disabled.', code: 400 } }))
+          } else {
+            res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '{"a":"hi"}' } }] }))
+          }
+        })
+      })
+      await new Promise(r => server.listen(0, '127.0.0.1', r))
+      const before = process.env.FREILAUF_OPENROUTER_BASE
+      process.env.FREILAUF_OPENROUTER_BASE = `http://127.0.0.1:${server.address().port}`
+      try {
+        const or = getPlugin('openrouter')
+        const a = await or.llm.complete(pluginCtx('openrouter'), { model: 'unit/mandatory-thinker', prompt: 'q', reasoning: 'off' })
+        equal(a.text, '{"a":"hi"}', 'the answer arrives')
+        equal(bodies.map(b => JSON.stringify(b.reasoning)).join(' '), '{"enabled":false} {"effort":"low"}', 'off was refused, low was taken')
+        bodies.length = 0
+        await or.llm.complete(pluginCtx('openrouter'), { model: 'unit/mandatory-thinker', prompt: 'q', reasoning: 'off' })
+        equal(bodies.length, 1, 'the next call asks once')
+        equal(JSON.stringify(bodies[0].reasoning), '{"effort":"low"}', 'and asks for "low" straight away')
+      } finally {
+        if (before === undefined) delete process.env.FREILAUF_OPENROUTER_BASE; else process.env.FREILAUF_OPENROUTER_BASE = before
+        server.close()
+      }
+    })
+
+    await check('a failed recovery round is named, not hidden', async () => {
+      const or = getPlugin('openrouter')
+      const saved = { complete: or.llm.complete, resolve: or.routing.resolve }
+      or.llm.complete = async (ctx, req) => {
+        if (req.orRoutingRefresh) throw new Error('HTTP 402: Insufficient credits')
+        return { text: 'prose, not JSON' }
+      }
+      or.routing.resolve = async () => ({ ok: true, order: ['x'] })
+      setSetting('llm_alert_on', '0')
+      try {
+        const r = await llmJson({ purpose: 'digest', source: 'provider:openrouter', model: 'm', prompt: 'q',
+          schema: { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] } })
+        equal(r.stage, 'parse', 'still the answer problem')
+        contains(r.error, 'Insufficient credits', 'and what the last try ran into')
+      } finally { or.llm.complete = saved.complete; or.routing.resolve = saved.resolve; setSetting('llm_alert_on', '1') }
+    })
+
+    await check('a "nothing waits" line goes when nothing waits — and stays out of the way otherwise', () => {
+      const body = '- ❓ Nothing waits for you.\n- ⚠️ [[r1|Model update]] failed.\n\nThe rest ran as usual.'
+      equal(dg.stripEmptyWaiting(body, false), '- ⚠️ [[r1|Model update]] failed.\n\nThe rest ran as usual.', 'gone, the rest untouched')
+      equal(dg.stripEmptyWaiting(body, true), body, 'when something waits, nothing is touched')
+    })
+
+    await check('the prompt has a waiting block only when something waits, and then before the agents', () => {
+      const waitingNow = db.prepare(`SELECT id, archived_at FROM runs WHERE archived_at IS NULL AND (status IN ('waiting_help','deferred')
+        OR merge_status LIKE 'blocked_%' OR merge_status IN ('in_review','changes_requested'))`).all()
+      db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id IN (${waitingNow.map(() => '?').join(',') || "''"})`).run(...waitingNow.map(r => r.id))
+      try {
+        const empty = dg.buildDigestInput(Date.now() - 86_400_000, Date.now())
+        isFalse(empty.prompt.includes('<waiting_for_you>'), 'no block when nothing waits')
+        db.prepare(`INSERT INTO repos(name, path) VALUES('ask-repo', '/tmp/ask-repo')`).run()
+        const rid = db.prepare(`SELECT id FROM repos WHERE name='ask-repo'`).get().id
+        db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, title, help_text)
+          VALUES('askrun00-aaaa-bbbb-cccc-000000000000', ?, 'waiting_help', 'claude', 'p', 'keiner', 45, 'Asking run', 'Which branch?')`).run(rid)
+        const full = dg.buildDigestInput(Date.now() - 86_400_000, Date.now())
+        const i = full.prompt.indexOf('<waiting_for_you>')
+        isTrue(i >= 0 && i < full.prompt.indexOf('<agents'), 'the block is there, before the agents')
+        contains(dg.plainDigest(full).body, 'Which branch?', 'and a question keeps its words in the digest without the model')
+        db.prepare(`UPDATE runs SET status='done', archived_at=datetime('now') WHERE id='askrun00-aaaa-bbbb-cccc-000000000000'`).run()
+      } finally {
+        for (const r of waitingNow) db.prepare('UPDATE runs SET archived_at=? WHERE id=?').run(r.archived_at, r.id)
+      }
+    })
+
+    await check('an open problem with no run today stays in the digest without the model', () => {
+      db.prepare(`INSERT INTO repos(name, path) VALUES('open-repo', '/tmp/open-repo')`).run()
+      const rid = db.prepare(`SELECT id FROM repos WHERE name='open-repo'`).get().id
+      db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode) VALUES(?, 'still-broken', 'claude', 'p', 'keiner')`).run(rid)
+      const aid = db.prepare(`SELECT id FROM agents WHERE name='still-broken'`).get().id
+      db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, prompt, branch_mode, expected_minutes) VALUES('brokenrn-aaaa-bbbb-cccc-000000000000', ?, ?, 'failed', 'claude', 'p', 'keiner', 45)`).run(rid, aid)
+      db.prepare(`INSERT INTO report_notes(run_id, result, cause, summary, state, created_at) VALUES('brokenrn-aaaa-bbbb-cccc-000000000000', 'failed', 'credentials', 'Login expired.', 'done', datetime('now','-3 days'))`).run()
+      db.prepare(`INSERT INTO schedule_log(agent_id, slot, outcome) VALUES(?, ?, 'started')`).run(aid, new Date(Date.now() - 3_600_000).toISOString().slice(0, 16))
+      const input = dg.buildDigestInput(Date.now() - 86_400_000, Date.now())
+      const line = dg.plainDigest(input).body.split('\n').find(l => l.includes('Login expired.'))
+      isTrue(!!line, 'listed, with its last summary')
+      contains(line, 'day 4', 'and how long it has been open')
+    })
+
+    await check('routine is counted for the quiet agent itself, not by accident', () => {
+      const before = dg.buildDigestInput(Date.now() - 3_600_000, Date.now() + 60_000).facts.routine
+      db.prepare(`INSERT INTO repos(name, path) VALUES('routine2-repo', '/tmp/routine2-repo')`).run()
+      const rid = db.prepare(`SELECT id FROM repos WHERE name='routine2-repo'`).get().id
+      db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode) VALUES(?, 'quiet-two', 'claude', 'p', 'keiner')`).run(rid)
+      const aid = db.prepare(`SELECT id FROM agents WHERE name='quiet-two'`).get().id
+      db.prepare(`INSERT INTO runs(id, repo_id, agent_id, status, harness, prompt, branch_mode, expected_minutes) VALUES('quiettwo-aaaa-bbbb-cccc-000000000000', ?, ?, 'done', 'claude', 'p', 'keiner', 45)`).run(rid, aid)
+      db.prepare(`INSERT INTO report_notes(run_id, result, attention, summary, state) VALUES('quiettwo-aaaa-bbbb-cccc-000000000000', 'no_change', 'none', 'Nothing to do.', 'done')`).run()
+      equal(dg.buildDigestInput(Date.now() - 3_600_000, Date.now() + 60_000).facts.routine, before + 1, 'exactly one more')
+    })
+  }
+
 } finally {
   rmSync(sandbox, { recursive: true, force: true })
 }

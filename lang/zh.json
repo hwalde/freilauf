@@ -708,7 +708,7 @@
   "llm.kind_http_401": "认证失败",
   "llm.kind_http_402": "余额不足",
   "llm.kind_http_403": "访问被拒绝",
-  "llm.kind_http_404": "未找到模型",
+  "llm.kind_http_404": "未找到（模型，或能处理该请求的端点）",
   "llm.kind_http_429": "已达速率限制",
   "llm.kind_http_5xx": "服务商服务器错误",
   "llm.err_parse": "模型已应答，但其文本无法解析为 JSON（{note}）。",
@@ -1931,12 +1931,12 @@
   "deputy.back": "返回运行",
   "settings.llm_reports_pointer": "助理和每日摘要使用的模型在 设置 → 报告 中设置。",
   "deputy.why_stale": "重新开启前遗留的旧消息",
-  "llm.err_cut_off": "模型在给出答案之前就用完了全部 token 上限（思考型模型思考过久）。请为此任务关闭或降低思考，或选择一个不会长时间思考的模型。",
+  "llm.err_cut_off": "模型在给出答案之前就用完了全部 token 上限（思考型模型思考过久）。如果该任务有“思考”设置（设置 → 报告），请关闭或调低；否则请选择一个不会长时间思考的模型。",
   "reports.reasoning": "思考",
   "reports.reasoning_off": "关闭（推荐）",
   "reports.reasoning_low": "少量",
   "reports.reasoning_model": "由模型决定",
-  "reports.reasoning_hint": "思考型模型（例如 DeepSeek V4）在回答前常常会花费数千个 token 和好几分钟——或者 token 上限不够，干脆没有答案。这里的答案是结构化的，很少需要思考。并非每个模型都遵守这个开关。",
+  "reports.reasoning_hint": "思考型模型（例如 DeepSeek V4）在回答前常常会花费数千个 token 和好几分钟——或者 token 上限不够，干脆没有答案。这里的答案是结构化的，很少需要思考。只有 OpenRouter 来源会遵循此开关；无法关闭思考的模型会改为请求“少量”，少数模型会完全忽略它。",
   "digest.fallback_intro": "模型没有回答，因此由 Hub 自行整理了这份报告——只有事实，没有叙述。",
   "digest.wait_question": "等待你的回答",
   "digest.wait_blocked": "合并被阻止",
@@ -1945,5 +1945,8 @@
   "digest.missed_starts": "{n} 次到期启动未执行",
   "digest.routine_line": "另有 {n} 个代理照常运行。",
   "digest.nothing_happened": "这段时间内什么也没有发生。",
-  "digest.runs_unassessed": "这段时间内启动了 {n} 次运行；其中还没有一次经过评估。"
+  "digest.runs_unassessed": "这段时间内启动了 {n} 次运行；其中还没有一次经过评估。",
+  "llm.kind_cut_off": "答案在 token 上限处被截断",
+  "llm.recovery_failed": "（在另一个服务提供商处的最后一次尝试也失败了：{error}）",
+  "digest.still_open": "仍未解决，第 {n} 天"
 }

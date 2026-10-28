@@ -242,7 +242,7 @@ because the plugin asks `ctx.secret()` instead of reading a fixed name.
 
 | Member | What it does |
 |---|---|
-| `json(url, headers = {}, init = {})` | `fetch` with `AbortSignal.timeout` (8 s default, `init.timeoutMs` overrides — an LLM completion needs more than a catalog fetch). A non-2xx answer throws `HTTP <status>`, the one error shape every caller in the hub matches on. The signal is set **after** the init spread, so an init object cannot disarm the timeout |
+| `json(url, headers = {}, init = {})` | `fetch` with `AbortSignal.timeout` (8 s default, `init.timeoutMs` overrides — an LLM completion needs more than a catalog fetch). A non-2xx answer throws `HTTP <status>`, the one error shape every caller in the hub matches on, followed by `: <message>` when the vendor's body names one (`error.message`, `message`) — the hub's LLM alert shows that tail, so an adapter that throws its own errors should keep the same shape The signal is set **after** the init spread, so an init object cannot disarm the timeout |
 | `registry()` | the cached models.dev snapshot (6 h; parallel askers share one request; a failed refresh keeps serving the previous snapshot) |
 | `provider(id)` | another **provider's** descriptor, or `null` — resolved through the registry at **call** time |
 | `env` | `process.env`, for legacy reads — prefer `secret()` |

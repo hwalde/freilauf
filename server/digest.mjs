@@ -304,6 +304,13 @@ export function buildDigestInput(startMs, endMs) {
     const quietRuns = mine.length > 0 && mine.every(n => ['success', 'no_change'].includes(n.result) && (n.attention ?? 'none') === 'none')
     if ((like || quietRuns) && !problem && !bad.length && !missed.length) { routine++; continue }
     for (const n of [...bad].reverse().slice(0, 4)) facts.problems.push({ ref: ref({ id: n.run_id }), name: agentPurpose(id) ?? agent.name, summary: n.summary ?? '' })
+    // An open problem from earlier days, with no run of it today: still a problem.
+    if (problem && !bad.length) {
+      const last = db.prepare(`SELECT n.run_id, n.summary FROM report_notes n JOIN runs r ON r.id = n.run_id
+        WHERE r.agent_id=? AND n.result IN ('failed','partial','unclear') ORDER BY n.id DESC LIMIT 1`).get(id)
+      facts.problems.push({ ref: last ? ref({ id: last.run_id }) : aref(agent), name: agentPurpose(id) ?? agent.name,
+        summary: `${t('digest.still_open', { n: problem.days })}${last?.summary ? ` — ${last.summary}` : ''}` })
+    }
     if (missed.length) facts.missed.push({ ref: aref(agent), name: agentPurpose(id) ?? agent.name, n: missed.length })
     const okNote = [...mine].reverse().find(n => n.result === 'success' && n.summary)
     if (okNote && !bad.length) facts.achieved.push({ ref: ref({ id: okNote.run_id }), name: agentPurpose(id) ?? agent.name, summary: okNote.summary })
@@ -458,7 +465,10 @@ export function plainDigest(input) {
   const link = (x) => `[[${x.ref}|${String(x.name ?? '?').replace(/[\]|\n]/g, ' ')}]]`
   const cut = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 160)
   const lines = []
-  for (const w of f.waiting.slice(0, 8)) lines.push(`- ❓ ${link(w)}: ${t(`digest.wait_${w.kind}`)}${w.detail && w.kind !== 'question' ? ` (${w.detail})` : ''}`)
+  for (const w of f.waiting.slice(0, 8)) {
+    const detail = w.kind === 'question' ? (w.detail ? `: „${cut(w.detail)}“` : '') : (w.detail ? ` (${w.detail})` : '')
+    lines.push(`- ❓ ${link(w)}: ${t(`digest.wait_${w.kind}`)}${detail}`)
+  }
   for (const p of f.problems.slice(0, 6)) lines.push(`- ⚠️ ${link(p)}${p.summary ? `: ${cut(p.summary)}` : ''}`)
   for (const m of f.missed.slice(0, 4)) lines.push(`- ⏸ ${link(m)}: ${t('digest.missed_starts', { n: m.n })}`)
   for (const a of f.achieved.slice(0, 5)) lines.push(`- ✅ ${link(a)}${a.summary ? `: ${cut(a.summary)}` : ''}`)
@@ -471,6 +481,15 @@ export function plainDigest(input) {
     headline: t('digest.fallback_headline'),
     body: [t('digest.fallback_intro'), lines.join('\n'), tail.join(' ')].filter(Boolean).join('\n\n'),
   }
+}
+
+/**
+ * A model asked about an empty list likes to say it is empty ("❓ nothing
+ * waits for you"). When nothing waits, a ❓ line says nothing and goes.
+ */
+export function stripEmptyWaiting(body, somethingWaits) {
+  if (somethingWaits) return body
+  return String(body ?? '').split('\n').filter(l => !/^\s*(-\s*)?❓/.test(l)).join('\n').replace(/^\s+/, '')
 }
 
 /** The rich message of a digest. */
@@ -523,9 +542,7 @@ export async function generateDigest({ startMs, endMs, preview = false, send = t
     if (r.ok) {
       headline = String(r.data.headline ?? '').trim().slice(0, 80)
       body = String(r.data.body ?? '').trim().slice(0, 4000)
-      // A model asked about an empty list likes to say it is empty ("❓ nothing
-      // waits for you"). When nothing waits, a ❓ line says nothing.
-      if (!input.facts.waiting.length) body = body.split('\n').filter(l => !/^\s*(-\s*)?❓/.test(l)).join('\n').replace(/^\s+/, '')
+      body = stripEmptyWaiting(body, input.facts.waiting.length > 0)
       usage = r.usage; source = r.source; model = r.model
     } else {
       ({ headline, body } = plainDigest(input)); state = 'fallback'; error = r.error

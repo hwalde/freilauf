@@ -68,9 +68,10 @@ a day on which nothing was released.
   A model like DeepSeek V4 could spend the whole token limit thinking and
   answer nothing; the hub then tried again on another serving provider, got a
   404 there and reported "model not found" after ten rounds of retries. The two
-  jobs now switch thinking off by default (Settings → Reports → *Thinking*), a
-  cut-off answer is reported as exactly that, at once, and an alert shows what
-  the vendor actually said.
+  jobs now switch thinking off by default (Settings → Reports → *Thinking*);
+  a model that cannot switch it off (most do not) is asked to think only a
+  little instead. A cut-off answer is reported as exactly that, at once, and
+  an alert shows what the vendor actually said.
 - **A daily digest the model could not write is no longer empty.** The hub now
   puts it together from the facts itself — what waits for you, what failed,
   missed starts, what is done, each with its link. Archived runs no longer

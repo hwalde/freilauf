@@ -142,6 +142,19 @@ change are in `AGENTS.md`.
 - `-q` on a TTY seeds an interactive session and stays; `-Q`/`--oneshot` are
   one-shot. No per-run provider routing.
 
+## OpenRouter (chat completions)
+
+- A thinking model may spend all of `max_tokens` thinking and answer
+  `content: null` with `finish_reason: "length"` (deepseek-v4-flash: ~4.8k
+  reasoning tokens for one daily digest).
+- `reasoning: {enabled: false}` is refused with HTTP 400 "Reasoning is
+  mandatory" by many models (R1, GPT-5-mini, Gemini 3.5 Flash Lite, gpt-oss,
+  Claude Sonnet 5.5); all of them accept `{effort: "low"}`.
+  `deepseek-v4-flash-0731` accepts both and thinks to the limit anyway.
+- A recovery call pinned to a re-selected provider (`allow_fallbacks: false`)
+  can answer 404 "no endpoints" for a model that is in the catalog — not a
+  sign the model id is wrong.
+
 ## Browser and Node
 
 - `statSync().mtimeMs` is a float and `Date.now()` an integer; a file written

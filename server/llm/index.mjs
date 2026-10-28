@@ -295,7 +295,12 @@ async function askOne(entry, req) {
       // failure to report is still the answer problem it was meant to repair.
       // Reporting the recovery's transport error instead is how an unusable
       // answer turned into "model not found" and ten rounds of backoff.
-      if (autoRound) break
+      if (autoRound) {
+        // …but what the recovery hit is said too: a 401 or a 402 there is
+        // news of its own.
+        error = `${error} ${t('llm.recovery_failed', { error: transportText(classifyTransportError(err)) })}`
+        break
+      }
       // Transport failures are NOT reprompted: a 401, a timeout or a missing
       // binary does not become right by asking the same thing again. They are
       // classified and returned, and the chain walk above decides — next
