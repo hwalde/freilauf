@@ -82,10 +82,16 @@ export function markDigestSince(wasOn) {
 
 const NOT_OK = ['failed', 'partial', 'unclear']
 
+/**
+ * The assessed notes of a period. A note still waiting for its result (the run
+ * is in the gate, its session still busy) is not "no result" — it belongs to
+ * the digest after it was assessed.
+ */
 function notesIn(startDb, endDb) {
   return db.prepare(`SELECT n.*, r.agent_id, r.title, r.repo_id, r.status AS run_status, r.started_at, r.ended_at, r.cost_usd
     FROM report_notes n JOIN runs r ON r.id = n.run_id
     WHERE n.kind IN ('report','event') AND n.created_at >= ? AND n.created_at < ? AND r.resolves_run_id IS NULL
+      AND n.state IN ('done','fallback')
     ORDER BY n.id`).all(startDb, endDb)
 }
 
