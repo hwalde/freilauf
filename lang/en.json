@@ -1948,5 +1948,6 @@
   "digest.runs_unassessed": "{n} run(s) started in this period; none of them has an assessment yet.",
   "llm.kind_cut_off": "answer cut off at the token limit",
   "llm.recovery_failed": "(A last try on another serving provider failed as well: {error})",
-  "digest.still_open": "still open, day {n}"
+  "digest.still_open": "still open, day {n}",
+  "digest.quoted": "\"{text}\""
 }

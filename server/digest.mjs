@@ -466,7 +466,7 @@ export function plainDigest(input) {
   const cut = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 160)
   const lines = []
   for (const w of f.waiting.slice(0, 8)) {
-    const detail = w.kind === 'question' ? (w.detail ? `: „${cut(w.detail)}“` : '') : (w.detail ? ` (${w.detail})` : '')
+    const detail = w.kind === 'question' ? (w.detail ? `: ${t('digest.quoted', { text: cut(w.detail) })}` : '') : (w.detail ? ` (${w.detail})` : '')
     lines.push(`- ❓ ${link(w)}: ${t(`digest.wait_${w.kind}`)}${detail}`)
   }
   for (const p of f.problems.slice(0, 6)) lines.push(`- ⚠️ ${link(p)}${p.summary ? `: ${cut(p.summary)}` : ''}`)
