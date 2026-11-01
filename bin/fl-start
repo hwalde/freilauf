@@ -951,19 +951,39 @@ trust_workdir() {
     cur="$(jq -r --arg d "$dir" '.projects[$d].hasTrustDialogAccepted // false' "$cfg" 2>/dev/null || echo false)"
     [[ "$cur" == "true" ]] && return 0
 
-    tmp="$(mktemp "${cfg}.cc.XXXXXX")" || return 0
-    if jq --arg d "$dir" \
-         '.projects = ((.projects // {}) | .[$d] = ((.[$d] // {}) + {hasTrustDialogAccepted: true}))' \
-         "$cfg" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-        chmod --reference="$cfg" "$tmp" 2>/dev/null || chmod 600 "$tmp"
-        cp -p "$cfg" "$cfg.bak-fl-start" 2>/dev/null || true
-        mv "$tmp" "$cfg"
-        echo "Trust dialog pre-confirmed for $dir (~/.claude.json)."
-    else
-        rm -f "$tmp"
+    # Read, change, write: without the lock, runs released in the same second
+    # overwrite each other's flag, and a run whose flag is lost dies at the dialog
+    # with nobody to answer it. A claude that is starting rewrites this file too
+    # and takes no lock of ours, hence the check afterwards and the retry. The lock
+    # is a safeguard and must never stop a start: a lock file that cannot be opened
+    # or a lock that times out only means carrying on without it, and the `|| true`
+    # keeps any other failure in here away from the script's `set -e`.
+    (
+        { true >>"$cfg.fl-lock"; } 2>/dev/null && exec 9>>"$cfg.fl-lock" \
+            && { command -v flock >/dev/null 2>&1 && flock -w 30 9; } || true
+        local attempt
+        for attempt in 1 2 3 4; do
+            cur="$(jq -r --arg d "$dir" '.projects[$d].hasTrustDialogAccepted // false' "$cfg" 2>/dev/null || echo false)"
+            if [[ "$cur" == "true" ]]; then
+                echo "Trust dialog pre-confirmed for $dir (~/.claude.json)."
+                exit 0
+            fi
+            [[ "$attempt" == 4 ]] && break
+            tmp="$(mktemp "${cfg}.cc.XXXXXX" 2>/dev/null)" || break
+            if jq --arg d "$dir" \
+                 '.projects = ((.projects // {}) | .[$d] = ((.[$d] // {}) + {hasTrustDialogAccepted: true}))' \
+                 "$cfg" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+                chmod --reference="$cfg" "$tmp" 2>/dev/null || chmod 600 "$tmp" 2>/dev/null || true
+                cp -p "$cfg" "$cfg.bak-fl-start" 2>/dev/null || true
+                mv "$tmp" "$cfg" 2>/dev/null || rm -f "$tmp"
+            else
+                rm -f "$tmp"
+            fi
+            sleep 0.5
+        done
         err "Warning: could not set the trust flag. The session may stay stuck on the"
         err "'Do you trust this folder?' question — run 'fl-attach' once and press Enter."
-    fi
+    ) || true
 }
 
 # Auth/setup preflight checks (non-blocking, warning only).

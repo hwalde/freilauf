@@ -20,6 +20,9 @@ a day on which nothing was released.
 
 ### Fixed
 
+- **Runs started in the same second no longer die at the trust dialog.** When the
+  budget gate released several waiting runs at once, they overwrote each other's
+  trust entry in `~/.claude.json`, and some of them ended after seconds.
 - **The 5-hour bar follows what the account reports.** Some plans have no 5-hour
   limit, yet those accounts saw a 5-hour bar with an old number from the usage
   file, and that number could defer runs. When the account answers without a

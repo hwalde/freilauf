@@ -8,10 +8,10 @@
 //
 // Usage:  node test/unit.mjs
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, chmodSync, utimesSync, symlinkSync, realpathSync, existsSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { group, check, equal, isTrue, isFalse, contains, summary, counter } from './mini.mjs'
+import { group, check, equal, isTrue, isFalse, contains, summary, counter, skipped } from './mini.mjs'
 
 const start = Date.now()
 
@@ -526,6 +526,71 @@ try {
   await check('shortId returns the first UUID block', () => {
     equal(shortId('1d005159-78bd-4cc1-a889-07617871af2e'), '1d005159', 'UUID')
   })
+
+  // ------------------------------------------------------------------
+  group('Trust flag')
+
+  // Runs released in the same second used to overwrite each other's flag in
+  // ~/.claude.json. A run whose flag is lost dies at the trust dialog.
+  const hasTool = (name) => spawnSync('bash', ['-c', `command -v ${name}`], { stdio: 'ignore' }).status === 0
+  const trustScript = (body) => {
+    const source = readFileSync(new URL('../bin/fl-start', import.meta.url), 'utf8')
+    const fn = source.slice(source.indexOf('trust_workdir() {'), source.indexOf('# Auth/setup preflight checks'))
+    return `set -euo pipefail\nHARNESS=claude; SANDBOX=; NO_TRUST=; err() { echo "$*" >&2; }\n${fn}\n${body}\n`
+  }
+  const trustHome = () => {
+    const home = mkdtempSync(join(sandbox, 'trust-'))
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ keep: 1, projects: { old: { x: 1 } } }))
+    return home
+  }
+  const runTrust = (home, body) => spawnSync('bash', ['-c', trustScript(body)], {
+    env: { ...process.env, HOME: home }, encoding: 'utf8',
+  })
+
+  if (hasTool('flock') && hasTool('jq')) {
+    await check('runs starting in the same second all keep their trust flag', () => {
+      const home = trustHome()
+      const r = runTrust(home, 'for i in $(seq 1 6); do trust_workdir "/work/$i" >/dev/null & done; wait')
+      equal(r.status, 0, 'the script ran')
+      const j = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'))
+      for (let i = 1; i <= 6; i++) equal(j.projects[`/work/${i}`]?.hasTrustDialogAccepted, true, `flag of run ${i}`)
+      equal(j.keep, 1, 'the rest of the file stays')
+      equal(j.projects.old.x, 1, 'and so do older projects')
+    })
+  } else {
+    skipped('the trust flag under concurrency', 'needs flock and jq')
+  }
+
+  if (hasTool('jq')) {
+    await check('a lock file that cannot be opened never stops a start', () => {
+      const home = trustHome()
+      // A directory at the lock's path fails the same way for every user, root
+      // included, unlike a file mode.
+      mkdirSync(join(home, '.claude.json.fl-lock'))
+      const r = runTrust(home, '[[ -z "$NO_TRUST" ]] && trust_workdir "/work/a"\necho REACHED_THE_END')
+      equal(r.status, 0, 'fl-start runs under set -e and must survive this')
+      contains(r.stdout, 'REACHED_THE_END', 'the script carried on')
+      const j = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'))
+      equal(j.projects['/work/a']?.hasTrustDialogAccepted, true, 'and the flag is set all the same')
+    })
+
+    await check('a flag that cannot be written warns and never stops a start', () => {
+      const home = trustHome()
+      const r = runTrust(home, 'mv() { return 1; }\n[[ -z "$NO_TRUST" ]] && trust_workdir "/work/a"\necho REACHED_THE_END')
+      equal(r.status, 0, 'fl-start runs under set -e and must survive this')
+      contains(r.stdout, 'REACHED_THE_END', 'the script carried on')
+      contains(r.stderr, 'could not set the trust flag', 'and says what is wrong')
+    })
+
+    await check('no failure inside the flag step stops a start', () => {
+      const home = trustHome()
+      const r = runTrust(home, 'sleep() { return 1; }\n[[ -z "$NO_TRUST" ]] && trust_workdir "/work/a"\necho REACHED_THE_END')
+      equal(r.status, 0, 'fl-start runs under set -e and must survive this')
+      contains(r.stdout, 'REACHED_THE_END', 'the script carried on')
+    })
+  } else {
+    skipped('the trust flag step', 'needs jq')
+  }
 
   // ------------------------------------------------------------------
   group('Quota gate')
