@@ -249,7 +249,7 @@ export function newSandbox({ prefix = 'freilauf-test-', keep = false } = {}) {
     // Both weeks, the way a real account reports them: the general one binds
     // every run, the per-model one only a run on that model (server/quota.mjs).
     writeFileSync(join(SB, 'quota.json'), JSON.stringify({
-      five_hour: { used_percentage: 1, resets_at: 1800000000 },
+      five_hour: { used_percentage: 1, resets_at: 4000000000 },
       seven_day: { used_percentage: 0 }, seven_day_fable: { used_percentage: 0 },
     }))
 

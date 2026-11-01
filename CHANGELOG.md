@@ -16,6 +16,22 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-11-01
+
+### Fixed
+
+- **The 5-hour bar follows what the account reports.** Some plans have no 5-hour
+  limit, yet those accounts saw a 5-hour bar with an old number from the usage
+  file, and that number could defer runs. When the account answers without a
+  5-hour window, the bar and its budget gate are now gone; plans that have the
+  limit keep both.
+- **A usage window that has already reset no longer counts.** Once the login
+  token had expired, an old reading from the usage file could keep deferring runs
+  although the quota had refilled. Such a window now disappears from the panel and
+  from the budget gate at its reset time.
+- **No more reset times from 1970.** A window whose reset time is empty now shows
+  none.
+
 ## 2026-10-28
 
 ### Added

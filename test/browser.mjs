@@ -411,7 +411,7 @@ try {
     // new value.
     const quotaPfad = join(sk.SB, 'quota.json')
     writeFileSync(quotaPfad, JSON.stringify({
-      five_hour: { used_percentage: 42, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
+      five_hour: { used_percentage: 42, resets_at: 4000000000 }, seven_day_fable: { used_percentage: 0 },
     }))
     try {
       await wartePage(p, () => {
@@ -425,7 +425,7 @@ try {
       equal(await liest5h(), '42 %', 'the updated percentage is on screen')
     } finally {
       writeFileSync(quotaPfad, JSON.stringify({
-        five_hour: { used_percentage: 1, resets_at: 1800000000 }, seven_day_fable: { used_percentage: 0 },
+        five_hour: { used_percentage: 1, resets_at: 4000000000 }, seven_day_fable: { used_percentage: 0 },
       }))
     }
     sauber(p)

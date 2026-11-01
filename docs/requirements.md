@@ -235,8 +235,12 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   never write `quota.json`, never refresh the OAuth token, fail soft, keep the
   gate read synchronous with an async refresh that backs off on failure and
   honours `Retry-After`. The last live answer is remembered per window; a
-  window past its `resets_at` is forgotten; live wins outright, otherwise the
-  newest reading, and everything not live is marked `stale` with its age. A
+  window past its `resets_at` is disregarded, in the memory and in `quota.json`
+  alike. An answer without a session window means no 5-hour limit: no bar, no
+  gate, no fallback to older readings (decided on the answer, never by plan
+  name). No answer at all keeps the fallback, where a file window without a
+  `resets_at` ages out only by being rewritten. Otherwise live wins outright,
+  then the newest reading, and everything not live is marked `stale` with its age. A
   `null` window is not a reading, and an answer with no window is not an
   answer.
 - The general 7-day window binds every claude run, a per-model window only a

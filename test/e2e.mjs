@@ -1187,7 +1187,7 @@ try {
 
   const quotaDatei = join(SB, 'quota.json')
   const quotaSchreiben = (fable, general = 10) => writeFileSync(quotaDatei, JSON.stringify({
-    five_hour: { used_percentage: 1, resets_at: 1800000000 },
+    five_hour: { used_percentage: 1, resets_at: 4000000000 },
     seven_day: { used_percentage: general },
     seven_day_fable: { used_percentage: fable },
   }))
@@ -1301,7 +1301,7 @@ try {
     await sessionMerken(fremd.runId)
 
     writeFileSync(quotaDatei, JSON.stringify({
-      five_hour: { used_percentage: 100, resets_at: 1800000000 },
+      five_hour: { used_percentage: 100, resets_at: 4000000000 },
       seven_day: { used_percentage: 0 },
       seven_day_fable: { used_percentage: 0 },
     }))
@@ -1334,7 +1334,7 @@ try {
     isFalse(rowAfter.includes('quota exhausted'), 'so the row stops saying it')
     // A reading that says NOTHING must leave the statement standing — absence
     // of evidence is not evidence of room (`quotaKnown()`, quota.mjs).
-    writeFileSync(quotaDatei, JSON.stringify({ five_hour: { used_percentage: 100, resets_at: 1800000000 } }))
+    writeFileSync(quotaDatei, JSON.stringify({ five_hour: { used_percentage: 100, resets_at: 4000000000 } }))
     await watcherTick()
     isTrue(ereignisse(c.runId).includes('anomaly:quota_full'), 'a full window flags it again')
     writeFileSync(quotaDatei, JSON.stringify({}))
@@ -2474,7 +2474,7 @@ try {
     await check('a lost follow-up behind a closed budget gate waits, and comes back once it opens', async () => {
       const quota = join(SB, 'quota.json')
       const write = (pct) => writeFileSync(quota, JSON.stringify({
-        five_hour: { used_percentage: pct, resets_at: 1800000000 },
+        five_hour: { used_percentage: pct, resets_at: 4000000000 },
         seven_day: { used_percentage: pct }, seven_day_fable: { used_percentage: pct },
       }))
       try {

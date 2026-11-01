@@ -63,7 +63,7 @@ import { env } from './env.mjs'
 const QUOTA_PATH = env('QUOTA_JSON') ?? `${homedir()}/.claude/quota.json`
 
 /** What the file knows — the fallback half, unchanged in meaning. */
-function quotaFile() {
+function quotaFile(now = Date.now()) {
   try {
     const q = JSON.parse(readFileSync(QUOTA_PATH, 'utf8'))
     // When the file was last written. For five_hour and seven_day that IS a
@@ -83,15 +83,37 @@ function quotaFile() {
     // Every window brings its own reset time — or none: claude writes resets_at
     // only where it knows one, and the panel then shows nothing rather than the
     // reset time of a different window.
-    const isoTime = (v) => (Number.isFinite(Number(v)) ? new Date(Number(v) * 1000).toISOString() : null)
-    const fable = round1(num(q?.seven_day_fable?.used_percentage))
+    // Epoch seconds is what claude writes; the per-model week comes from another
+    // project's script, so an ISO string is read too. Anything else is no reset
+    // time at all: `Number(null)` and `Number('')` are 0, which must not read as 1970.
+    const resetMs = (v) => {
+      if (typeof v !== 'number' && typeof v !== 'string') return null
+      if (String(v).trim() === '') return null
+      const ms = Number.isFinite(Number(v)) ? Number(v) * 1000 : Date.parse(v)
+      return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? ms : null
+    }
+    const isoTime = (v) => {
+      const ms = resetMs(v)
+      return ms === null ? null : new Date(ms).toISOString()
+    }
+    // A window past its own reset time says nothing about the current period, the
+    // same rule the remembered windows follow. Dropped here, it is a null window:
+    // no bar in the panel, nothing for the gate to block on.
+    const usable = (w) => {
+      const ms = resetMs(w?.resets_at)
+      return ms !== null && ms <= now ? null : w
+    }
+    const fiveHour = usable(q?.five_hour)
+    const sevenDay = usable(q?.seven_day)
+    const sevenDayFable = usable(q?.seven_day_fable)
+    const fable = round1(num(sevenDayFable?.used_percentage))
     return {
-      five: round1(num(q?.five_hour?.used_percentage)),
+      five: round1(num(fiveHour?.used_percentage)),
       five_at: writtenAt,
-      resets_at: isoTime(q?.five_hour?.resets_at),
-      seven_general: round1(num(q?.seven_day?.used_percentage)),
+      resets_at: isoTime(fiveHour?.resets_at),
+      seven_general: round1(num(sevenDay?.used_percentage)),
       seven_at: writtenAt,
-      seven_resets_at: isoTime(q?.seven_day?.resets_at),
+      seven_resets_at: isoTime(sevenDay?.resets_at),
       // The file has exactly one slot for a per-model week and calls it fable.
       // The live source has a list; this is that list with at most one entry in
       // it, so both sides hand the same shape to everything downstream.
@@ -105,9 +127,9 @@ function quotaFile() {
       // have — which is the jump this whole merge exists to stop.
       weekly_scoped: fable === null ? []
         : [{
-          label: 'Fable', pct: fable, resets_at: isoTime(q?.seven_day_fable?.resets_at),
-          at: Number.isFinite(Number(q?.seven_day_fable?.fetched_at))
-            ? Number(q.seven_day_fable.fetched_at) * 1000 : 0,
+          label: 'Fable', pct: fable, resets_at: isoTime(sevenDayFable?.resets_at),
+          at: Number.isFinite(Number(sevenDayFable?.fetched_at))
+            ? Number(sevenDayFable.fetched_at) * 1000 : 0,
         }],
     }
   } catch {
@@ -197,14 +219,21 @@ function mergeGeneral(livePct, liveResets, remembered, filePct, fileResets, file
  * aggregator.
  */
 export function claudeQuota(now = Date.now()) {
-  const file = quotaFile()
+  const file = quotaFile(now)
   const live = claudeLimits()
   const remembered = rememberedGeneral(now)
   const scoped = mergeScoped(live?.weekly_scoped, rememberedScoped(now), file.weekly_scoped, now)
   // 'fable' keeps its own two fields because the gate, the cost estimate and the
   // e2e suite all name it; it is simply the scoped window that calls itself that.
   const fable = scoped.find(w => /fable/i.test(w.label)) ?? null
-  const fiveW = mergeGeneral(live?.five, live?.resets_at, remembered.five,
+  // The account decides which windows a plan has. When it answers without a
+  // session window there is no 5-hour limit, whatever an older reading says: its
+  // writers do not clear a window the account stopped reporting, so the last
+  // five_hour block stays in the file while the mtime keeps moving. Only NO answer
+  // (expired token, 429, a cache past its TTL) falls back to the older readings. Decided on the answer
+  // and never on the plan's name, because the same plan can come with or without.
+  const noFiveHourLimit = !!live && (live.five === null || live.five === undefined)
+  const fiveW = noFiveHourLimit ? null : mergeGeneral(live?.five, live?.resets_at, remembered.five,
     file.five, file.resets_at, file.five_at, now)
   const sevenW = mergeGeneral(live?.seven_general, live?.seven_resets_at, remembered.seven_general,
     file.seven_general, file.seven_resets_at, file.seven_at, now)

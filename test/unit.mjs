@@ -541,7 +541,7 @@ try {
 
   await check('reads percentages and reset time', async () => {
     const { claudeQuota } = await quotaMit(JSON.stringify({
-      five_hour: { used_percentage: 91, resets_at: 1800000000 }, seven_day: { used_percentage: 10 },
+      five_hour: { used_percentage: 91, resets_at: 4000000000 }, seven_day: { used_percentage: 10 },
     }), 1)
     const q = claudeQuota()
     equal(q.five, 91, '5-hour value')
@@ -780,7 +780,7 @@ try {
     // settings must stand before that import happens.
     const quotaPfad = join(sandbox, 'quota-budgetgate.json')
     writeFileSync(quotaPfad, JSON.stringify({
-      five_hour: { used_percentage: 97, resets_at: 1800000000 },
+      five_hour: { used_percentage: 97, resets_at: 4000000000 },
       seven_day: { used_percentage: 98 },
     }))
     process.env.FREILAUF_QUOTA_JSON = quotaPfad
@@ -1006,7 +1006,7 @@ try {
 
   await check('the live answer wins over the file, per field', async () => {
     const { claudeQuota } = await quotaMit(JSON.stringify({
-      five_hour: { used_percentage: 3, resets_at: 1800000000 },
+      five_hour: { used_percentage: 3, resets_at: 4000000000 },
       seven_day: { used_percentage: 77 },
       seven_day_fable: { used_percentage: 80 },
     }), 9)
@@ -1020,18 +1020,44 @@ try {
     cu._claudeLimitsReset()
   })
 
-  await check('what the account does not report, the file still supplies', async () => {
-    const { claudeQuota } = await quotaMit(JSON.stringify({
-      five_hour: { used_percentage: 42, resets_at: 1800000000 },
-      seven_day: { used_percentage: 11 },
-    }), 10)
-    // A live answer that knows only the weekly windows — the merge is per field,
-    // so the 5-hour window a status line wrote minutes ago is not thrown away.
-    cu._claudeLimitsSet({ five: null, resets_at: null, seven_general: 60, seven_resets_at: null, weekly_scoped: [] })
-    const q = claudeQuota()
-    equal(q.five, 42, '5-hour window comes out of the file')
-    equal(q.seven_general, 60, 'the week comes from the account')
+  await check('an answer without a session window means no 5-hour limit, whatever the file holds', async () => {
+    for (const [nr, fiveHour] of [
+      [10, { used_percentage: 96, resets_at: 4000000000 }],
+      [44, { used_percentage: 96 }],
+      [45, { used_percentage: 96, resets_at: null }],
+    ]) {
+      const { claudeQuota, claudeGateBlocked } = await quotaMit(JSON.stringify({
+        five_hour: fiveHour, seven_day: { used_percentage: 11 },
+      }), nr)
+      cu._claudeLimitsSet({ five: null, resets_at: null, seven_general: 60, seven_resets_at: null, weekly_scoped: [] })
+      const q = claudeQuota()
+      equal(q.five, null, 'no 5-hour reading')
+      equal(q.resets_at, null, 'no reset time')
+      equal(q.five_at, null, 'no as-of date')
+      equal(q.seven_general, 60, 'the week comes from the account')
+      isFalse(claudeGateBlocked(q).blocked, 'nothing for the gate to block on')
+      cu._claudeLimitsReset()
+    }
+  })
+
+  await check('an answer without a session window also overrides the remembered 5-hour reading', async () => {
+    const { claudeQuota } = await quotaMit(null, 48)
     cu._claudeLimitsReset()
+    cu._claudeLimitsSet({ five: 92, resets_at: new Date(Date.now() + 3600_000).toISOString(), seven_general: 4, seven_resets_at: null, weekly_scoped: [] })
+    equal(claudeQuota().five, 92, 'the account reported the window')
+    cu._claudeLimitsSet({ five: null, resets_at: null, seven_general: 4, seven_resets_at: null, weekly_scoped: [] })
+    equal(claudeQuota().five, null, 'and now it does not')
+    cu._claudeLimitsReset()
+  })
+
+  await check('with no answer at all the file still supplies the 5-hour window', async () => {
+    const { claudeQuota, claudeGateBlocked } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 96, resets_at: 4000000000 },
+    }), 46)
+    cu._claudeLimitsReset()
+    const q = claudeQuota()
+    equal(q.five, 96, 'an expired token says nothing about the plan')
+    isTrue(claudeGateBlocked(q).blocked, 'so the gate keeps its reading')
   })
 
   // Measured: these two assertions above failed in 6 of 30 suite runs, and the
@@ -1109,6 +1135,79 @@ try {
     cu._claudeLimitsSet(liveWithFable(88), Date.now() - 3 * 3600_000)   // remembered, three hours old
     equal(claudeQuota().seven_fable, 92, 'a file written just now beats a live reading from this morning')
     cu._claudeLimitsReset()
+  })
+
+  // A plan without a 5-hour limit: the account stops reporting the window, and
+  // the last five_hour block stays in the file while the file itself keeps being
+  // rewritten. Measured: 10 % with a reset the day before, in a file written
+  // minutes ago, and the panel drew it as current.
+  const secondsFromNow = (ms) => Math.floor((Date.now() + ms) / 1000)
+
+  await check('a window in the file is gone once its own reset time has passed', async () => {
+    const { claudeQuota, claudeGateBlocked, quotaKnown } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 96, resets_at: secondsFromNow(-3600_000) },
+      seven_day: { used_percentage: 97, resets_at: secondsFromNow(-3600_000) },
+      seven_day_fable: { used_percentage: 98, resets_at: secondsFromNow(-3600_000) },
+    }), 40)
+    cu._claudeLimitsReset()
+    const q = claudeQuota()
+    equal(q.five, null, 'no 5-hour reading')
+    equal(q.resets_at, null, 'and no reset time left behind')
+    equal(q.five_at, null, 'and no as-of date')
+    equal(q.seven_general, null, 'the general week follows the same rule')
+    equal(q.seven_fable, null, 'and the per-model week')
+    isFalse(claudeGateBlocked(q).blocked, 'a period that is over cannot defer a run')
+    isFalse(quotaKnown(q), 'and it is not knowledge either')
+  })
+
+  await check('an account without a session window gets no 5-hour bar from an old file', async () => {
+    const { claudeQuota, claudeGateBlocked } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 95, resets_at: secondsFromNow(-86_400_000) },
+      seven_day: { used_percentage: 1, resets_at: secondsFromNow(86_400_000) },
+    }), 41)
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet({ five: null, resets_at: null, seven_general: 4, seven_resets_at: null, weekly_scoped: [] })
+    const q = claudeQuota()
+    equal(q.five, null, 'the window the account does not report stays away')
+    equal(q.seven_general, 4, 'the week still comes from the account')
+    isFalse(claudeGateBlocked(q).blocked, 'and the gate does not block on the old 95 %')
+    cu._claudeLimitsReset()
+  })
+
+  await check('an account with a session window keeps its 5-hour bar', async () => {
+    const { claudeQuota, claudeGateBlocked } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 3, resets_at: secondsFromNow(-3600_000) },
+    }), 42)
+    cu._claudeLimitsReset()
+    cu._claudeLimitsSet({ five: 92, resets_at: new Date(Date.now() + 3600_000).toISOString(), seven_general: 4, seven_resets_at: null, weekly_scoped: [] })
+    const q = claudeQuota()
+    equal(q.five, 92, 'live 5-hour reading')
+    isTrue(claudeGateBlocked(q).blocked, 'and it still gates')
+    cu._claudeLimitsReset()
+  })
+
+  await check('a window in the file still counts until its reset, or with no reset time at all', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 42, resets_at: secondsFromNow(3600_000) },
+      seven_day: { used_percentage: 11, resets_at: null },
+    }), 43)
+    cu._claudeLimitsReset()
+    const q = claudeQuota()
+    equal(q.five, 42, 'the period is still running')
+    equal(q.seven_general, 11, 'a null reset time does not drop the window')
+    equal(q.seven_resets_at, null, 'and does not read as 1970')
+  })
+
+  await check('a reset time written as an ISO string counts too', async () => {
+    const { claudeQuota } = await quotaMit(JSON.stringify({
+      five_hour: { used_percentage: 96, resets_at: new Date(Date.now() - 3600_000).toISOString() },
+      seven_day: { used_percentage: 11, resets_at: '' },
+    }), 47)
+    cu._claudeLimitsReset()
+    const q = claudeQuota()
+    equal(q.five, null, 'past, so gone')
+    equal(q.seven_general, 11, 'an empty string is no reset time')
+    equal(q.seven_resets_at, null, 'and does not read as 1970')
   })
 
   await check('a remembered window is forgotten once it has rolled over', async () => {
