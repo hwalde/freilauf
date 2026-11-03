@@ -79,8 +79,20 @@ rotate() {
         >"$FILE" 2>/dev/null
 }
 
+# What a filter killed in mid-rotation left behind.
+rm -f "$FILE".cap.* 2>/dev/null
+
+# A resumed run from before this cap: its big log is not ours to cut, so it moves aside
+# whole, and the new file counts it as gone. Only a file without a header can be that.
 size=$(file_size)
-[ "$size" -lt "$HIGH" ] || rotate "$size"
+if [ "$size" -ge "$HIGH" ]; then
+    read_header
+    if [ "$HEADER_LEN" -eq 0 ] && mv -n "$FILE" "$FILE.before-cap" 2>/dev/null && [ ! -e "$FILE" ]; then
+        printf '%s_freilauf-log-dropped=%s%s\\\n' "$ESC" "$size" "$ESC" >"$FILE" 2>/dev/null
+    else
+        rotate "$size"
+    fi
+fi
 
 while :; do
     # stderr is the capture, stdout the log. The redirect itself can fail (the

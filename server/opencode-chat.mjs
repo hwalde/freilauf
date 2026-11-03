@@ -24,11 +24,19 @@ const OUTPUT_TAIL = 300
 export const chatPath = (runId) => join(RUNS_DIR, runId, CHAT_FILE)
 
 const stamps = new Map()    // run id → what the store looked like at the last write
+const renders = new Map()   // run id → { at, ms } of the last render
+// A big tree takes a noticeable moment on the hub's event loop (measured: 269 ms for
+// 132 sessions and 83 MB), and a working agent moves the store on every pass. So the
+// periodic refresh keeps a live chat at most a minute behind, and longer if rendering
+// would otherwise take more than 2 % of the time. Every other caller gets it current.
+const REFRESH_MS = 60_000
+const REFRESH_FACTOR = 50
 
 function shorten(text, head, tail) {
   const s = String(text ?? '')
   if (s.length <= head + tail) return s
-  return `${s.slice(0, head)}\n[… ${s.length - head - tail} characters left out …]\n${s.slice(-tail)}`
+  const marker = `[… ${s.length - head - tail} characters left out …]`
+  return tail ? `${s.slice(0, head)}\n${marker}\n${s.slice(-tail)}` : `${s.slice(0, head)}\n${marker}`
 }
 
 const indent = (s, prefix) => String(s).split('\n').map(l => prefix + l).join('\n')
@@ -82,10 +90,10 @@ function queryRows(d, ids) {
   return d.prepare(`
     SELECT p.session_id AS session, p.time_created AS at, p.id AS id,
            json_extract(p.data, '$.type') AS type,
-           substr(json_extract(p.data, '$.text'), 1, ${TEXT_MAX + 1}) AS text,
+           json_extract(p.data, '$.text') AS text,
            json_extract(p.data, '$.tool') AS tool,
            json_extract(p.data, '$.state.status') AS status,
-           substr(json_extract(p.data, '$.state.input'), 1, ${INPUT_MAX + 1}) AS input,
+           json_extract(p.data, '$.state.input') AS input,
            json_extract(p.data, '$.state.output') AS output,
            json_extract(p.data, '$.state.error') AS error,
            json_extract(m.data, '$.role') AS role
@@ -179,10 +187,12 @@ function storeStamp(d, ids) {
  * Mode 600: the file holds tool output, and it must not be readable by more
  * accounts than the recording it replaces on the page.
  */
-export function syncChat(run) {
+export function syncChat(run, { periodic = false } = {}) {
   if (run?.harness !== 'opencode' || !run.workdir_effective) return false
   const dir = join(RUNS_DIR, run.id)
   if (!existsSync(dir)) return false
+  const last = renders.get(run.id)
+  if (periodic && last && Date.now() - last.at < Math.max(REFRESH_MS, REFRESH_FACTOR * last.ms)) return true
   const d = openStore(run)
   if (!d) return false
   const file = chatPath(run.id)
@@ -191,7 +201,9 @@ export function syncChat(run) {
     if (!ids.length) return false
     const stamp = storeStamp(d, ids)
     if (stamps.get(run.id) === stamp && existsSync(file)) return true
+    const began = Date.now()
     const text = renderChat(d, ids, { title: `Chat of run ${run.id}` })
+    renders.set(run.id, { at: Date.now(), ms: Date.now() - began })
     if (text === null) return false
     const tmp = `${file}.${process.pid}.tmp`
     try {

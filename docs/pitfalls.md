@@ -125,6 +125,8 @@ change are in `AGENTS.md`.
 - The dialog for a used-up free tier redraws at about 770 KB/s; a normal idle
   session writes nothing.
 - `opencode run` waits for stdin to close before it starts.
+- A provider error lands on an assistant row long after its `time_created`; read
+  new errors by `time_updated`.
 - `opencode.log` is trimmed in place on upgrade, keeping its inode.
 - Zen's free limit is one counter for all free models, with one `Retry-After`;
   switching free models does not help.

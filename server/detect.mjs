@@ -117,7 +117,7 @@ export function typeFromText(text) {
   if (/(requires|needs|add) more credits|can only afford|out of credits|adjust the key'?s? (daily |weekly |monthly )?limit/i.test(t)) return 'billing_error'
   if (/\b429\b|rate.?limit|too many requests|usage limit|hit your (session|usage|weekly|daily)? ?limit|quota exceeded|resource.?exhausted/i.test(t)) return 'rate_limit'
   if (/model (not found|does not exist)|unknown model|no such model|not a valid model/i.test(t)) return 'model_error'
-  if (HTTP_5XX.test(t) || /overload|unavailable|no endpoints|stream error|AI_APICallError|ECONNRE|ENOTFOUND|ETIMEDOUT|socket (hang up|connection was closed)|fetch failed|upstream|provider error|temporarily/i.test(t)) return 'provider_error'
+  if (HTTP_5XX.test(t) || /ProviderHeaderTimeoutError|A Timeout Occurred|\bprovider\.[a-z-]+|overload|unavailable|no endpoints|stream error|AI_APICallError|ECONNRE|ENOTFOUND|ETIMEDOUT|socket (hang up|connection was closed)|fetch failed|upstream|provider error|temporarily/i.test(t)) return 'provider_error'
   return 'unbekannt'
 }
 

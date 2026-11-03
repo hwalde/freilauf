@@ -687,7 +687,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - A run's `log.txt` stays at or under 5 MB (`bin/fl-log-cap`, for every coding
   agent) and at or over 2 MB after a cut, because the watcher reads up to 2 MB per
   pass. The filter never stops draining stdin and never takes the session with it;
-  a running session that lost it gets it back (`ensureLogPipe()`).
+  a running session that lost it gets it back (`ensureLogPipe()`). A log from before
+  the cap is never cut: a resumed run moves it aside whole (`log.txt.before-cap`).
 - `runs.log_offset` counts every byte the run ever printed; the file's header says
   how many are gone, and only `server/run-log.mjs` translates between the two.
 - `tmuxVerdict()` answers `ok`/`no_server`/`unreachable`; `sessionGone()` is

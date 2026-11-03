@@ -701,7 +701,7 @@ async function scanLog(run) {
   let chunk
   // A position in everything the run ever printed; fl-log-cap keeps only the end.
   try { chunk = readLogFrom(logf, run.log_offset ?? 0) } catch { return }
-  if (chunk.uebersprungen) detectorLog(run.id, { art: 'log', hinweis: 'backlog skipped', bytes: chunk.uebersprungen })
+  if (chunk.skipped) detectorLog(run.id, { art: 'log', hinweis: 'backlog skipped', bytes: chunk.skipped })
   if (!chunk.text) return
   // The sandbox family is asked of the same bytes, in the same pass, and only
   // where there IS a sandbox: an unsandboxed run hitting EACCES has an ordinary
@@ -761,40 +761,47 @@ async function scanLog(run) {
  */
 async function scanOpencodeLogs(active) {
   const runs = active.filter(r => r.harness === 'opencode' && r.workdir_effective)
+  pruneLogCursors(RUNS_DIR)
   const byPath = new Map()
   for (const run of runs) {
     const p = opencodeLogPath(run)
     if (!byPath.has(p)) byPath.set(p, [])
     byPath.get(p).push(run)
   }
-  pruneLogCursors(RUNS_DIR, new Set([...byPath.keys(), ...runs.map(r => `store:${r.id}`)]))
   for (const [path, members] of byPath) {
-    const lines = errorLines(claimNewLogText(path))
+    // The sessions first, then the claim: a store that cannot answer right now must
+    // not cost the lines, because a run waiting on a long retry never repeats them.
+    const found = new Map()
+    let complete = true
     for (const run of members) {
       const d = openStore(run)
-      if (!d) continue
-      const hits = []
+      if (!d) { complete = false; continue }
       try {
         const ids = runSessionIds(d, run.workdir_effective, runStartMs(run))
+        const hits = []
         if (isV2Store(d)) {
           const after = storeCursor(run.id)
-          const found = storeErrors(d, ids, after)
-          if (found.length && advanceStoreCursor(run.id, after, found.at(-1).atMs)) {
-            hits.push(...found.map(f => ({ tsMs: f.atMs, text: f.text })))
+          const errors = storeErrors(d, ids, after)
+          if (errors.length && advanceStoreCursor(run.id, after, errors.at(-1).atMs)) {
+            hits.push(...errors.map(f => ({ tsMs: f.atMs, text: f.text })))
           }
         }
-        const sessions = new Set(ids)
-        hits.push(...lines.filter(l => sessions.has(l.sessionId)))
+        found.set(run, { sessions: new Set(ids), hits })
       } catch (e) {
         console.error(`[watcher] opencode errors of ${run.id}: ${e.message}`)
-        continue
+        complete = false
       } finally { try { d.close() } catch {} }
-      const jeTyp = new Map()
-      for (const h of hits) {
+    }
+    const lines = complete ? errorLines(claimNewLogText(path)) : []
+    for (const [run, { sessions, hits }] of found) {
+      const byType = new Map()
+      for (const h of [...hits, ...lines.filter(l => sessions.has(l.sessionId))]) {
         if (isSessionStopped(h.text) || /abort|cancel/i.test(h.text.split(':')[0])) continue
-        jeTyp.set(typeFromText(h.text), h)      // the newest of its type
+        const typ = typeFromText(h.text)
+        // Narrow like the screen patterns: only what can be named becomes an incident.
+        if (typ !== 'unbekannt') byType.set(typ, h)      // the newest of its type
       }
-      for (const [typ, h] of jeTyp) {
+      for (const [typ, h] of byType) {
         await reportIncident(run.id, { typ, quelle: 'log:opencode', schwere: 'gelb',
           beleg: h.text.slice(0, 300), tsMs: h.tsMs })
       }
@@ -806,15 +813,15 @@ async function scanOpencodeLogs(active) {
  * Keep the chat file of every opencode run current that can still change: one in
  * flight, one with an open session (a finished agent can be given more work), and
  * for a day after a session closed, which makes the file complete however the
- * run ended. A pass costs two small queries per session; the file is only written
- * when the store moved.
+ * run ended. The file is only written when the store moved, and at most once a
+ * minute here; the end of a run and every reader bring it up to date at once.
  */
 function syncOpenChats() {
   const rows = db.prepare(`SELECT * FROM runs WHERE harness = 'opencode' AND (
       status IN ('running', 'waiting_help')
       OR (tmux_session IS NOT NULL AND tmux_closed_at IS NULL)
       OR tmux_closed_at >= datetime('now', '-1 day'))`).all()
-  for (const run of rows) syncChat(run)
+  for (const run of rows) syncChat(run, { periodic: true })
 }
 
 /**

@@ -77,14 +77,22 @@ try {
       equal(readFileSync(f, 'utf8'), 'already here\n', 'still there')
     })
 
-    await check('a resumed run appends, and an old big log is cut at the start', () => {
+    await check('a resumed run from before the cap: its big log moves aside whole, the count goes on', () => {
       const f = join(SB, 'resume.log')
       writeFileSync(f, 'x'.repeat(2_000_000))
       feed(f, Buffer.from('new\n'), 600_000)
       isTrue(statSync(f).size <= 600_000, `limit holds: ${statSync(f).size}`)
-      const r = readLogFrom(f, 0)
+      equal(statSync(`${f}.before-cap`).size, 2_000_000, 'the old log is untouched')
+      const r = readLogFrom(f, 2_000_000)
       equal(r.size, 2_000_004, 'the count includes the old file')
-      isTrue(r.text.endsWith('xnew\n'), 'old tail plus new bytes')
+      equal(r.text, 'new\n', 'and a scanner at the old offset reads the new bytes only')
+    })
+
+    await check('what a filter killed in mid-rotation left behind is cleaned up', () => {
+      const f = join(SB, 'stale.log')
+      writeFileSync(`${f}.cap.12345`, 'half a copy')
+      feed(f, Buffer.from('x\n'))
+      isTrue(!existsSync(`${f}.cap.12345`), 'gone')
     })
 
     await check('the count stays exact over many cuts and over a restart of the filter', () => {
@@ -165,7 +173,7 @@ try {
       const name = session(prod(300_000, 8, report, flag), f, 1_000_000)
       await sleep(5000)
       const before = readLogFrom(f, 0)
-      isTrue(before.uebersprungen > 0, 'cut several times by now')
+      isTrue(before.skipped > 0, 'cut several times by now')
       let offset = before.von + Buffer.byteLength(before.text)
       writeFileSync(flag, '')
       await sleep(400)
@@ -196,7 +204,7 @@ try {
             if (existsSync(flag)) rmSync(flag)
             nextPass += 30_000
             const c = readLogFrom(f, offset)
-            lost += c.uebersprungen
+            lost += c.skipped
             const { treffer, neuerOffset } = scanNewBytes('hermes', c.text, c.von)
             offset = neuerOffset
             passes++

@@ -1796,7 +1796,7 @@ try {
     equal(r.text, 'two\n', 'from the offset')
     equal(r.size, 8, 'its size')
     equal(r.von, 4, 'its position')
-    equal(r.uebersprungen, 0, 'nothing lost')
+    equal(r.skipped, 0, 'nothing lost')
     equal(readLogFrom(f, 8).text, '', 'nothing new')
     equal(readLogFrom(f, 100).von, 0, 'an offset past the end: recreated, start over')
     equal(readLogTail(f, 4), 'two\n', 'the tail')
@@ -1809,7 +1809,7 @@ try {
     equal(inside.size, 1008, 'the size is the whole recording')
     const before = readLogFrom(f, 10)
     equal(before.text, 'abcdefgh', 'an offset that was cut away reads what is left')
-    equal(before.uebersprungen, 990, 'and says how much is gone')
+    equal(before.skipped, 990, 'and says how much is gone')
     equal(before.von, 1000, 'position of the first byte returned')
     equal(readLogFrom(f, 1008).text, '', 'at the end: nothing, and no restart')
     equal(readLogFrom(f, 2000).von, 1000, 'past the end: recreated')
@@ -1929,6 +1929,13 @@ try {
     } finally { delete process.env.FREILAUF_OPENCODE_DB }
   })
 
+  await check('a line naming its error only in error.error.message still carries it', () => {
+    equal(errorLines('timestamp=2026-11-02T00:30:41.364Z level=ERROR run=0abc1234 message="stream error" session.id=ses_x small=false error.error.message="Network connection lost."')[0].text,
+      'Network connection lost.', 'the evidence')
+    equal(ocType('ProviderHeaderTimeoutError: Provider response headers timed out'), 'provider_error', 'a named timeout')
+    equal(ocType('provider.content-filter: refused'), 'provider_error', 'a typed store error')
+  })
+
   await check('the lines of opencode\'s log that count', () => {
     const line = 'timestamp=2026-11-02T00:30:41.364Z level=ERROR run=0abc1234 message="stream error" providerID=opencode session.id=ses_x small=false agent=build error.error="AI_APICallError: Free usage limit \\"reached\\". Free models"'
     const f = parseLogfmt(line)
@@ -1969,7 +1976,7 @@ try {
     d.exec(`CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
             CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);`)
-    d.prepare(`INSERT INTO session(id, directory, time_created, time_updated) VALUES('stale', '/wt/v2', 5000, 5000)`).run()
+    d.prepare(`INSERT INTO session(id, directory, time_created, time_updated) VALUES('stale', '/wt/v2', 900, 900)`).run()
     for (const s of sessions) {
       d.prepare(`INSERT INTO session_v2(id, parent_id, directory, title, tokens_input, tokens_output, time_created, time_updated) VALUES(?,?,?,?,?,?,?,?)`)
         .run(s.id, s.parent ?? null, s.dir ?? '/wt/v2', s.title ?? s.id, 3, 2, s.at ?? 1000, s.at ?? 1000)
@@ -2015,6 +2022,48 @@ try {
     } finally { delete process.env.FREILAUF_OPENCODE_DB }
   })
 
+  await check('an over-long part stops at its limit in both generations, and says so', () => {
+    const long = (c, n) => c.repeat(n)
+    const v2 = v2Store([{ id: 'r' }], [
+      { s: 'r', type: 'user', data: { text: long('T', 100_000) } },
+      { s: 'r', type: 'assistant', data: { content: [tool('write', { status: 'completed', input: { content: long('B', 200_000) }, content: [] })] } },
+    ])
+    const v1 = chatStore([{ id: 'r' }], [
+      { s: 'r', role: 'user', data: { type: 'text', text: long('T', 100_000) } },
+      { s: 'r', data: { type: 'tool', tool: 'write', state: { status: 'completed', input: { content: long('B', 200_000) }, output: '' } } },
+    ])
+    for (const [name, d] of [['v2', v2.d], ['v1', v1.d]]) {
+      const t = renderChat(d, ['r'], { title: 'T' })
+      isTrue(Buffer.byteLength(t) < 30_000, `${name}: ${Buffer.byteLength(t)} bytes`)
+      contains(t, '76000 characters left out', `${name}: the text's marker, with the real count`)
+      isTrue(t.split('T'.repeat(100)).length < 300, `${name}: the text once, not twice`)
+      isFalse(t.includes('B'.repeat(400)), `${name}: the input stops at its limit`)
+      d.close()
+    }
+  })
+
+  await check('a host taken back to v1 without the backup reads what v1 writes', () => {
+    const { d } = v2Store([{ id: 'r', at: 1000 }], [])
+    equal(isV2Store(d), true, 'v2 while it holds the newest session')
+    d.close()
+    const later = v2Store([{ id: 'r', at: 1000 }], [])
+    later.d.prepare(`INSERT INTO session(id, directory, time_created, time_updated) VALUES('v1again', '/wt/v2', 2000, 2000)`).run()
+    equal(isV2Store(later.d), false, 'v1 once it does')
+    later.d.close()
+  })
+
+  await check('v2: an error written late onto an older row still counts', () => {
+    const { d } = v2Store([{ id: 'r' }, { id: 'kid', parent: 'r' }], [])
+    const put = d.prepare(`INSERT INTO session_message VALUES(?,?,?,?,?,?,?)`)
+    const err = JSON.stringify({ content: [], error: { type: 'provider.free-limit', message: 'x' } })
+    put.run('kid-m', 'kid', 'assistant', 1, 2000, 2000, err)
+    const first = storeErrors(d, ['r', 'kid'], 0)
+    equal(first.length, 1, 'the subagent fails first')
+    put.run('old-m', 'r', 'assistant', 2, 1000, 3000, err)
+    equal(storeErrors(d, ['r', 'kid'], first.at(-1).atMs).length, 1, 'the parent\'s older row, failing later, is not lost')
+    d.close()
+  })
+
   await check('v2: the store is the error source, and only what is new', () => {
     const { d } = v2Store([{ id: 'r' }, { id: 'x', dir: '/wt/other' }], [
       { s: 'r', type: 'assistant', at: 100, data: { content: [{ type: 'text', text: 'fine' }] } },
@@ -2034,14 +2083,20 @@ try {
     const fake = join(sandbox, 'fake-oc'); mkdirSync(fake, { recursive: true })
     const bin = join(fake, 'opencode')
     const start = new URL('../bin/fl-start', import.meta.url).pathname
-    const dry = (version) => {
+    const dry = (version, model = 'a/b', config = ['--env', 'OPENCODE_CONFIG_CONTENT={"x":1}']) => {
       writeFileSync(bin, `#!/bin/sh\necho "${version}"\n`); chmodSync(bin, 0o755)
-      return execFileSync(start, ['-H', 'opencode', '--model', 'a/b', '--env', 'OPENCODE_CONFIG_CONTENT={"x":1}', '--dry-run', '-p', 'hi', 'n', sandbox],
+      return execFileSync(start, ['-H', 'opencode', '--model', model, ...config, '--dry-run', '-p', 'hi', 'n', sandbox],
         { encoding: 'utf8', env: { ...process.env, PATH: `${fake}:${process.env.PATH}` } })
     }
     const v2 = dry('opencode v2.2.5')
     contains(v2, '--auto --standalone --prompt', 'the private server')
+    contains(v2, 'Model:          a/b (through the config)', 'the banner tells the truth')
+    contains(v2, 'Config:         {"model":"a/b","x":1}', 'the model is first in the existing config')
     isFalse(/--model/.test(v2.split('Command:')[1]), 'no --model, which v2 refuses')
+    contains(dry('opencode v2.2.5', 'a/b', []), 'Config:         {"model":"a/b"}', 'no config: a new one')
+    contains(dry('opencode v2.2.5', 'a/b', ['--env', 'OPENCODE_CONFIG_CONTENT={}']), 'Config:         {"model":"a/b"}', 'an empty one')
+    const quoted = dry('opencode v2.2.5', 'a"b/c').split('Config:         ')[1].split('\n')[0]
+    equal(JSON.parse(quoted).model, 'a"b/c', 'a quote in the free-text model stays JSON')
     const v1 = dry('1.19.5')
     contains(v1, "--auto --model 'a/b' --prompt", 'v1 unchanged')
     isFalse(v1.includes('--standalone'), 'and without the v2 flag')

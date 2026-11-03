@@ -615,8 +615,9 @@ If your task is to change Freilauf rather than just run it:
   exactly one line: `@AGENTS.md`.** Never write content into a `CLAUDE.md` in
   this project — a unit test enforces both halves.
 - **Run the tests.** `node test/unit.mjs` (~1 s) and `node test/e2e.mjs` (~40 s)
-  at minimum; `test/browser.mjs`, `test/proxy.mjs` and `test/deploy.mjs` when
-  you touched `public/hub.js`, `vpn-proxy.mjs` or `bin/freilauf-deploy`. The e2e
+  at minimum; `test/browser.mjs`, `test/proxy.mjs`, `test/deploy.mjs` and
+  `test/log-cap.mjs` when you touched `public/hub.js`, `vpn-proxy.mjs`,
+  `bin/freilauf-deploy` or `bin/fl-log-cap`. The e2e
   suite is sandboxed — its own port, database, repo and tmux sessions — so it is
   safe to run next to a live hub.
 - **Read `AGENTS.md` before you get creative.** It is short and says what is
@@ -641,7 +642,8 @@ If your task is to change Freilauf rather than just run it:
 | Starting a run, schedules, budget gate | `server/scheduler.mjs`, `server/quota.mjs` |
 | Worktrees, prompt assembly, session launch | `server/runner.mjs`, `bin/fl-start` |
 | Reports coming back in | `server/reports.mjs`, `bin/fl-report` |
-| Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs` |
+| Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs`, `server/opencode-log.mjs` |
+| The raw recording and its size cap; opencode's readable chat | `bin/fl-log-cap`, `server/run-log.mjs`, `server/opencode-chat.mjs`, `server/opencode-store.mjs` |
 | Merging a finished run into the base branch | `server/integrate.mjs` |
 | Code review: the three levels, submit, approve, platform polling, the diff page | `server/review.mjs` |
 | Code review platforms (GitHub, GitLab, Bitbucket Cloud / Data Center) | `server/review-platforms/`, contract in `docs/plugins.md` |

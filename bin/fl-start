@@ -475,6 +475,8 @@ fi
 #    environment knows nothing about this run. Config, FL_RUN_ID and the provider
 #    keys all reach opencode through the session's environment.
 OC_FLAGS=""
+OC_CONFIG=""
+OC_MODEL_SHOWN=""
 if [[ "$HARNESS" == "opencode" && -z "$SANDBOX" && -n "$BIN" ]]; then
     case "$("$BIN" --version 2>/dev/null)" in
         *v[2-9].*|[2-9].*)
@@ -488,7 +490,11 @@ if [[ "$HARNESS" == "opencode" && -z "$SANDBOX" && -n "$BIN" ]]; then
                     fi
                 done
                 [[ -n "$oc_config" && "$oc_config" != "}" ]] && oc_config=",$oc_config" || oc_config="}"
-                ENVS+=("OPENCODE_CONFIG_CONTENT={\"model\":\"$MODEL\"$oc_config")
+                oc_model="${MODEL//\\/\\\\}"
+                oc_model="${oc_model//\"/\\\"}"
+                OC_CONFIG="{\"model\":\"$oc_model\"$oc_config"
+                ENVS+=("OPENCODE_CONFIG_CONTENT=$OC_CONFIG")
+                OC_MODEL_SHOWN="$MODEL"
                 MODEL=""
             fi
             ;;
@@ -1050,7 +1056,10 @@ if [[ -n "$DRY_RUN" ]]; then
     echo "Session:        $SESSION"
     echo "Directory:      $WORKDIR"
     echo "Autonomous:     $([[ -n "$AUTONOM" ]] && echo "yes (detaches into the background)" || echo "no (interactive, attaches)")"
-    if [[ -n "$MODEL" ]]; then
+    if [[ -n "$OC_MODEL_SHOWN" ]]; then
+        echo "Model:          $OC_MODEL_SHOWN (through the config)"
+        echo "Config:         $OC_CONFIG"
+    elif [[ -n "$MODEL" ]]; then
         echo "Model:          $MODEL"
     else
         echo "Model:          (not set — $HARNESS uses its default/most recently used model)"

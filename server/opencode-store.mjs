@@ -57,13 +57,24 @@ export function storePath(run = null) {
 /**
  * opencode 2 keeps its sessions in `session_v2` and `session_message` in the same
  * file; on its first start it copies every older session over and leaves `session`,
- * `message` and `part` standing, unused. So the presence of the new table decides,
- * and a v1 store (a sandbox's image is pinned to one) reads as it always did.
+ * `message` and `part` standing, unused. So the table with the newest session decides:
+ * a v1 store (a sandbox's image is pinned to one) has no new table, and on a host taken
+ * back to v1 without restoring the backup the new table simply stops being the newest.
  */
+const v2Stores = new WeakMap()
 export function isV2Store(d) {
+  if (v2Stores.has(d)) return v2Stores.get(d)
+  let v2 = false
   try {
-    return !!d.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`).get()
-  } catch { return false }
+    if (d.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`).get()) {
+      const newest = (t) => {
+        try { return Number(d.prepare(`SELECT MAX(time_created) AS t FROM ${t}`).get()?.t ?? 0) } catch { return 0 }
+      }
+      v2 = newest('session_v2') >= newest('session')
+    }
+  } catch { /* unreadable says nothing about the version; every query below fails on its own */ }
+  v2Stores.set(d, v2)
+  return v2
 }
 const sessionTable = (d) => (isV2Store(d) ? 'session_v2' : 'session')
 
@@ -156,9 +167,11 @@ export function runStartMs(run) {
  */
 export function storeErrors(d, ids, afterMs) {
   if (!ids.length) return []
-  const rows = d.prepare(`SELECT time_created AS at, json_extract(data, '$.error') AS error FROM session_message
-    WHERE session_id IN (${ids.map(() => '?').join(',')}) AND type = 'assistant' AND time_created > ?
-      AND json_extract(data, '$.error') IS NOT NULL ORDER BY time_created`).all(...ids, afterMs)
+  // time_updated: the error lands when the step fails, long after the row was created.
+  // A subagent can fail first, and its parent's older row must still count afterwards.
+  const rows = d.prepare(`SELECT time_updated AS at, json_extract(data, '$.error') AS error FROM session_message
+    WHERE session_id IN (${ids.map(() => '?').join(',')}) AND type = 'assistant' AND time_updated > ?
+      AND json_extract(data, '$.error') IS NOT NULL ORDER BY time_updated`).all(...ids, afterMs)
   const out = []
   for (const r of rows) {
     let e = r.error

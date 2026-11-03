@@ -143,7 +143,9 @@ async function transcriptText(runId) {
  */
 function logTail(runId) {
   const run = getRun(runId)
-  if (run?.harness === 'opencode' && syncChat(run)) {
+  if (run?.harness === 'opencode') {
+    syncChat(run)
+    // A chat already on disk beats the recording even when the store cannot answer now.
     try { return readFileSync(chatPath(runId), 'utf8').slice(-LOG_TAIL_BYTES) } catch { /* the recording below */ }
   }
   const f = join(RUNS_DIR, runId, 'log.txt')

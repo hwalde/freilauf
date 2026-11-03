@@ -33,8 +33,8 @@ function readRange(fd, from, to) {
 
 /**
  * The bytes past `offset`, at most `maxBytes` and always the newest ones.
- * Returns `{ text, size, uebersprungen, von }`: `size` and `von` are positions in
- * everything ever written, `uebersprungen` counts what cannot be read any more.
+ * Returns `{ text, size, skipped, von }`: `size` and `von` are positions in
+ * everything ever written, `skipped` counts what cannot be read any more.
  * Throws when the file cannot be read.
  *
  * A position past the end means the file was recreated (a retry, a log deleted
@@ -44,21 +44,21 @@ export function readLogFrom(path, offset, maxBytes = 2_000_000) {
   return withFile(path, (fd, fileSize, dropped, headerLen) => {
     const size = dropped + fileSize - headerLen
     let pos = offset > size ? 0 : offset
-    if (pos === size) return { text: '', size, uebersprungen: 0, von: pos }
+    if (pos === size) return { text: '', size, skipped: 0, von: pos }
     const wanted = Math.max(pos, dropped, size - maxBytes)
-    const uebersprungen = wanted - pos
+    const skipped = wanted - pos
     let buf = readRange(fd, wanted - dropped + headerLen, fileSize)
     pos = wanted
     // A cut can land inside a UTF-8 character. The scanner derives the next
     // offset from the decoded length, so a replacement character would push it
     // past the real position, and past the end it reads as "file recreated".
-    if (uebersprungen) {
+    if (skipped) {
       let skip = 0
       while (skip < buf.length && (buf[skip] & 0xc0) === 0x80) skip++
       buf = buf.subarray(skip)
       pos += skip
     }
-    return { text: buf.toString('utf8'), size, uebersprungen, von: pos }
+    return { text: buf.toString('utf8'), size, skipped, von: pos }
   })
 }
 

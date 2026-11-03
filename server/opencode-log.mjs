@@ -56,7 +56,7 @@ export function errorLines(text) {
     out.push({
       tsMs: Number.isFinite(tsMs) ? tsMs : Date.now(),
       sessionId: f['session.id'],
-      text: f['error.error'] ?? f.error ?? f.message ?? '',
+      text: f['error.error'] ?? f['error.error.message'] ?? f.error ?? f.message ?? '',
     })
   }
   return out
@@ -129,12 +129,19 @@ function claim(path, row, ino, next) {
   return r.changes > 0
 }
 
-/** A sandboxed run has a log of its own; its cursor goes when the run is no longer watched. */
-export function pruneLogCursors(runsDir, activePaths) {
-  const rows = db.prepare('SELECT path FROM opencode_log_cursor').all()
-  for (const { path } of rows) {
-    if ((path.startsWith(`${runsDir}/`) || path.startsWith('store:')) && !activePaths.has(path)) {
-      db.prepare('DELETE FROM opencode_log_cursor WHERE path = ?').run(path)
-    }
+/**
+ * A sandboxed run's log and a v2 run's store cursor belong to that run: a revived run
+ * must not read its old errors again, so they go with the run, not with its activity.
+ * Hourly, because this walks the whole table.
+ */
+let lastPrune = 0
+export function pruneLogCursors(runsDir) {
+  if (Date.now() - lastPrune < 3_600_000) return
+  lastPrune = Date.now()
+  const exists = db.prepare('SELECT 1 FROM runs WHERE id = ?')
+  for (const { path } of db.prepare('SELECT path FROM opencode_log_cursor').all()) {
+    const id = path.startsWith('store:') ? path.slice(6)
+      : path.startsWith(`${runsDir}/`) ? path.slice(runsDir.length + 1).split('/')[0] : null
+    if (id && !exists.get(id)) db.prepare('DELETE FROM opencode_log_cursor WHERE path = ?').run(path)
   }
 }
