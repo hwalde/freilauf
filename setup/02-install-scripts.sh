@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$HOME/.local/bin"
 echo "==> fl-* scripts into ~/.local/bin"
 mkdir -p "$BIN"
-for s in fl-start fl-attach fl-kill fl-help fl-report fl-api fl-notify fl-panel fl-oc-sync-agents fl-session-cleanup fl-tmux-server fl-hermes-hook freilauf freilauf-deploy; do
+for s in fl-start fl-log-cap fl-attach fl-kill fl-help fl-report fl-api fl-notify fl-panel fl-oc-sync-agents fl-session-cleanup fl-tmux-server fl-hermes-hook freilauf freilauf-deploy; do
     install -m 755 "$ROOT/bin/$s" "$BIN/$s"
     echo "    $s"
 done
@@ -129,6 +129,71 @@ export const Freilauf = async ({ $, client }) => {
   }
 }
 EOF
+# opencode 2 loads another plugin shape and fails on the one above, so the host gets
+# the matching one. The v1 file stays beside the directory opencode scans: it is what
+# a sandbox image pinned to opencode 1 is seeded with (opencode.mjs, seedHome).
+cp "$HOME/.config/opencode/plugins/freilauf.js" "$HOME/.config/opencode/freilauf-v1-plugin.js"
+case "$(opencode --version 2>/dev/null)" in
+*v[2-9].*|[2-9].*)
+cat > "$HOME/.config/opencode/plugins/freilauf.js" <<'EOF'
+// Freilauf plugin for opencode 2: reports the attention and the errors of an opencode
+// run to the hub (docs/plugins.md, "Attention"). opencode 2 expects a default export
+// with an id and a setup function, and loads it in the server, which inherits the
+// session's environment because fl-start launches with --standalone.
+import { execFile } from 'node:child_process'
+
+export default {
+  id: 'freilauf',
+  setup: async (ctx) => {
+    const runId = process.env.FL_RUN_ID ?? process.env.CC_RUN_ID
+    // Without one, opencode is not running under Freilauf.
+    if (!runId) return
+
+    // stdin closed: fl-report reads a hook's JSON from it on the API-error path.
+    const report = (...args) => new Promise(resolve => {
+      execFile('fl-report', args, { timeout: 30_000 }, () => resolve()).stdin?.end()
+    })
+
+    // Root sessions only: a subagent is a child session, and its end says nothing
+    // about whether the run's own session still works.
+    const parents = new Map()
+    const isRoot = async (sessionID) => {
+      if (!sessionID) return false
+      if (!parents.has(sessionID)) {
+        try {
+          const s = await ctx.session.get({ sessionID })
+          parents.set(sessionID, s?.parentID ?? s?.data?.parentID ?? null)
+        } catch { return false }
+      }
+      return parents.get(sessionID) === null
+    }
+    let last = null
+    const attention = async (state) => {
+      if (state === last) return
+      last = state
+      await report(state === 'busy' ? '_working' : '_waiting', state)
+    }
+
+    const listen = async () => {
+      for await (const event of ctx.event.subscribe()) {
+        const data = event?.data ?? event?.properties ?? {}
+        if (event?.type === 'session.execution.started' && await isRoot(data.sessionID)) await attention('busy')
+        else if (/^session\.execution\.(succeeded|failed|interrupted)$/.test(event?.type ?? '') && await isRoot(data.sessionID)) await attention('idle')
+        else if (event?.type === 'session.step.failed') {
+          const e = data.error ?? {}
+          await report('_api_error', 'unknown', String(e.message ?? e.type ?? 'session.step.failed').slice(0, 300))
+        }
+      }
+    }
+    // Reporting is best-effort, but a stream that broke must not end it for the session.
+    const forever = () => listen().catch(() => {}).finally(() => setTimeout(forever, 5000))
+    forever()
+  },
+}
+EOF
+    echo "    plugins/freilauf.js (opencode 2 form)"
+    ;;
+esac
 
 # ---------------------------------------------------------------- hermes hooks
 # hermes learns Freilauf's attention hooks from the `hooks:` block of its

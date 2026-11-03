@@ -67,6 +67,7 @@ node test/browser.mjs                       # if you touched public/hub.js  (nee
 node test/proxy.mjs                         # if you touched vpn-proxy.mjs
 node test/deploy.mjs                        # if you touched bin/freilauf-deploy
 node test/post-merge.mjs                    # if you touched deploy-after-merge.sh
+node test/log-cap.mjs                       # if you touched bin/fl-log-cap (needs tmux)
 bash -n bin/fl-start                        # if you touched a bin/ script (unit.mjs does this too)
 ./pruefe-vor-push.sh                        # no private values in the commits
 ```

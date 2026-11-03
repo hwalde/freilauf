@@ -20,6 +20,9 @@ change are in `AGENTS.md`.
   time, permanently (about one in six); a missing exit code is not a `0`. A
   pane killed by a signal has an empty `pane_dead_status` and a filled
   `pane_dead_signal`; a shell reports its child's signal death as `128+n`.
+- When a `pipe-pane` reader dies, tmux turns the pipe off (`#{pane_pipe}` 0) and the
+  pane goes on undisturbed. A reader that stops reading blocks nothing either: tmux
+  buffers the output in its own memory, one to one, and delivers it later.
 - `session_activity` moves on attach/select, not on output; `window_activity`
   is the activity signal.
 - `attach -r` is `-f read-only,ignore-size`, and `ignore-size` does nothing
@@ -95,6 +98,39 @@ change are in `AGENTS.md`.
 - The usage endpoint sends `null` for windows the account lacks and
   rate-limits the caller; `Number(null)` is 0.
 
+## coreutils
+
+- `dd` without `conv=notrunc` truncates a regular stdout to its own offset when it
+  ends; on an `O_APPEND` descriptor that wrote nothing that offset is 0, so a `dd`
+  that only saw end of input empties the file. `head -c` holds its output in a stdio
+  buffer, so a slow writer's line does not reach the file until the buffer fills.
+- `pgrep -f`/`pkill -f` also match the calling shell when the pattern is in its own
+  command line.
+
+## opencode 2 (2.2.5)
+
+- `opencode upgrade --major` installs another package (`@opencode/cli`, no longer
+  `opencode-ai`); the first start migrates `opencode.db` in place and v1 tables stay
+  behind, unused. Back the file up before going back.
+- The TUI has no `--model` (it fails with `Unrecognized flag`) and `--pure` is gone;
+  the model goes through config `model`, the effort still through
+  `agent.<name>.{model,variant}`.
+- Without `--standalone`, the TUI and every CLI subcommand attach to a permanent
+  background service (276 MB) whose environment knows nothing about a run.
+- Plugins must `export default { id, setup }` and take events from
+  `ctx.event.subscribe()`; a v1 factory only logs a WARN, so the failure is silent.
+  A `plugin` config entry must be a directory.
+- Sessions are in `session_v2` and `session_message` (parts inside the row). Provider
+  errors stand on the assistant message; the ERROR log lines have no `session.id`.
+- The dialog for a used-up free tier redraws at about 770 KB/s; a normal idle
+  session writes nothing.
+- `opencode run` waits for stdin to close before it starts.
+- A provider error lands on an assistant row long after its `time_created`; read
+  new errors by `time_updated`.
+- `opencode.log` is trimmed in place on upgrade, keeping its inode.
+- Zen's free limit is one counter for all free models, with one `Retry-After`;
+  switching free models does not help.
+
 ## opencode (1.18.x)
 
 - `--prompt` past ~2 KB is not submitted by itself and past ~4 KB the session
@@ -104,6 +140,10 @@ change are in `AGENTS.md`.
   TUI; paste the continuation after the status bar shows `ctrl+p`.
   `--continue` is scoped to the project, never to a worktree — a resume must
   not rely on it.
+- "Free usage limit reached" stands in no message and no part, only in
+  `opencode.log`: the TUI waits for the next attempt (`retrying in 20h 53m`) and
+  shows it as "Free usage exceeded", so `session.error` never fires.
+- `started_at` of a revived run can be later than its first session.
 - `--auto` auto-rejects `external_directory`; every path outside the worktree
   needs an explicit allow, and a blocked run looks like a hung provider.
 - An unknown model answers `UnknownError: Unexpected server error`, byte for

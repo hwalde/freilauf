@@ -75,7 +75,7 @@ Options:
       --env KEY=VAL     Environment variable for the session (repeatable,
                         passed through as tmux new-session -e).
       --log FILE        Record a full transcript of the session from the start
-                        (tmux pipe-pane into FILE).
+                        (tmux pipe-pane through fl-log-cap into FILE, last ~5 MB).
       --keep            Keep the session open after the process ends (remain-on-exit)
                         + pane-died hook (fl-report _pane_died).
       --spec FILE       Launch declaration (JSON) of a coding agent this script
@@ -467,6 +467,39 @@ esac
 if [[ -z "$BIN" && -n "$SPEC_MODE" ]]; then
     BIN="$(command -v "$SPEC_BIN" || true)"
 fi
+# opencode 2 on this machine (the image's own version stays declared by its pin):
+#  - The TUI has no --model any more; the model goes through the config, which is
+#    also where the effort already travels. OPENCODE_CONFIG_CONTENT is one JSON
+#    object written by the hub, so `model` can be put first without parsing it.
+#  - --standalone: by default the TUI attaches to a shared background service, whose
+#    environment knows nothing about this run. Config, FL_RUN_ID and the provider
+#    keys all reach opencode through the session's environment.
+OC_FLAGS=""
+OC_CONFIG=""
+OC_MODEL_SHOWN=""
+if [[ "$HARNESS" == "opencode" && -z "$SANDBOX" && -n "$BIN" ]]; then
+    case "$("$BIN" --version 2>/dev/null)" in
+        *v[2-9].*|[2-9].*)
+            OC_FLAGS=" --standalone"
+            if [[ -n "$MODEL" ]]; then
+                oc_config=""
+                for i in "${!ENVS[@]}"; do
+                    if [[ "${ENVS[$i]}" == OPENCODE_CONFIG_CONTENT=\{* ]]; then
+                        oc_config="${ENVS[$i]#OPENCODE_CONFIG_CONTENT=\{}"
+                        unset 'ENVS[i]'
+                    fi
+                done
+                [[ -n "$oc_config" && "$oc_config" != "}" ]] && oc_config=",$oc_config" || oc_config="}"
+                oc_model="${MODEL//\\/\\\\}"
+                oc_model="${oc_model//\"/\\\"}"
+                OC_CONFIG="{\"model\":\"$oc_model\"$oc_config"
+                ENVS+=("OPENCODE_CONFIG_CONTENT=$OC_CONFIG")
+                OC_MODEL_SHOWN="$MODEL"
+                MODEL=""
+            fi
+            ;;
+    esac
+fi
 if [[ -n "$SANDBOX" ]]; then
     # In a sandbox the CLI lives in the IMAGE, so this machine is the wrong
     # place to ask — and the wrong place to answer from, too: a host install at
@@ -709,7 +742,7 @@ cmd_interactive() {
                  [[ -n "$MODEL" ]]  && printf ' --model %s' "$(q "$MODEL")"
                  [[ -n "$EFFORT" ]] && printf ' --effort %s' "$(q "$EFFORT")"
                  : ;;
-        opencode) printf '%s --auto 2>>%s' "$(q "$BIN")" "$(q "$OC_ERRLOG")" ;;
+        opencode) printf '%s --auto%s 2>>%s' "$(q "$BIN")" "$OC_FLAGS" "$(q "$OC_ERRLOG")" ;;
         hermes)  printf '%s --yolo' "$(q "$BIN")" ;;
         cursor)  printf '%s --force --trust' "$(q "$BIN")"
                  [[ -n "$MODEL" ]] && printf ' --model %s' "$(q "$MODEL")"
@@ -759,9 +792,9 @@ cmd_autonomous() {
         # Enter nudge. The launcher pastes the continuation in instead
         # (oc_resume_paste), the way the hub types a message into a session.
         opencode) if [[ -n "$RESUME_ID" ]]; then
-                      printf '%s --auto%s 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")"
+                      printf '%s --auto%s%s 2>>%s' "$(q "$BIN")" "$OC_FLAGS" "$model_args" "$(q "$OC_ERRLOG")"
                   else
-                      printf '%s --auto%s --prompt "$FL_PROMPT" 2>>%s' "$(q "$BIN")" "$model_args" "$(q "$OC_ERRLOG")"
+                      printf '%s --auto%s%s --prompt "$FL_PROMPT" 2>>%s' "$(q "$BIN")" "$OC_FLAGS" "$model_args" "$(q "$OC_ERRLOG")"
                   fi ;;
         # hermes' resume form (measured with 0.21): `--resume <id>` continues that
         # session, `--resume latest` the newest one of the workspace `--in` names,
@@ -1023,7 +1056,10 @@ if [[ -n "$DRY_RUN" ]]; then
     echo "Session:        $SESSION"
     echo "Directory:      $WORKDIR"
     echo "Autonomous:     $([[ -n "$AUTONOM" ]] && echo "yes (detaches into the background)" || echo "no (interactive, attaches)")"
-    if [[ -n "$MODEL" ]]; then
+    if [[ -n "$OC_MODEL_SHOWN" ]]; then
+        echo "Model:          $OC_MODEL_SHOWN (through the config)"
+        echo "Config:         $OC_CONFIG"
+    elif [[ -n "$MODEL" ]]; then
         echo "Model:          $MODEL"
     else
         echo "Model:          (not set — $HARNESS uses its default/most recently used model)"
@@ -1222,7 +1258,15 @@ if [[ -n "$LOGFILE" ]]; then
     #  - Target: "=name" is NOT a pane target for pipe-pane ("can't find pane"). The
     #    colon turns it into the session's active pane.
     #  - $LOGFILE ends up inside a shell command and must be quoted.
-    tmux_or_die pipe-pane -o -t "=$SESSION:" "cat >> $(q "$LOGFILE")"
+    #  - The agent's output goes through a size cap, not `cat`: a TUI in an error
+    #    state redraws at gigabytes per hour (bin/fl-log-cap). `exec`: a sh less per pane.
+    LOG_CAP="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-log-cap"
+    if [[ -x "$LOG_CAP" ]]; then
+        tmux_or_die pipe-pane -o -t "=$SESSION:" "exec $(q "$LOG_CAP") $(q "$LOGFILE")"
+    else
+        # Never fall back to an unbounded `cat`: a broken install must not fill the disk.
+        err "Warning: $LOG_CAP is missing — this session has no terminal recording. Run setup/02-install-scripts.sh."
+    fi
 fi
 if [[ -n "$KEEP" ]]; then
     tmux_or_die set-option -t "=$SESSION:" -q remain-on-exit on

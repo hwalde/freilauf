@@ -133,6 +133,23 @@ export function ndjson(text) {
 }
 
 /**
+ * The flag that keeps a hub-side opencode call away from anything shared.
+ * opencode 1: `--pure`, no external plugins. opencode 2 refuses that flag, and without
+ * `--standalone` each call starts or joins its permanent background service
+ * (measured: 276 MB, left running). Asked once per hub process; a deploy restarts it.
+ */
+let opencodeFlag = null
+export async function opencodeIsolationFlag() {
+  if (opencodeFlag) return opencodeFlag
+  const r = await runCli('opencode', ['--version'], { timeoutMs: 20_000 }).catch(() => null)
+  const v = String(r?.stdout ?? '')
+  // Not answering is not an answer: the next call asks again rather than remembering it.
+  if (!v.trim()) return '--pure'
+  opencodeFlag = /(^|\bv)[2-9]\.\d/.test(v.trim()) ? '--standalone' : '--pure'
+  return opencodeFlag
+}
+
+/**
  * The lines a listing command prints — through a FILE, never through a pipe.
  *
  * `opencode models --pure` prints 568 lines and loses chunks at process exit

@@ -2049,7 +2049,7 @@ home and **nothing** appeared under the real one.
 | CLI | where the conversation lives | keyed on |
 |---|---|---|
 | claude 2.1.261 | `<config>/projects/<slug(workdir)>/<session id>.jsonl`, `<config>` = `$CLAUDE_CONFIG_DIR` else `$HOME/.claude` | `$HOME`, overridable |
-| opencode 1.18.29 | `<data>/opencode/opencode.db`, `session` keyed by absolute `directory` + `parent_id`; `<data>` = `$XDG_DATA_HOME` else `$HOME/.local/share` | **XDG first**, `$HOME` only as its fallback |
+| opencode 1.18.29 (the chat file and the error log are read from the same home; a home the hub cannot read means the capped recording instead) | `<data>/opencode/opencode.db`, `session` keyed by absolute `directory` + `parent_id`; `<data>` = `$XDG_DATA_HOME` else `$HOME/.local/share` | **XDG first**, `$HOME` only as its fallback |
 | cursor-agent 2026.09.02 | `<data>/projects/<slug(workdir)>/agent-transcripts/…` and `<data>/chats/<md5(workdir)>/`; `<data>` = `$CURSOR_DATA_DIR` else `~/.cursor` | `$HOME`, overridable; auth under a second root |
 | hermes 0.21.0 | `$HERMES_HOME/state.db`, `sessions` keyed by absolute `cwd` | `$HOME`, overridable |
 

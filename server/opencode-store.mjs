@@ -37,9 +37,11 @@
 // the turn is still running (a tool call changing state, streamed text), and
 // they are the finest signal this store has.
 import { existsSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { agentHome } from './sandbox/exec.mjs'
 import { env } from './env.mjs'
+import db from './db.mjs'
 
 /**
  * The store's path — overridable, because a test must never read the operator's.
@@ -51,6 +53,30 @@ import { env } from './env.mjs'
 export function storePath(run = null) {
   return env('OPENCODE_DB') ?? join(agentHome(run), '.local/share/opencode/opencode.db')
 }
+
+/**
+ * opencode 2 keeps its sessions in `session_v2` and `session_message` in the same
+ * file; on its first start it copies every older session over and leaves `session`,
+ * `message` and `part` standing, unused. So the table with the newest session decides:
+ * a v1 store (a sandbox's image is pinned to one) has no new table, and on a host taken
+ * back to v1 without restoring the backup the new table simply stops being the newest.
+ */
+const v2Stores = new WeakMap()
+export function isV2Store(d) {
+  if (v2Stores.has(d)) return v2Stores.get(d)
+  let v2 = false
+  try {
+    if (d.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`).get()) {
+      const newest = (t) => {
+        try { return Number(d.prepare(`SELECT MAX(time_created) AS t FROM ${t}`).get()?.t ?? 0) } catch { return 0 }
+      }
+      v2 = newest('session_v2') >= newest('session')
+    }
+  } catch { /* unreadable says nothing about the version; every query below fails on its own */ }
+  v2Stores.set(d, v2)
+  return v2
+}
+const sessionTable = (d) => (isV2Store(d) ? 'session_v2' : 'session')
 
 /** Does this table carry that column? opencode's schema moves between versions. */
 function hasColumn(d, table, column) {
@@ -71,14 +97,15 @@ function hasColumn(d, table, column) {
  * Better the single newest session than nothing at all.
  */
 export function sessionTree(d, directory, sinceMs) {
+  const T = sessionTable(d)
   const newest = () => {
-    const r = d.prepare(`SELECT id FROM session WHERE directory = ? AND time_created >= ?
+    const r = d.prepare(`SELECT id FROM ${T} WHERE directory = ? AND time_created >= ?
                          ORDER BY time_created DESC LIMIT 1`).get(directory, sinceMs)
     return r ? [r.id] : []
   }
-  if (!hasColumn(d, 'session', 'parent_id')) return newest()
+  if (!hasColumn(d, T, 'parent_id')) return newest()
 
-  const root = d.prepare(`SELECT id FROM session WHERE directory = ? AND time_created >= ?
+  const root = d.prepare(`SELECT id FROM ${T} WHERE directory = ? AND time_created >= ?
                           AND parent_id IS NULL ORDER BY time_created DESC LIMIT 1`).get(directory, sinceMs)
   if (!root) return newest()
 
@@ -87,7 +114,7 @@ export function sessionTree(d, directory, sinceMs) {
   // somewhere else and must not turn one watcher pass into a table scan.
   const ids = [root.id]
   const seen = new Set(ids)
-  const children = d.prepare(`SELECT id FROM session WHERE parent_id = ?`)
+  const children = d.prepare(`SELECT id FROM ${T} WHERE parent_id = ?`)
   for (let i = 0; i < ids.length && ids.length < 200; i++) {
     for (const k of children.all(ids[i])) {
       if (seen.has(k.id)) continue
@@ -98,10 +125,74 @@ export function sessionTree(d, directory, sinceMs) {
   return ids
 }
 
+/**
+ * Every session of a run, for reading what it said: ALL its parentless sessions
+ * and everything under them. `sessionTree()` answers "the session being worked in
+ * now"; a run that was handed over or revived has an earlier root whose
+ * conversation is just as much the run's. Measured on a resumed run: two roots
+ * seven days apart, nine sessions.
+ */
+export function runSessionIds(d, directory, sinceMs) {
+  const T = sessionTable(d)
+  if (!hasColumn(d, T, 'parent_id')) return sessionTree(d, directory, sinceMs)
+  const roots = d.prepare(`SELECT id FROM ${T} WHERE directory = ? AND time_created >= ?
+                           AND parent_id IS NULL ORDER BY time_created`).all(directory, sinceMs)
+  if (!roots.length) return sessionTree(d, directory, sinceMs)
+  const ids = roots.map(r => r.id)
+  const seen = new Set(ids)
+  const children = d.prepare(`SELECT id FROM ${T} WHERE parent_id = ?`)
+  for (let i = 0; i < ids.length && ids.length < 500; i++) {
+    for (const k of children.all(ids[i])) {
+      if (!seen.has(k.id)) { seen.add(k.id); ids.push(k.id) }
+    }
+  }
+  return ids
+}
+
+/**
+ * When a run's sessions can begin at the earliest: its first event, not
+ * `started_at`. That column moves when a run is revived, and it can stand after
+ * the first session was created (measured: by two minutes on a resumed run).
+ */
+export function runStartMs(run) {
+  const first = db.prepare('SELECT MIN(ts) AS ts FROM events WHERE run_id = ?').get(run.id)?.ts
+  const times = [first, run.started_at].filter(Boolean).map(s => Date.parse(`${s.replace(' ', 'T')}Z`))
+  return (times.length ? Math.min(...times) : 0) - 5000
+}
+
+/**
+ * opencode 2: the provider errors of these sessions after `afterMs`, oldest first —
+ * [{ atMs, text }]. Written on the assistant message whose step failed; that message
+ * is the record of it, so one refusal is one row however often the TUI redraws it.
+ */
+export function storeErrors(d, ids, afterMs) {
+  if (!ids.length) return []
+  // time_updated: the error lands when the step fails, long after the row was created.
+  // A subagent can fail first, and its parent's older row must still count afterwards.
+  const rows = d.prepare(`SELECT time_updated AS at, json_extract(data, '$.error') AS error FROM session_message
+    WHERE session_id IN (${ids.map(() => '?').join(',')}) AND type = 'assistant' AND time_updated > ?
+      AND json_extract(data, '$.error') IS NOT NULL ORDER BY time_updated`).all(...ids, afterMs)
+  const out = []
+  for (const r of rows) {
+    let e = r.error
+    try { e = JSON.parse(r.error) } catch { /* a plain string is a message too */ }
+    const parts = typeof e === 'object' && e ? [e.type, e.message, e.status ? `HTTP ${e.status}` : null] : [String(e)]
+    out.push({ atMs: Number(r.at), text: parts.filter(Boolean).join(': ') })
+  }
+  return out
+}
+
+/** The store opened read-only, or null. The caller closes it within the same breath. */
+export function openStore(run = null) {
+  const path = storePath(run)
+  if (!existsSync(path)) return null
+  try { return new DatabaseSync(path, { readOnly: true }) } catch { return null }
+}
+
 /** The newest `time_updated` in message/part for one session — 0 when there is none. */
 function touchedAt(d, sessionId) {
   let t = 0
-  for (const table of ['message', 'part']) {
+  for (const table of ['message', 'part', 'session_message']) {
     try {
       const r = d.prepare(`SELECT MAX(time_updated) AS t FROM ${table} WHERE session_id = ?`).get(sessionId)
       if (r?.t) t = Math.max(t, Number(r.t))
@@ -122,7 +213,7 @@ export function readRun(d, directory, sinceMs) {
   const ids = sessionTree(d, directory, sinceMs)
   const out = { lastActivityMs: null, tokensIn: 0, tokensOut: 0, costUsd: null, sessions: ids.length }
   if (!ids.length) return out
-  const row = d.prepare(`SELECT cost, tokens_input, tokens_output, time_updated FROM session WHERE id = ?`)
+  const row = d.prepare(`SELECT cost, tokens_input, tokens_output, time_updated FROM ${sessionTable(d)} WHERE id = ?`)
   let newest = 0
   for (const id of ids) {
     const s = row.get(id)
@@ -153,8 +244,9 @@ export async function rootSessionId(run) {
   try {
     const { DatabaseSync } = await import('node:sqlite')
     d = new DatabaseSync(path, { readOnly: true })
-    if (!hasColumn(d, 'session', 'parent_id')) return null
-    const root = d.prepare(`SELECT id FROM session WHERE directory = ? AND time_created >= ?
+    const T = sessionTable(d)
+    if (!hasColumn(d, T, 'parent_id')) return null
+    const root = d.prepare(`SELECT id FROM ${T} WHERE directory = ? AND time_created >= ?
                             AND parent_id IS NULL ORDER BY time_created DESC LIMIT 1`).get(run.workdir_effective, since)
     return root?.id ?? null
   } catch {

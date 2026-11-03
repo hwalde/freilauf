@@ -211,6 +211,9 @@ addColumn('runs', 'start_at', 'TEXT')
 // same hit is counted again on every pass and an old hit "counts" forever.
 addColumn('runs', 'log_offset', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('runs', 'transcript_offset', 'INTEGER NOT NULL DEFAULT 0')
+// The read position in opencode's own log, per file: one file serves every run.
+db.exec(`CREATE TABLE IF NOT EXISTS opencode_log_cursor (
+  path TEXT PRIMARY KEY, ino INTEGER NOT NULL, offset INTEGER NOT NULL)`)
 // Archived: NULL = visible in the overview, set = hidden from it and only reachable
 // under the Archive page. A run is moved there when it is over ('done'/'failed'/'aborted')
 // and not needed at a glance any more — the record, its report and its log stay intact.

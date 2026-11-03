@@ -231,6 +231,8 @@
   "run.resuming_gate": "Session verloren — wird fortgesetzt, sobald das Budget-Gate öffnet ({reason})",
   "run.log": "Log (pipe-pane)",
   "run.no_log": "Kein Log.",
+  "run.chat": "Chat",
+  "run.chat_tail": "Angezeigt werden die letzten {kb} KB. Der ganze Chat steht in {path}",
   "run.running": "läuft",
   "run.followup_running": "Nachfolgeauftrag",
   "run.unknown_harness": "Unbekannter Coding Agent: {harness}",

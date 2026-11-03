@@ -7,6 +7,7 @@
 // provider API must NEVER block the form. In doubt the caller gets an outdated
 // list or none at all — the free slug input always works.
 import { execFile } from 'node:child_process'
+import { opencodeIsolationFlag } from './harnesses/cli-llm.mjs'
 import { readFileSync, rmSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
@@ -145,7 +146,7 @@ export function providerCtx(providerId = null) {
 async function opencodeCliListe() {
   const file = join(tmpdir(), `freilauf-opencode-models-${process.pid}.txt`)
   try {
-    await execFileAsync('sh', ['-c', `opencode models --pure > ${JSON.stringify(file)}`], { timeout: 120_000 })
+    await execFileAsync('sh', ['-c', `opencode models ${await opencodeIsolationFlag()} > ${JSON.stringify(file)}`], { timeout: 120_000 })
     return readFileSync(file, 'utf8')
   } finally {
     try { rmSync(file, { force: true }) } catch { /* cleanup is best-effort */ }

@@ -26,6 +26,7 @@
 //     hub that has been running for a year holds thousands of runs and an
 //     unbounded answer is one nobody can read.
 import { existsSync } from 'node:fs'
+import { syncChat } from './opencode-chat.mjs'
 import { join } from 'node:path'
 import db, { getRun, getRepo } from './db.mjs'
 import { RUNS_DIR, WORKTREES_DIR, shortId } from './util.mjs'
@@ -93,6 +94,8 @@ function runFiles(run) {
     report: one('report.md'),
     report_detail: one('report-detail.md'),
     log: one('log.txt'),
+    // opencode only: the readable conversation, from opencode's session store.
+    chat: one('chat.md'),
     detector: one('detektor.jsonl'),
     inbox: one('inbox.jsonl'),
   }
@@ -244,6 +247,8 @@ export async function readApi(req, res, url) {
       .map(ev => ({ ...ev, payload: ev.payload ? JSON.parse(ev.payload) : null }))
     const agent = run.agent_id ? db.prepare('SELECT id, name FROM agents WHERE id=?').get(run.agent_id) : null
     const repo = run.repo_id ? getRepo(run.repo_id) : null
+    // Before the file list: "read this first" must find the chat there and current.
+    syncChat(run)
     json(res, 200, {
       ok: true,
       // `report_token` is the run's bearer for the report socket (§7.6). It is a

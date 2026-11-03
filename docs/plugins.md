@@ -545,9 +545,10 @@ How the four built-ins wire it, measured 2026-09-05 (claude 2.1.261, cursor
 `PreToolUse` → `_working tool`, `Stop` → `_turn_end`, `Notification` with
 matcher `idle_prompt|permission_prompt` → `_waiting` (`claudeSettingsJson()`
 in runner.mjs); cursor `beforeSubmitPrompt` → `_working prompt`, `stop` →
-`_turn_end` (`hookFiles`); opencode `session.status` of the root session,
-busy → `_working busy`, idle → `_waiting` (the plugin
-`setup/02-install-scripts.sh` installs); hermes `pre_llm_call` → `_working
+`_turn_end` (`hookFiles`); opencode 1 `session.status` of the root session,
+busy → `_working busy`, idle → `_waiting`, opencode 2 `session.execution.started`
+and `.succeeded`/`.failed`/`.interrupted` of the root session (the plugin in the form
+`setup/02-install-scripts.sh` picks for the installed version); hermes `pre_llm_call` → `_working
 prompt`, `on_session_end` → `_turn_end`
 (`hooks:` in `~/.hermes/config.yaml`, `fl-hermes-hook`, and `--accept-hooks`
 on the launch line because hermes asks for consent per hook at the TTY).
@@ -1556,8 +1557,11 @@ traps, all of which cost time:
   source never works at all. Its input floor of 31 027 tokens is why only free
   or cheap models make sense there.
   ```js
-  ['run','--pure','--format','json','-m',`${provider}/${model}`, prompt]
+  ['run',flag,'--format','json','-m',`${provider}/${model}`, prompt]
   ```
+  `flag` is `opencodeIsolationFlag()` (cli-llm.mjs): `--pure` for opencode 1;
+  `--standalone` for opencode 2, which refuses `--pure` and would otherwise start
+  its permanent background service.
 - **opencode reports an unknown model as a server fault.** A model id it does
   not know comes back as
   `{"type":"error","name":"UnknownError","data":{"message":"Unexpected server

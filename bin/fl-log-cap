@@ -1,0 +1,113 @@
+#!/bin/sh
+# Freilauf — keeps a run's raw terminal recording small: the filter behind tmux
+# pipe-pane (bin/fl-start --log). Usage: fl-log-cap FILE [MAX_BYTES]
+#
+# Reads the pane's bytes from stdin and appends them to FILE. When FILE reaches
+# its high-water mark, the newest bytes replace it atomically, and the new file
+# opens with one header line that counts what is gone:
+#
+#     ESC _ freilauf-log-dropped=<bytes> ESC \ LF
+#
+# The count travels INSIDE the file so that one read gives both the bytes and
+# their position: runs.log_offset counts bytes ever written (server/run-log.mjs).
+#
+# Rules this script must keep (docs/requirements.md, "Sessions"):
+#  - Keep draining stdin whatever happens to FILE. tmux buffers what a stuck
+#    reader does not take, in its own memory, for every session it holds.
+#  - Never exceed MAX_BYTES. If the rename cannot work, truncate in place.
+#  - Keep at least 2 MB after a rotation at the default size: the watcher reads
+#    up to 2 MB per pass (neueBytes), so its window stays what it always was.
+#
+# Written for sh and dd rather than node: one of these runs per open session, and
+# a node process costs 44 MB where this costs about 1 MB. dd, not head: head
+# holds its output in a stdio buffer, so a short error line would not reach the
+# file until the buffer fills; dd writes each read immediately.
+#
+# conv=notrunc is what keeps the log: without it dd truncates a regular stdout to
+# its own offset when it finishes, and on an O_APPEND descriptor that had nothing
+# to write, the offset is 0. The dd that sees end of input would empty the file.
+LC_ALL=C
+export LC_ALL
+
+FILE=$1
+MAX=${2:-5000000}
+[ -n "$FILE" ] || { echo "usage: fl-log-cap FILE [MAX_BYTES]" >&2; exit 2; }
+trap '' HUP INT PIPE
+
+BLOCK=4096
+COUNT=$((MAX / 6 / BLOCK))          # one dd writes at most this many blocks
+[ "$COUNT" -ge 1 ] || COUNT=1
+HEADER_ROOM=64
+HIGH=$((MAX - COUNT * BLOCK - HEADER_ROOM))
+KEEP=$((MAX / 2))
+ESC=$(printf '\033')
+NL='
+'
+
+file_size() { wc -c 2>/dev/null <"$FILE" || echo 0; }
+
+# Sets DROPPED and HEADER_LEN from the header of FILE; both 0 when it has none.
+read_header() {
+    DROPPED=0
+    HEADER_LEN=0
+    line=$(head -c "$HEADER_ROOM" "$FILE" 2>/dev/null | tr -d '\000' | head -n 1)
+    case $line in
+        "${ESC}_freilauf-log-dropped="*"${ESC}\\")
+            n=${line#"${ESC}_freilauf-log-dropped="}
+            n=${n%"${ESC}\\"}
+            case $n in
+                ''|*[!0-9]*) ;;
+                *) DROPPED=$n; HEADER_LEN=$((${#line} + 1)) ;;
+            esac
+            ;;
+    esac
+}
+
+rotate() {
+    size=$1
+    read_header
+    dropped=$((DROPPED + size - HEADER_LEN - KEEP))
+    tmp="$FILE.cap.$$"
+    if { printf '%s_freilauf-log-dropped=%s%s\\\n' "$ESC" "$dropped" "$ESC"
+         tail -c "$KEEP" "$FILE"; } >"$tmp" 2>/dev/null && mv -f "$tmp" "$FILE" 2>/dev/null; then
+        return
+    fi
+    rm -f "$tmp" 2>/dev/null
+    # No room for a copy, or a directory that refuses the rename: give up the
+    # bytes, keep the limit and the count. Space comes back to the disk this way.
+    printf '%s_freilauf-log-dropped=%s%s\\\n' "$ESC" "$((DROPPED + size - HEADER_LEN))" "$ESC" \
+        >"$FILE" 2>/dev/null
+}
+
+# What a filter killed in mid-rotation left behind.
+rm -f "$FILE".cap.* 2>/dev/null
+
+# A resumed run from before this cap: its big log moves aside whole, and the new file
+# counts it as gone. Only a file without a header can be that, and only above the mark:
+# a smaller file cannot be told from a current one, and continues like any other.
+size=$(file_size)
+if [ "$size" -ge "$HIGH" ]; then
+    read_header
+    if [ "$HEADER_LEN" -eq 0 ] && mv -n "$FILE" "$FILE.before-cap" 2>/dev/null && [ ! -e "$FILE" ]; then
+        printf '%s_freilauf-log-dropped=%s%s\\\n' "$ESC" "$size" "$ESC" >"$FILE" 2>/dev/null
+    else
+        rotate "$size"
+    fi
+fi
+
+while :; do
+    # stderr is the capture, stdout the log. The redirect itself can fail (the
+    # run directory is gone): then there is no dd, so drain into nothing.
+    out=$(dd bs="$BLOCK" count="$COUNT" conv=notrunc 2>&1 >>"$FILE")
+    case $out in
+        *'records in'*) ;;
+        *) out=$(dd bs="$BLOCK" count="$COUNT" of=/dev/null 2>&1) ;;
+    esac
+    # A failed write still reads, so "0+0" means end of input and nothing else.
+    # Anchored to a line start: "10+0 records in" contains the same text.
+    case $out in
+        '0+0 records in'*|*"$NL"'0+0 records in'*) exit 0 ;;
+    esac
+    size=$(file_size)
+    [ "$size" -lt "$HIGH" ] || rotate "$size"
+done

@@ -16,6 +16,23 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-11-03
+
+### Added
+
+- opencode runs get a readable `chat.md` in their run directory, written from opencode's session store: the task, the answers, the tool calls with shortened input and output, subagents included, at most 2 MB. The run page, the read API and a flow's `log` source show it instead of the terminal recording; a run whose store cannot be read falls back on the recording.
+- Support for opencode 2: launch with `--standalone` and the model through the config, its new session tables in `opencode.db`, a plugin in its new form. opencode 1 keeps working, which is what the pinned sandbox image runs.
+- An opencode run's provider errors are read from opencode's own record (`opencode.log` for opencode 1, the session store for opencode 2) and assigned through its sessions, so they reach the right run.
+
+### Changed
+
+- A run's raw terminal recording `log.txt` keeps only its last ~5 MB, for every coding agent (`bin/fl-log-cap`). The opencode TUI redraws at up to 2.5 GB per hour in an error state. Sessions already running keep their old recording until they end or are resumed; a resumed run's existing log over about 4 MB is kept beside the new one as `log.txt.before-cap`.
+- A session that lost its recording filter gets it back on the next watcher pass.
+
+### Fixed
+
+- "Free usage limit reached" and "Key limit exceeded" count as a billing problem that needs a human, not as a provider outage.
+
 ## 2026-11-01
 
 ### Fixed

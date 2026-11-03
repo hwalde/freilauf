@@ -118,7 +118,7 @@ Steps never touch the database or tmux themselves — everything goes through
 Target selector (`send_message`, `kill_run`): `trigger_run`, `agent` (running runs
 of that agent), `repo`, `all_running`, `run_id` (template).
 
-`extract` sources: `report`, `log` (pipe-pane tail, cleaned), `transcript`
+`extract` sources: `report`, `log` (opencode: the chat's tail; otherwise the terminal recording's tail, cleaned), `transcript`
 (claude's JSONL — what the agent said and did, not what the terminal drew; other
 harnesses have none, so it falls back to the log), `report_and_log`, `custom`.
 
