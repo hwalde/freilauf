@@ -1,10 +1,10 @@
 // Freilauf flows — the production `api` object the steps run against. This is the
 // ONLY file in the flow module that touches the rest of the hub for side effects
 // (tmux, notifications, run creation). Tests pass a stub with the same shape.
-import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs'
+import { existsSync, statSync, openSync, readSync, closeSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import db, { addEvent } from '../db.mjs'
+import db, { addEvent, getRun } from '../db.mjs'
 import { RUNS_DIR, sh, sendToSession, shortId, tailText } from '../util.mjs'
 import { terminalText } from '../detect.mjs'
 // Imported under a different name: the api object below has a method called
@@ -14,6 +14,8 @@ import { detailUrl, publicBase } from '../util.mjs'
 import { startForAgent, startRun } from '../scheduler.mjs'
 import { extractStructured } from './llm.mjs'
 import { markStartedByFlow } from './db.mjs'
+import { syncChat, chatPath } from '../opencode-chat.mjs'
+import { readLogTail } from '../run-log.mjs'
 
 const LOG_TAIL_BYTES = 48 * 1024
 const TRANSCRIPT_TAIL_BYTES = 256 * 1024   // JSONL is verbose — more bytes than the log for the same amount of text
@@ -133,11 +135,20 @@ async function transcriptText(runId) {
   return out.join('\n\n')
 }
 
-/** Last bytes of the pipe-pane log, cleaned of escape sequences and redraw noise. */
+/**
+ * The end of what the run's agent did, as text. For an opencode run that is its
+ * chat, brought up to date here because a flow fired by the run's end reads this
+ * before the next watcher pass. Otherwise, and for an opencode run whose store
+ * cannot be read: the terminal recording, cleaned of escape sequences and redraws.
+ */
 function logTail(runId) {
+  const run = getRun(runId)
+  if (run?.harness === 'opencode' && syncChat(run)) {
+    try { return readFileSync(chatPath(runId), 'utf8').slice(-LOG_TAIL_BYTES) } catch { /* the recording below */ }
+  }
   const f = join(RUNS_DIR, runId, 'log.txt')
   if (!existsSync(f)) return ''
-  const lines = terminalText(tailBytes(f, LOG_TAIL_BYTES).text).split('\n').map(l => l.trimEnd())
+  const lines = terminalText(readLogTail(f, LOG_TAIL_BYTES)).split('\n').map(l => l.trimEnd())
   const out = []
   for (const l of lines) if (l && l !== out[out.length - 1]) out.push(l)
   return out.join('\n')

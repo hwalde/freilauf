@@ -347,7 +347,7 @@ shows how many there are. Everything else about flows: `../freilauf-flows/SKILL.
 | `<repo.path>` | the operator's own checkout |
 | `~/agents/worktrees/<repo.name>/<shortid>-<branch\|detached>` | one worktree per run. `/` in a branch name becomes `-` |
 | `~/agents/integrate/<repo.name>` | the hub's own detached merge worktree, cleaned before every job |
-| `~/agents/runs/<run id>/` | `prompt.md`, `report.md`, `log.txt`, `detektor.jsonl`, `inbox.jsonl` |
+| `~/agents/runs/<run id>/` | `prompt.md`, `report.md`, `log.txt` (last ~5 MB), `chat.md` (opencode), `detektor.jsonl`, `inbox.jsonl` |
 
 Overridable with `FREILAUF_WORKTREES_DIR`, `FREILAUF_INTEGRATE_DIR`,
 `FREILAUF_RUNS_DIR`.

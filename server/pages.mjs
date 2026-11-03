@@ -23,6 +23,8 @@ import {
 import { runTitle, titleModelsMru, rememberTitleModel, DEFAULT_TITLE_MODEL } from './title.mjs'
 import { extrasModelsMru, rememberExtrasModel, DEFAULT_EXTRAS_MODEL } from './extras-suggest.mjs'
 import { runEditAllowed } from './run-edit.mjs'
+import { syncChat, CHAT_FILE } from './opencode-chat.mjs'
+import { readLogTail } from './run-log.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
   settledAnomalies, archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
@@ -1611,6 +1613,8 @@ export async function pageRunForm(req, res, url) {
 }
 
 // ---------------- run detail page ----------------
+const PAGE_TAIL_BYTES = 100_000
+
 export async function pageRun(req, res, url, id) {
   const run = getRun(id)
   if (!run) { res.writeHead(404).end(t('run.not_found')); return }
@@ -1621,13 +1625,28 @@ export async function pageRun(req, res, url, id) {
   // Log (ANSI-cleaned), last excerpt
   const { readFileSync, existsSync, statSync } = await import('node:fs')
   const { join } = await import('node:path')
-  const logf = join(env('RUNS_DIR') ?? `${process.env.HOME}/agents/runs`, id, 'log.txt')
+  const runsDir = env('RUNS_DIR') ?? `${process.env.HOME}/agents/runs`
+  const logf = join(runsDir, id, 'log.txt')
   let logHtml = `<p class="dim">${e(t('run.no_log'))}</p>`
-  if (existsSync(logf)) {
+  let logTitle = t('run.log')
+  // An opencode run shows its chat: the recording of a full-screen TUI is 97 %
+  // escape sequences. The recording stays the answer for every other coding agent,
+  // and for an opencode run whose store cannot be read (a sandbox, an old run).
+  // A chat that does not exist yet is built here, so this also serves old runs and
+  // a hub that was down when the run ended.
+  const chatFile = join(runsDir, id, CHAT_FILE)
+  if (run.harness === 'opencode' && (!existsSync(chatFile) || (run.tmux_session && !run.tmux_closed_at))) syncChat(run)
+  if (run.harness === 'opencode' && existsSync(chatFile)) {
     try {
-      const size = statSync(logf).size
-      const raw = readFileSync(logf).subarray(Math.max(0, size - 100_000)).toString('utf8')
-      logHtml = `<pre id="log">${e(raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, ''))}</pre>`
+      const size = statSync(chatFile).size
+      const raw = readFileSync(chatFile).subarray(Math.max(0, size - PAGE_TAIL_BYTES)).toString('utf8')
+      const cut = size > PAGE_TAIL_BYTES ? `<p class="dim">${e(t('run.chat_tail', { kb: PAGE_TAIL_BYTES / 1000, path: chatFile }))}</p>` : ''
+      logHtml = `${cut}<pre id="log">${e(raw)}</pre>`
+      logTitle = t('run.chat')
+    } catch {}
+  } else if (existsSync(logf)) {
+    try {
+      logHtml = `<pre id="log">${e(readLogTail(logf, PAGE_TAIL_BYTES).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, ''))}</pre>`
     } catch {}
   }
   // "live" means: there really is an agent one can type to — a standing session
@@ -1741,7 +1760,7 @@ export async function pageRun(req, res, url, id) {
   <h3>${e(t('run.metrics'))}</h3>
   ${runMetrics(run)}
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
-  <h3>${e(t('run.log'))}</h3>${logHtml}`
+  <h3>${e(logTitle)}</h3>${logHtml}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, titel, '/', body, run.repo_id, true))
 }
 

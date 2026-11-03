@@ -436,8 +436,9 @@ run is the one it points at), `base_sha`, `merged_sha`, `expected_minutes`,
 `/api/runs/<uuid>` returns `files` with an absolute `path` and an `exists` flag
 for each, all under `~/agents/runs/<uuid>/`: **`prompt.md`** (the full prompt,
 platform rules included), **`report.md`** and **`report-detail.md`** (what the
-agent wrote), **`log.txt`** (the tmux `pipe-pane` log — everything that was on
-the agent's screen), **`detektor.jsonl`** (every incident decision with its
+agent wrote), **`log.txt`** (the tmux `pipe-pane` log — the last ~5 MB of what was
+on the agent's screen), **`chat`** → `chat.md` (opencode only: the readable
+conversation with shortened tool output, read this first), **`detektor.jsonl`** (every incident decision with its
 reasoning) and **`inbox.jsonl`** (reports that could not reach the hub; the
 watcher replays them). `worktree.path` in the same answer is where the agent
 actually works.

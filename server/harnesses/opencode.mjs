@@ -5,11 +5,11 @@
 // through without an own key) and OpenRouter (needs a key). Effort is passed
 // via OPENCODE_CONFIG_CONTENT with agent.build.{model,variant} — the variant
 // only takes effect when the model is set in the SAME block.
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { HTTP_5XX } from './patterns.mjs'
-import { runCli, cliFailure, cliLines, ndjson } from './cli-llm.mjs'
+import { runCli, cliFailure, cliLines, ndjson, opencodeIsolationFlag } from './cli-llm.mjs'
 import { quantizationsFrom } from '../providers/openrouter-routing.mjs'
 
 // A model provider's descriptor — never through a static import.
@@ -48,6 +48,8 @@ const plugin = {
   /**
    * How bin/fl-start calls this CLI (see claude.mjs for why the built-in `case`
    * in that script, not this block, is what an opencode run is launched from).
+   * This is the opencode 1 form; fl-start adapts it to opencode 2 (`--standalone`,
+   * the model through the config).
    *
    * Two things here are not decoration. `stderrLog`: opencode writes the MCP
    * servers' schema warnings ("unknown format … ignored") to stderr, right into
@@ -255,10 +257,14 @@ const plugin = {
      */
     seedHome({ spec = {} } = {}) {
       const files = []
+      // The image is pinned to opencode 1, so it gets the v1 bridge. Under an opencode 2
+      // host, plugins/freilauf.js is the v2 one, which v1 cannot load; setup keeps the
+      // v1 copy beside it, outside the directory opencode scans.
+      const v1Copy = join(homedir(), '.config', 'opencode', 'freilauf-v1-plugin.js')
       const bridge = join(homedir(), '.config', 'opencode', 'plugins', 'freilauf.js')
       let content
       try {
-        content = readFileSync(bridge, 'utf8')
+        content = readFileSync(existsSync(v1Copy) ? v1Copy : bridge, 'utf8')
       } catch {
         throw new Error(`opencode: ${bridge} is missing — run setup/02-install-scripts.sh. `
           + 'Without the bridge a sandboxed opencode run reports neither its attention nor its API errors.')
@@ -282,6 +288,11 @@ const plugin = {
   pulseTargets: {},
 
   logPatterns: [
+    // First, because the line also carries AI_APICallError, which would read as an
+    // outage: opencode: AI_APICallError: Free usage limit reached. …
+    // opencode 2's dialog says it in other words: "Free limit reached", "You've used
+    // today's free messages".
+    { typ: 'billing_error', re: /free usage (limit reached|exceeded)|free limit reached|used today's free messages|key limit exceeded/i },
     // opencode: AI_APICallError: [Stealth] stealth/ox-alpha is temporarily rate-limited upstream.
     { typ: 'rate_limit', re: /rate.?limited|rate limit|\b429\b|too many requests/i },
     { typ: 'auth_error', re: /\b(401|403)\b|unauthori[sz]ed|invalid api key|authentication/i },
@@ -308,12 +319,12 @@ const plugin = {
     /** `opencode models --pure` — the same source the run form uses, and the same
      * detour through a file, because a pipe loses lines at process exit. */
     async models() {
-      return (await cliLines('opencode models --pure')).map(id => ({ id, name: id }))
+      return (await cliLines(`opencode models ${await opencodeIsolationFlag()}`)).map(id => ({ id, name: id }))
     },
 
     async complete(ctx, req = {}) {
       const prompt = req.system ? `${req.system}\n\n${req.prompt ?? ''}` : String(req.prompt ?? '')
-      const args = ['run', '--pure', '--format', 'json']
+      const args = ['run', await opencodeIsolationFlag(), '--format', 'json']
       if (req.model) args.push('-m', String(req.model))
       args.push(prompt)
       const r = await runCli('opencode', args, { timeoutMs: req.timeoutMs ?? 180_000 })

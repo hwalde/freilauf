@@ -20,6 +20,7 @@ mere screen text on another.
 | claude `StopFailure` hook → `fl-report _api_error` | claude | **red** — a fixed vendor enum, no guessing |
 | claude transcript JSONL (`isApiErrorMessage`, `error`) | claude | **red**, with a timestamp |
 | opencode plugin `session.error` → `fl-report _api_error` | opencode | **red** |
+| opencode's own record of provider errors, by session: `opencode.log` (v1), the session store (v2) | opencode | **yellow** |
 | the tmux `pipe-pane` log, scanned per harness pattern | all — and the **only** source for hermes and cursor | **yellow** |
 | provider pulse, every 5 minutes | global | red after 2 failures, closes on recovery |
 
@@ -29,7 +30,7 @@ hub deliberately answers "not monitored" for cursor rather than "healthy".
 cursor does at least reject an unknown model loudly and by name.
 
 The log and the transcript are read **by byte offset** (`runs.log_offset`,
-`runs.transcript_offset`), so every line is counted exactly once. Every decision
+`runs.transcript_offset`), so every line is counted exactly once. `log.txt` itself keeps only its last ~5 MB, and `log_offset` still counts everything ever written. Every decision
 the detector made is appended to `~/agents/runs/<uuid>/detektor.jsonl` — read
 that file when you want to know *why* an incident exists.
 

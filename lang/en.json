@@ -231,6 +231,8 @@
   "run.resuming_gate": "session lost — resuming once the budget gate opens ({reason})",
   "run.log": "Log (pipe-pane)",
   "run.no_log": "No log.",
+  "run.chat": "Chat",
+  "run.chat_tail": "Showing the last {kb} KB. The whole chat is in {path}",
   "run.running": "running",
   "run.followup_running": "follow-up",
   "run.unknown_harness": "Unknown coding agent: {harness}",

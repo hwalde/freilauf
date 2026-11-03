@@ -107,6 +107,10 @@ export function isSessionStopped(text) {
 export function typeFromText(text) {
   const t = String(text ?? '')
   if (/\b(401|403)\b|authentication|unauthori[sz]ed|invalid (api )?key|api key (is )?(invalid|missing)|please run \/login|oauth/i.test(t)) return 'auth_error'
+  // Before the rate limit below, which also matches "usage limit". A free tier that
+  // is used up does not pass by retrying; measured wording of opencode Zen:
+  // "Free usage limit reached. Free models work in OpenCode …"
+  if (/free usage (limit reached|exceeded)|free[.-]limit|key limit exceeded/i.test(t)) return 'billing_error'
   if (/\b402\b|billing|insufficient (credits|funds|balance)|credit balance|account (is )?on hold|payment/i.test(t)) return 'billing_error'
   // Narrow like every pattern in this module: each alternative names money or
   // the key's own spend cap, never a bare "limit".

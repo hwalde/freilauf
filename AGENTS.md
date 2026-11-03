@@ -77,8 +77,8 @@ incomplete, may be empty). License CC BY 4.0.
    sandboxed, safe next to a live hub) always; `test/browser.mjs` for
    `public/hub.js`, `test/proxy.mjs` for `vpn-proxy.mjs`,
    `test/proxy-egress.mjs` for the sandbox proxy, `test/deploy.mjs` for
-   `bin/freilauf-deploy`. The suites own the watcher, integrator and container
-   clocks (`FREILAUF_WATCHER_OFF`, `FREILAUF_INTEGRATOR_OFF`,
+   `bin/freilauf-deploy`, `test/log-cap.mjs` for `bin/fl-log-cap`. The suites own
+   the watcher, integrator and container clocks (`FREILAUF_WATCHER_OFF`, `FREILAUF_INTEGRATOR_OFF`,
    `FREILAUF_SANDBOX_REAPER_OFF`) and point every path and credential into
    their sandbox; a new external dependency of the hub gets its own
    `FREILAUF_*` fence there.
@@ -109,7 +109,8 @@ only `PASS` ends the task.
 | Reports, follow-ups, attention state | `server/reports.mjs`, `bin/fl-report`, `server/hub-socket.mjs`, `server/goal.mjs` | Reports and follow-ups; Attention |
 | The deputy, the daily digest, rich messages | `server/triage.mjs`, `server/digest.mjs`, `server/report-context.mjs`, `server/rich.mjs`, `server/report-pages.mjs` | Notifications: deputy and daily digest (+ `docs/plugins.md`) |
 | Extra skills, the cleanup agent, model catalogs, extras suggestion | `server/zusaetze.mjs`, `server/cleanup.mjs`, `server/models.mjs`, `server/extras-suggest.mjs` | Run definition |
-| Watching, anomalies, incidents | `server/watcher.mjs`, `server/detect.mjs`, `server/incidents.mjs` | Watcher and incidents |
+| Watching, anomalies, incidents | `server/watcher.mjs`, `server/detect.mjs`, `server/incidents.mjs`, `server/opencode-log.mjs` | Watcher and incidents |
+| Raw recording and its cap, opencode's chat | `bin/fl-log-cap`, `server/run-log.mjs`, `server/opencode-chat.mjs`, `server/opencode-store.mjs` | Sessions; Pages and live channel |
 | Merging into the base branch | `server/integrate.mjs` | Integration |
 | Code review, review platforms | `server/review.mjs`, `server/review-platforms/` | Code review (+ `docs/plugins.md`) |
 | tmux sessions, retention, memory | `server/sessions.mjs`, `server/terminal.mjs` | Sessions |

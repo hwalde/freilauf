@@ -26,6 +26,10 @@ import { abandonFollowUp } from './reports.mjs'
 import { specOf } from './sandbox/exec.mjs'
 import { t } from './i18n.mjs'
 import { env } from './env.mjs'
+import { syncChat } from './opencode-chat.mjs'
+import { existsSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { homedir } from 'node:os'
 
 // session_path is free text and comes LAST, so a tab inside it cannot shift
 // any other field (the parser rejoins the remainder).
@@ -859,6 +863,7 @@ export function refreshSessionMemoryAfterRun(runId) {
 export function reconcileClosedSession(runId, source = 'session') {
   const run = getRun(runId)
   if (!run) return null
+  syncChat(run)     // the session's last words are in the store now
   db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')),
               agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(runId)
   // THE THIRD CASE, and it is neither of the two the rule above names. "A
@@ -1052,3 +1057,24 @@ export function autoCloseCandidates(sessions, keepMs, nowMs = Date.now()) {
 
 /** The keep time in force right now (watcher and settings page read the same value). */
 export function currentKeepMs() { return sessionKeepMs(allSettings()) }
+
+/**
+ * Put a running session's recording back when its filter is gone. tmux just closes
+ * the pipe when the reader dies, the agent never notices, and for hermes and cursor
+ * that recording is the only error source: a session without one is a blind hub.
+ * Only an exact "pipe off, pane alive" acts; tmux not answering is not that. A session
+ * still recording through its old `cat` has a pipe and is left alone. No cap script
+ * (a suite's stub launcher) means nothing to put back.
+ */
+export async function ensureLogPipe(run) {
+  if (!run?.tmux_session || run.tmux_closed_at) return false
+  const r = await sh('tmux', ['display-message', '-p', '-t', paneTarget(run.tmux_session), '#{pane_pipe} #{pane_dead}'])
+  if (!r.ok || r.stdout.trim() !== '0 0') return false
+  const cap = join(dirname(env('START_SCRIPT') ?? `${homedir()}/.local/bin/fl-start`), 'fl-log-cap')
+  if (!existsSync(cap)) return false
+  const q = (s) => `'${String(s).replaceAll("'", "'\\''")}'`
+  const logf = join(env('RUNS_DIR') ?? `${homedir()}/agents/runs`, run.id, 'log.txt')
+  const armed = await sh('tmux', ['pipe-pane', '-o', '-t', paneTarget(run.tmux_session), `exec ${q(cap)} ${q(logf)}`])
+  addEvent(run.id, 'log_pipe_restored', { ok: armed.ok })
+  return armed.ok
+}

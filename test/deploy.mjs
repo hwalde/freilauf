@@ -377,14 +377,28 @@ try {
       // would report every idle and every API error twice.
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, 'cc-hub.js'), '// the old one\n')
-      sh('bash', [join(PROJECT, 'setup', '02-install-scripts.sh')], {
-        env: { ...process.env, HOME, PATH: `${SHIM}:${process.env.PATH}`, FREILAUF_SKIP_EXTRAS: '1' },
-      })
+      // Which plugin form lands depends on the opencode it finds, and this must not
+      // depend on the one that happens to be installed on the machine running the suite.
+      const fakeOc = join(HOME, 'fake-opencode')
+      const install = (version) => {
+        mkdirSync(fakeOc, { recursive: true })
+        writeFileSync(join(fakeOc, 'opencode'), `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 })
+        sh('bash', [join(PROJECT, 'setup', '02-install-scripts.sh')], {
+          env: { ...process.env, HOME, PATH: `${fakeOc}:${SHIM}:${process.env.PATH}`, FREILAUF_SKIP_EXTRAS: '1' },
+        })
+      }
+      install('1.19.5')
       isFalse(existsSync(join(dir, 'cc-hub.js')), 'the old plugin file is gone')
       isTrue(existsSync(join(dir, 'freilauf.js')), 'and the new one is there')
       const js = readFileSync(join(dir, 'freilauf.js'), 'utf8')
       contains(js, 'export const Freilauf', 'exported under the new name')
       contains(js, 'process.env.CC_RUN_ID', 'and it still reads the old run-id variable')
+      install('opencode v2.2.5')
+      const v2 = readFileSync(join(dir, 'freilauf.js'), 'utf8')
+      contains(v2, 'export default', 'opencode 2 gets the form it can load')
+      contains(v2, 'process.env.CC_RUN_ID', 'with the old run-id variable too')
+      contains(readFileSync(join(HOME, '.config', 'opencode', 'freilauf-v1-plugin.js'), 'utf8'),
+        'export const Freilauf', 'and the v1 form stays for a sandbox image pinned to opencode 1')
     })
 
     // ------------------------------------------------------------------

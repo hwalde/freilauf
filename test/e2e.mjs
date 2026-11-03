@@ -1923,6 +1923,237 @@ try {
   }
 
   // ------------------------------------------------------------------
+  group('opencode: chat, own log, capped recording')
+
+  const { DatabaseSync: OcStoreDb } = await import('node:sqlite')
+  const OC_DB = process.env.FREILAUF_OPENCODE_DB
+  const OC_LOG = process.env.FREILAUF_OPENCODE_LOG
+  const ocFixture = (rows) => {
+    const d = new OcStoreDb(OC_DB)
+    d.exec(`CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, cost REAL,
+              tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+            CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);`)
+    const now = Date.now()
+    for (const s of rows.sessions) {
+      d.prepare(`INSERT OR REPLACE INTO session(id, parent_id, directory, title, time_created, time_updated) VALUES(?,?,?,?,?,?)`)
+        .run(s.id, s.parent ?? null, s.dir, s.title, now, now)
+    }
+    let n = Number(d.prepare('SELECT COUNT(*) AS n FROM part').get().n)
+    for (const p of rows.parts ?? []) {
+      n++
+      d.prepare(`INSERT INTO message(id, session_id, time_created, time_updated, data) VALUES(?,?,?,?,?)`)
+        .run(`msg${n}`, p.session, now + n, now + n, JSON.stringify({ role: p.role }))
+      d.prepare(`INSERT INTO part(id, message_id, session_id, time_created, time_updated, data) VALUES(?,?,?,?,?,?)`)
+        .run(`prt${n}`, `msg${n}`, p.session, now + n, now + n, JSON.stringify(p.data))
+    }
+    d.close()
+  }
+  const ocRun = async (prompt) => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'opencode', prompt })
+    await sessionMerken(j.runId)
+    return db.prepare('SELECT * FROM runs WHERE id=?').get(j.runId)
+  }
+  const stopRun = (id) => db.prepare(`UPDATE runs SET status='aborted', ended_at=datetime('now') WHERE id=?`).run(id)
+  // The format opencode 1.19.5 writes, the wording it really used; the ids are invented.
+  const freeUsageLine = (session, at = new Date().toISOString()) =>
+    `timestamp=${at} level=ERROR run=0abc1234 message="stream error" providerID=opencode modelID=some-free-model `
+    + `session.id=${session} small=false agent=build mode=primary error.error="AI_APICallError: Free usage limit reached. `
+    + `Free models work in OpenCode (https://example.invalid); subscribe to keep going: https://example.invalid/go"\n`
+
+  await check('the run page, the read API and a flow read an opencode run\'s chat, not its recording', async () => {
+    const run = await ocRun('E2E-Chat')
+    ocFixture({
+      sessions: [
+        { id: 'ses_chat_root', dir: run.workdir_effective, title: 'Main work' },
+        { id: 'ses_chat_sub', parent: 'ses_chat_root', dir: run.workdir_effective, title: 'Check a thing (@helper subagent)' },
+      ],
+      parts: [
+        { session: 'ses_chat_root', role: 'user', data: { type: 'text', text: 'Please do the marked task' } },
+        { session: 'ses_chat_root', role: 'assistant', data: { type: 'tool', tool: 'bash',
+          state: { status: 'completed', input: { command: 'echo hello' }, output: 'x'.repeat(50_000) } } },
+        { session: 'ses_chat_sub', role: 'assistant', data: { type: 'text', text: 'Answer from the helper' } },
+        { session: 'ses_chat_root', role: 'assistant', data: { type: 'step-finish', reason: 'stop' } },
+      ],
+    })
+    logAnhaengen(run.id, '\x1b[31mRECORDING-NOISE\x1b[0m\n')
+    await watcherTick()
+    const f = join(SB, 'runs', run.id, 'chat.md')
+    isTrue(existsSync(f), 'the watcher wrote the chat')
+    equal(lstatSync(f).mode & 0o777, 0o600, 'readable by the hub account only')
+    const text = readFileSync(f, 'utf8')
+    contains(text, 'Please do the marked task', 'the task')
+    contains(text, '> bash {"command":"echo hello"}', 'the tool call')
+    contains(text, 'characters left out', 'the output shortened')
+    isTrue(text.length < 5000, `small next to the 50 KB output (${text.length})`)
+    contains(text, 'subagent: Check a thing', 'the subagent is in it')
+    const page = await fetchPath(`/runs/${run.id}`).then(r => r.text())
+    contains(page, 'Please do the marked task', 'the page shows the chat')
+    isFalse(page.includes('RECORDING-NOISE'), 'instead of the recording')
+    const api = await fetchPath(`/api/read/runs/${run.id}`).then(r => r.ok ? r.json() : null).catch(() => null)
+    if (api?.files) isTrue(api.files.chat.exists, 'the read API names the file')
+    const { actions } = await import('../server/flows/actions.mjs')
+    contains(await actions.runText(run.id, 'log'), 'Please do the marked task', 'a flow gets the chat')
+    stopRun(run.id)
+  })
+
+  await check('a run whose store has nothing yet, and an old run, keep showing what they have', async () => {
+    // The recording as the fallback: an opencode run with no session in the store
+    // is also what a sandbox whose home the hub cannot read looks like.
+    const raw = await ocRun('E2E-Chat-Fallback')
+    logAnhaengen(raw.id, '\x1b[31mOLD-RECORDING-VISIBLE\x1b[0m\n')
+    const page = await fetchPath(`/runs/${raw.id}`).then(r => r.text())
+    contains(page, 'OLD-RECORDING-VISIBLE', 'the recording, without its colour codes')
+    isFalse(page.includes('[31m'), 'cleaned')
+    // No log.txt at all: the state of the runs cleaned up by hand.
+    rmSync(join(SB, 'runs', raw.id, 'log.txt'), { force: true })
+    const res = await fetchPath(`/runs/${raw.id}`)
+    equal(res.status, 200, 'the page still answers')
+    await watcherTick()      // and so does the scanner
+    const { actions } = await import('../server/flows/actions.mjs')
+    isTrue(typeof await actions.runText(raw.id, 'log') === 'string', 'and a flow')
+    stopRun(raw.id)
+  })
+
+  await check('"Free usage limit reached" in opencode\'s own log opens an incident on its run, and only there', async () => {
+    const mine = await ocRun('E2E-OcLog-mine')
+    const other = await ocRun('E2E-OcLog-other')
+    ocFixture({ sessions: [
+      { id: 'ses_log_mine', dir: mine.workdir_effective, title: 'mine' },
+      { id: 'ses_log_mine_sub', parent: 'ses_log_mine', dir: mine.workdir_effective, title: 'sub' },
+      { id: 'ses_log_other', dir: other.workdir_effective, title: 'other' },
+    ] })
+    writeFileSync(OC_LOG, 'timestamp=2026-01-01T00:00:00.000Z level=INFO run=0abc1234 message=noise\n')
+    await watcherTick()
+    equal(vorfaelle(mine.id).length, 0, 'nothing yet')
+
+    writeFileSync(OC_LOG, freeUsageLine('ses_log_mine'), { flag: 'a' })
+    await watcherTick()
+    const v = vorfaelle(mine.id)
+    equal(v.length, 1, 'one incident on the run the session belongs to')
+    equal(v[0].typ, 'billing_error', 'a used-up allowance, not a provider outage')
+    equal(v[0].quelle, 'log:opencode', 'from this source')
+    equal(v[0].schwere, 'gelb', 'starting yellow like every log hit')
+    contains(v[0].beleg, 'Free usage limit reached', 'the evidence')
+    equal(vorfaelle(other.id).length, 0, 'none on the other run')
+
+    await watcherTick()
+    equal(vorfaelle(mine.id)[0].anzahl, 1, 'only new bytes: the same line does not count again')
+
+    // Through the same assessment as every other log hit: no activity since → red.
+    db.prepare(`UPDATE incidents SET zuletzt_gesehen=datetime('now','-6 minutes'), erst_gesehen=datetime('now','-6 minutes') WHERE run_id=?`).run(mine.id)
+    db.prepare(`UPDATE runs SET last_activity_at=datetime('now','-7 minutes') WHERE id=?`).run(mine.id)
+    // A hung session is one whose rows stand still, and the store is what activity reads.
+    const hung = new OcStoreDb(OC_DB)
+    hung.prepare('UPDATE session SET time_updated = ?').run(Date.now() - 7 * 60_000)
+    hung.close()
+    await watcherTick()
+    equal(vorfaelle(mine.id)[0].schwere, 'rot', 'assessIncidents takes it from here')
+
+    // A subagent's session belongs to the run as well, and the line still half
+    // written waits for its end.
+    const half = freeUsageLine('ses_log_other')
+    writeFileSync(OC_LOG, half.slice(0, 80), { flag: 'a' })
+    await watcherTick()
+    equal(vorfaelle(other.id).length, 0, 'half a line is no line')
+    writeFileSync(OC_LOG, half.slice(80), { flag: 'a' })
+    await watcherTick()
+    equal(vorfaelle(other.id).length, 1, 'the completed line counts')
+
+    // Rotation: a new file under the same name, smaller than the old offset.
+    rmSync(OC_LOG)
+    db.prepare(`UPDATE incidents SET geloest_am=datetime('now','-1 minutes') WHERE run_id=?`).run(other.id)
+    writeFileSync(OC_LOG, freeUsageLine('ses_log_other'))
+    await watcherTick()
+    equal(vorfaelle(other.id)[0].geloest_am, null, 'the rotated file is read from its start')
+    // The title model failing stops nothing, and is not this run's problem.
+    const before = vorfaelle(mine.id)[0].anzahl
+    writeFileSync(OC_LOG, freeUsageLine('ses_log_mine').replace('small=false', 'small=true'), { flag: 'a' })
+    await watcherTick()
+    equal(vorfaelle(mine.id)[0].anzahl, before, 'small=true is ignored')
+    stopRun(mine.id); stopRun(other.id)
+    // These stay open on an aborted run by design, and the sidebar checks further
+    // down count what is open.
+    db.prepare(`UPDATE incidents SET geloest_am=datetime('now') WHERE run_id IN (?, ?)`).run(mine.id, other.id)
+    rmSync(OC_LOG, { force: true })
+    for (const s of ['', '-wal', '-shm']) rmSync(OC_DB + s, { force: true })
+  })
+
+  await check('opencode 2: a refusal in the store opens the incident on its run, the page reads the new tables', async () => {
+    const mine = await ocRun('E2E-Oc2-mine')
+    const other = await ocRun('E2E-Oc2-other')
+    const d = new OcStoreDb(OC_DB)
+    d.exec(`CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
+            CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);`)
+    const now = Date.now()
+    const ses = d.prepare(`INSERT INTO session_v2(id, directory, title, time_created, time_updated) VALUES(?,?,?,?,?)`)
+    ses.run('ses_v2_mine', mine.workdir_effective, 'mine', now, now)
+    ses.run('ses_v2_other', other.workdir_effective, 'other', now, now)
+    const msg = d.prepare(`INSERT INTO session_message VALUES(?,?,?,?,?,?,?)`)
+    msg.run('m1', 'ses_v2_mine', 'user', 1, now, now, JSON.stringify({ text: 'THE-V2-TASK' }))
+    msg.run('m2', 'ses_v2_other', 'assistant', 1, now + 1, now + 1, JSON.stringify({ content: [{ type: 'text', text: 'fine' }] }))
+    msg.run('m3', 'ses_v2_mine', 'assistant', 2, now + 2, now + 2, JSON.stringify({ content: [], finish: 'error',
+      error: { type: 'provider.free-limit', message: 'Free usage limit reached.', status: 429 } }))
+    d.close()
+    await watcherTick()
+    const v = vorfaelle(mine.id)
+    equal(v.length, 1, 'one incident on the run')
+    equal(v[0].typ, 'billing_error', 'a used-up allowance')
+    equal(vorfaelle(other.id).length, 0, 'none on the other run')
+    await watcherTick()
+    equal(vorfaelle(mine.id)[0].anzahl, 1, 'one row is one occurrence')
+    const page = await fetchPath(`/runs/${mine.id}`).then(r => r.text())
+    contains(page, 'THE-V2-TASK', 'the chat from session_message')
+    stopRun(mine.id); stopRun(other.id)
+    db.prepare(`UPDATE incidents SET geloest_am=datetime('now') WHERE run_id IN (?, ?)`).run(mine.id, other.id)
+    for (const s of ['', '-wal', '-shm']) rmSync(OC_DB + s, { force: true })
+  })
+
+  await check('a capped recording: the offset survives the cut, a hit after it is found once', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'hermes', prompt: 'E2E-Cap' })
+    await sessionMerken(j.runId)
+    await watcherTick()
+    const f = join(SB, 'runs', j.runId, 'log.txt')
+    const header = (n) => `\x1b_freilauf-log-dropped=${n}\x1b\\\n`
+    // Exactly what fl-log-cap leaves: the run printed 50 MB, the end is here.
+    writeFileSync(f, header(50_000_000) + 'quiet line\nRateLimitError (HTTP 429)\n')
+    await watcherTick()
+    const v = vorfaelle(j.runId)
+    equal(v.length, 1, 'the hit after the cut')
+    equal(v[0].typ, 'rate_limit', 'with its type')
+    const off = db.prepare('SELECT log_offset AS o FROM runs WHERE id=?').get(j.runId).o
+    equal(off, 50_000_000 + 'quiet line\nRateLimitError (HTTP 429)\n'.length, 'the offset counts everything ever written')
+    // The same bytes rotated again: the file shrank, the position did not move.
+    writeFileSync(f, header(50_000_000 + 11) + 'RateLimitError (HTTP 429)\n')
+    await watcherTick()
+    equal(vorfaelle(j.runId)[0].anzahl, 1, 'a rotation is not a new line')
+    stopRun(j.runId)
+    db.prepare(`UPDATE incidents SET geloest_am=datetime('now') WHERE run_id = ?`).run(j.runId)
+  })
+
+  await check('a session that lost its recording filter gets it back, and the agent never notices', async () => {
+    const j = await laufStarten({ repo_id: repoId, harness: 'hermes', prompt: 'E2E-Rearm' })
+    await sessionMerken(j.runId)
+    const run = db.prepare('SELECT * FROM runs WHERE id=?').get(j.runId)
+    const { ensureLogPipe } = await import('../server/sessions.mjs')
+    const target = `=${run.tmux_session}:`
+    equal(await ensureLogPipe(run), false, 'a session with a pipe is left alone')
+    await sh('tmux', ['pipe-pane', '-t', target])     // what a dead reader leaves behind
+    const saved = process.env.FREILAUF_START_SCRIPT
+    process.env.FREILAUF_START_SCRIPT = join(PROJECT, 'bin', 'fl-start')
+    try {
+      equal(await ensureLogPipe(run), true, 'put back')
+    } finally {
+      if (saved === undefined) delete process.env.FREILAUF_START_SCRIPT
+      else process.env.FREILAUF_START_SCRIPT = saved
+    }
+    const r = await sh('tmux', ['display-message', '-p', '-t', target, '#{pane_pipe}'])
+    equal(r.stdout.trim(), '1', 'tmux says the pipe is on')
+    stopRun(j.runId)
+  })
+
+  // ------------------------------------------------------------------
   group('Sessions page: list, end, and the run that hung on it')
 
   {

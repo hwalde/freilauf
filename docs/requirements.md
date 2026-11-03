@@ -346,6 +346,10 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 
 ## Pages and live channel
 
+- An opencode run's page shows its `chat.md`, every other run's its recording; no
+  chat and no log is a state, not an error. `chat.md` covers ALL root sessions of the
+  run and their subagents, stays at or under 2 MB keeping start and end, is complete
+  when the run ends, and has mode 600 because it holds tool output.
 - The hub has no authentication and binds `127.0.0.1` only; `vpn-proxy.mjs`
   binds exclusively to the VPN address (fail-closed: its unit is not enabled
   at boot), and its host allowlist plus origin check are the rebinding/CSRF
@@ -629,6 +633,13 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 
 ## Watcher and incidents
 
+- An opencode provider error reaches the run whose session it belongs to, and no
+  other: `opencode.log` for opencode 1, the store for opencode 2, only new bytes or
+  rows, through a claimed cursor. It starts yellow and goes through
+  `assessIncidents`. The recording's scan stays next to it, because a sandbox or
+  another version can leave this source empty.
+- opencode's store and log are only read, never locked and never held open across
+  a pass.
 - `tick()` has a re-entrancy guard and `claimOffset()` names the log offset it
   replaces, so two readers cannot report one line twice.
 - A hub-ended session is not a provider fault (`isSessionStopped()`); a hook
@@ -673,6 +684,12 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 
 ## Sessions
 
+- A run's `log.txt` stays at or under 5 MB (`bin/fl-log-cap`, for every coding
+  agent) and at or over 2 MB after a cut, because the watcher reads up to 2 MB per
+  pass. The filter never stops draining stdin and never takes the session with it;
+  a running session that lost it gets it back (`ensureLogPipe()`).
+- `runs.log_offset` counts every byte the run ever printed; the file's header says
+  how many are gone, and only `server/run-log.mjs` translates between the two.
 - `tmuxVerdict()` answers `ok`/`no_server`/`unreachable`; `sessionGone()` is
   tri-state and the watcher skips a run on `null`; a live run's disappearance
   is confirmed by `has-session`; `tmux_gone` and `tmux_unreachable` are global

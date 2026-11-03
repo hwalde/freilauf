@@ -1783,6 +1783,281 @@ try {
   })
 
   // ------------------------------------------------------------------
+
+  group('The capped recording: reading across the cut (run-log.mjs)')
+
+  const { readLogFrom, readLogTail } = await import('../server/run-log.mjs')
+  const capFile = (name, body) => { const f = join(sandbox, name); writeFileSync(f, body); return f }
+  const capHeader = (n) => `\x1b_freilauf-log-dropped=${n}\x1b\\\n`
+
+  await check('a file without a header reads as it always did', () => {
+    const f = capFile('plain.log', 'one\ntwo\n')
+    const r = readLogFrom(f, 4)
+    equal(r.text, 'two\n', 'from the offset')
+    equal(r.size, 8, 'its size')
+    equal(r.von, 4, 'its position')
+    equal(r.uebersprungen, 0, 'nothing lost')
+    equal(readLogFrom(f, 8).text, '', 'nothing new')
+    equal(readLogFrom(f, 100).von, 0, 'an offset past the end: recreated, start over')
+    equal(readLogTail(f, 4), 'two\n', 'the tail')
+  })
+
+  await check('a position counts everything ever written, not the file', () => {
+    const f = capFile('capped.log', capHeader(1000) + 'abcdefgh')
+    const inside = readLogFrom(f, 1004)
+    equal(inside.text, 'efgh', 'mapped into the file')
+    equal(inside.size, 1008, 'the size is the whole recording')
+    const before = readLogFrom(f, 10)
+    equal(before.text, 'abcdefgh', 'an offset that was cut away reads what is left')
+    equal(before.uebersprungen, 990, 'and says how much is gone')
+    equal(before.von, 1000, 'position of the first byte returned')
+    equal(readLogFrom(f, 1008).text, '', 'at the end: nothing, and no restart')
+    equal(readLogFrom(f, 2000).von, 1000, 'past the end: recreated')
+    equal(readLogTail(f, 100), 'abcdefgh', 'the tail never shows the header')
+    equal(readLogTail(f, 3), 'fgh', 'and is the end')
+    equal(readLogFrom(f, 1000, 3).text, 'fgh', 'the newest bytes when over the limit')
+  })
+
+  await check('a cut through a UTF-8 character does not move the offset past the bytes', () => {
+    const f = capFile('utf8.log', 'aé\n')             // 'é' is two bytes, the cut lands between them
+    const r = readLogFrom(f, 0, 2)
+    equal(r.text, '\n', 'the broken half is dropped')
+    equal(r.von + Buffer.byteLength(r.text), r.size, 'position plus length is the end of the file')
+  })
+
+  await check('unreadable means an exception for the caller, not an empty log', () => {
+    let threw = false
+    try { readLogFrom(join(sandbox, 'no-such.log'), 0) } catch { threw = true }
+    isTrue(threw, 'the watcher returns early on it')
+  })
+
+  group('opencode: the chat file and its own log (opencode-chat.mjs, opencode-log.mjs)')
+
+  const { renderChat, syncChat, chatPath, CHAT_MAX_BYTES } = await import('../server/opencode-chat.mjs')
+  const { runSessionIds } = await import('../server/opencode-store.mjs')
+  const { errorLines, parseLogfmt } = await import('../server/opencode-log.mjs')
+  const { typeFromText: ocType, scanLines: ocScan } = await import('../server/detect.mjs')
+  const { DatabaseSync: ChatDb } = await import('node:sqlite')
+  const chatStore = (sessions, parts) => {
+    const f = join(sandbox, `chat-${Math.random().toString(36).slice(2)}.db`)
+    const d = new ChatDb(f)
+    d.exec(`CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);`)
+    for (const s of sessions) {
+      d.prepare('INSERT INTO session VALUES(?,?,?,?,?,?)').run(s.id, s.parent ?? null, s.dir ?? '/wt/x', s.title ?? s.id, s.at ?? 1000, s.at ?? 1000)
+    }
+    let n = 0
+    for (const p of parts) {
+      n++
+      const at = p.at ?? 2000 + n
+      d.prepare('INSERT INTO message VALUES(?,?,?,?,?)').run(`m${n}`, p.s, at, at, JSON.stringify({ role: p.role ?? 'assistant', ...(p.error ? { error: p.error } : {}) }))
+      if (p.data) d.prepare('INSERT INTO part VALUES(?,?,?,?,?,?)').run(`p${String(n).padStart(6, '0')}`, `m${n}`, p.s, at, at, JSON.stringify(p.data))
+    }
+    return { file: f, d }
+  }
+
+  await check('a chat has the task, the answers, the shortened tools, and no noise', () => {
+    const { d } = chatStore([{ id: 'root', title: 'Main' }, { id: 'kid', parent: 'root', title: 'Helper' }], [
+      { s: 'root', role: 'user', data: { type: 'text', text: 'THE-TASK' } },
+      { s: 'root', data: { type: 'reasoning', text: 'HIDDEN-THOUGHT' } },
+      { s: 'root', data: { type: 'step-start' } },
+      { s: 'root', data: { type: 'tool', tool: 'read', state: { status: 'completed', input: { filePath: 'a'.repeat(1000) }, output: 'START' + 'o'.repeat(10_000) + 'THE-END' } } },
+      { s: 'kid', data: { type: 'text', text: 'KID-ANSWER' } },
+      { s: 'root', data: { type: 'tool', tool: 'bash', state: { status: 'error', input: { command: 'false' }, error: 'it failed' } } },
+      { s: 'root', data: { type: 'tool', tool: 'bash', state: { status: 'running', input: { command: 'sleep 1' } } } },
+      { s: 'root', error: { name: 'APIError', data: { message: 'MESSAGE-ERROR' } } },
+    ])
+    const t = renderChat(d, ['root', 'kid'], { title: 'T' })
+    contains(t, 'THE-TASK', 'the task')
+    isFalse(t.includes('HIDDEN-THOUGHT'), 'no reasoning')
+    contains(t, 'START', 'the output\'s beginning')
+    contains(t, 'THE-END', 'and its end')
+    isTrue(t.length < 3000, `shortened (${t.length})`)
+    contains(t, 'subagent: Helper', 'the subagent, named')
+    contains(t, 'KID-ANSWER', 'with what it said')
+    contains(t, '! it failed', 'a failed tool')
+    contains(t, '(running)', 'a tool still running')
+    contains(t, 'MESSAGE-ERROR', 'an error on a message')
+    d.close()
+  })
+
+  await check('the cap holds, and it keeps the task and the end', () => {
+    const parts = [{ s: 'root', role: 'user', data: { type: 'text', text: 'THE-TASK' } }]
+    for (let i = 0; i < 3000; i++) parts.push({ s: 'root', data: { type: 'tool', tool: 'bash', state: { status: 'completed', input: { command: 'c' + i }, output: 'x'.repeat(5000) } } })
+    parts.push({ s: 'root', data: { type: 'text', text: 'THE-LAST-WORD' } })
+    const { d } = chatStore([{ id: 'root' }], parts)
+    const max = 100_000
+    const t = renderChat(d, ['root'], { title: 'T', maxBytes: max })
+    isTrue(Buffer.byteLength(t) <= max, `${Buffer.byteLength(t)} bytes`)
+    contains(t, 'THE-TASK', 'the beginning')
+    contains(t, 'THE-LAST-WORD', 'the end')
+    contains(t, 'entries left out', 'and says what is missing')
+    isTrue(Buffer.byteLength(renderChat(d, ['root'], { title: 'T' })) <= CHAT_MAX_BYTES, 'the default limit too')
+    d.close()
+  })
+
+  await check('every root of a run is its conversation: a handover keeps the first one', () => {
+    const { d } = chatStore([
+      { id: 'old', dir: '/wt/x', at: 500 }, { id: 'first', dir: '/wt/x', at: 1000 },
+      { id: 'kid', parent: 'first', dir: '/wt/x', at: 1100 }, { id: 'second', dir: '/wt/x', at: 9000 },
+      { id: 'grandkid', parent: 'kid', dir: '/elsewhere', at: 1200 }, { id: 'foreign', dir: '/wt/y', at: 1000 },
+    ], [])
+    equal(runSessionIds(d, '/wt/x', 900).sort().join(), 'first,grandkid,kid,second', 'all of it, nothing older, nothing foreign')
+    d.close()
+  })
+
+  await check('no store, no chat: a false, never an exception, and an existing file stays', () => {
+    const id = `chat-run-${Date.now()}`
+    mkdirSync(join(process.env.FREILAUF_RUNS_DIR, id), { recursive: true })
+    const run = { id, harness: 'opencode', workdir_effective: '/wt/x', started_at: '1970-01-01 00:00:00' }
+    process.env.FREILAUF_OPENCODE_DB = join(sandbox, 'no-such-chat.db')
+    try {
+      equal(syncChat(run), false, 'no store')
+      equal(syncChat({ ...run, harness: 'hermes' }), false, 'another coding agent')
+      const broken = join(sandbox, 'broken.db'); writeFileSync(broken, 'this is no database')
+      process.env.FREILAUF_OPENCODE_DB = broken
+      equal(syncChat(run), false, 'a store that is not one')
+      const { file, d } = chatStore([{ id: 'r', dir: '/wt/x' }], [{ s: 'r', role: 'user', data: { type: 'text', text: 'HELLO' } }])
+      d.close()
+      process.env.FREILAUF_OPENCODE_DB = file
+      equal(syncChat(run), true, 'a real one')
+      contains(readFileSync(chatPath(id), 'utf8'), 'HELLO', 'written')
+      process.env.FREILAUF_OPENCODE_DB = join(sandbox, 'no-such-chat.db')
+      equal(syncChat(run), false, 'the store going away')
+      contains(readFileSync(chatPath(id), 'utf8'), 'HELLO', 'leaves the chat there')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+  })
+
+  await check('the lines of opencode\'s log that count', () => {
+    const line = 'timestamp=2026-11-02T00:30:41.364Z level=ERROR run=0abc1234 message="stream error" providerID=opencode session.id=ses_x small=false agent=build error.error="AI_APICallError: Free usage limit \\"reached\\". Free models"'
+    const f = parseLogfmt(line)
+    equal(f['session.id'], 'ses_x', 'the session')
+    equal(f['error.error'], 'AI_APICallError: Free usage limit "reached". Free models', 'quotes unescaped')
+    const hits = errorLines([line,
+      'timestamp=2026-11-02T00:30:41.364Z level=INFO run=0abc1234 message=fine session.id=ses_x',
+      line.replace('small=false', 'small=true'),
+      'timestamp=2026-11-02T00:30:41.364Z level=ERROR run=0abc1234 message="plugin config hook failed" error="no session"',
+      'timestamp=2026-09-10T02:41:43.144Z level=ERROR run=0abc1234 message=process session.id=ses_y messageID=m error="A Timeout Occurred" stack=undefined',
+    ].join('\n'))
+    equal(hits.length, 2, 'only ERROR, tied to a session, not the side model')
+    equal(hits[0].tsMs, Date.parse('2026-11-02T00:30:41.364Z'), 'its own time')
+    equal(hits[1].text, 'A Timeout Occurred', 'the second error field')
+  })
+
+  await check('a used-up allowance is money, not an outage, in both sources', () => {
+    for (const text of ['AI_APICallError: Free usage limit reached. Free models work in OpenCode',
+      'AI_RetryError: Failed after 3 attempts. Last error: Free usage limit reached.',
+      'AI_APICallError: Free usage exceeded',
+      'AI_APICallError: Key limit exceeded (daily limit). Manage it using the dashboard']) {
+      equal(ocType(text), 'billing_error', text)
+      equal(ocScan('opencode', [text])[0]?.typ, 'billing_error', `on the screen: ${text}`)
+    }
+    equal(ocType('AI_APICallError: Rate limit exceeded: some/model'), 'rate_limit', 'a rate limit stays one')
+    equal(ocType('AI_APICallError: [Z.AI] error code: 520'), 'provider_error', 'an outage stays one')
+    equal(ocScan('opencode', ['AI_APICallError: upstream broke'])[0]?.typ, 'provider_error', 'on the screen too')
+  })
+
+  group('opencode 2: the new tables in the same file')
+
+  const { readRun: readRunAny, rootSessionId: rootAny, storeErrors, isV2Store } = await import('../server/opencode-store.mjs')
+  const v2Store = (sessions, messages) => {
+    const f = join(sandbox, `v2-${Math.random().toString(36).slice(2)}.db`)
+    const d = new ChatDb(f)
+    // Both generations stand in the file, as a migrated store has them: the old
+    // tables hold rows that must no longer be what is read.
+    d.exec(`CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER, time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);`)
+    d.prepare(`INSERT INTO session(id, directory, time_created, time_updated) VALUES('stale', '/wt/v2', 5000, 5000)`).run()
+    for (const s of sessions) {
+      d.prepare(`INSERT INTO session_v2(id, parent_id, directory, title, tokens_input, tokens_output, time_created, time_updated) VALUES(?,?,?,?,?,?,?,?)`)
+        .run(s.id, s.parent ?? null, s.dir ?? '/wt/v2', s.title ?? s.id, 3, 2, s.at ?? 1000, s.at ?? 1000)
+    }
+    messages.forEach((m, i) => d.prepare(`INSERT INTO session_message VALUES(?,?,?,?,?,?,?)`)
+      .run(`msg${i}`, m.s, m.type, i, m.at ?? 2000 + i, m.at ?? 2000 + i, JSON.stringify(m.data)))
+    return { file: f, d }
+  }
+  const tool = (name, state) => ({ type: 'tool', id: 'c', name, state })
+
+  await check('a v2 chat reads session_message: text, tools, errors, subagents, and no system chatter', () => {
+    const { d } = v2Store([{ id: 'root', title: 'Main' }, { id: 'kid', parent: 'root', title: 'Helper' }], [
+      { s: 'root', type: 'system', data: { text: 'SYSTEM-CHATTER' } },
+      { s: 'root', type: 'user', data: { text: 'THE-TASK' } },
+      { s: 'root', type: 'assistant', data: { content: [
+        { type: 'reasoning', text: 'HIDDEN-THOUGHT' }, { type: 'text', text: 'AN-ANSWER' },
+        tool('read', { status: 'completed', input: { filePath: 'x' }, content: [{ type: 'text', text: 'OUT-1' }, { type: 'text', text: 'OUT-2' }] }),
+        tool('edit', { status: 'error', input: { filePath: 'y' }, error: { type: 'tool.execution', message: 'NO-MATCH' } }),
+        tool('read', { status: 'completed', input: { filePath: 'z' }, content: [{ type: 'text', text: `a${'o'.repeat(9000)}z` }] }),
+      ] } },
+      { s: 'kid', type: 'assistant', data: { content: [{ type: 'text', text: 'KID-ANSWER' }] } },
+      { s: 'root', type: 'assistant', data: { content: [], finish: 'error', error: { type: 'provider.free-limit', message: 'REFUSED', status: 429 } } },
+      { s: 'root', type: 'idle', data: { outcome: 'failed', error: { message: 'IDLE-REPEAT' } } },
+    ])
+    equal(isV2Store(d), true, 'recognised')
+    const t = renderChat(d, ['root', 'kid'], { title: 'T' })
+    for (const m of ['THE-TASK', 'AN-ANSWER', '> read {"filePath":"x"}', 'OUT-1', 'OUT-2', '! NO-MATCH', 'characters left out', 'subagent: Helper', 'KID-ANSWER', 'error: REFUSED']) contains(t, m, m)
+    for (const m of ['SYSTEM-CHATTER', 'HIDDEN-THOUGHT', 'IDLE-REPEAT']) isFalse(t.includes(m), `no ${m}`)
+    d.close()
+  })
+
+  await check('v2: sessions, activity, tokens and the root come from session_v2', async () => {
+    const { d, file } = v2Store([{ id: 'r1', at: 6000 }, { id: 'k1', parent: 'r1', at: 6100 }, { id: 'r2', at: 9000 }, { id: 'foreign', dir: '/wt/other', at: 6000 }],
+      [{ s: 'r2', type: 'assistant', at: 12_000, data: { content: [] } }])
+    equal(runSessionIds(d, '/wt/v2', 5500).sort().join(), 'k1,r1,r2', 'the tree, not the stale v1 row')
+    const r = readRunAny(d, '/wt/v2', 5500)
+    equal(r.tokensIn, 3, 'the newest root\'s numbers')
+    equal(r.lastActivityMs, 12_000, 'activity from session_message')
+    d.close()
+    process.env.FREILAUF_OPENCODE_DB = file
+    try {
+      equal(await rootAny({ workdir_effective: '/wt/v2', started_at: '1970-01-01 00:00:05' }), 'r2', 'a resume continues the newest root')
+    } finally { delete process.env.FREILAUF_OPENCODE_DB }
+  })
+
+  await check('v2: the store is the error source, and only what is new', () => {
+    const { d } = v2Store([{ id: 'r' }, { id: 'x', dir: '/wt/other' }], [
+      { s: 'r', type: 'assistant', at: 100, data: { content: [{ type: 'text', text: 'fine' }] } },
+      { s: 'r', type: 'assistant', at: 200, data: { content: [], error: { type: 'provider.free-limit', message: 'Free usage limit reached.', status: 429 } } },
+      { s: 'x', type: 'assistant', at: 300, data: { content: [], error: { type: 'provider.free-limit', message: 'not mine' } } },
+    ])
+    const e = storeErrors(d, ['r'], 0)
+    equal(e.length, 1, 'one, and not the other session\'s')
+    equal(e[0].atMs, 200, 'its own time')
+    equal(ocType(e[0].text), 'billing_error', `classified: ${e[0].text}`)
+    equal(storeErrors(d, ['r'], 200).length, 0, 'past the cursor nothing')
+    equal(ocType('provider.free-limit: anything'), 'billing_error', 'the type alone says it')
+    d.close()
+  })
+
+  await check('fl-start: opencode 2 gets --standalone and the model through the config, opencode 1 stays as it was', () => {
+    const fake = join(sandbox, 'fake-oc'); mkdirSync(fake, { recursive: true })
+    const bin = join(fake, 'opencode')
+    const start = new URL('../bin/fl-start', import.meta.url).pathname
+    const dry = (version) => {
+      writeFileSync(bin, `#!/bin/sh\necho "${version}"\n`); chmodSync(bin, 0o755)
+      return execFileSync(start, ['-H', 'opencode', '--model', 'a/b', '--env', 'OPENCODE_CONFIG_CONTENT={"x":1}', '--dry-run', '-p', 'hi', 'n', sandbox],
+        { encoding: 'utf8', env: { ...process.env, PATH: `${fake}:${process.env.PATH}` } })
+    }
+    const v2 = dry('opencode v2.2.5')
+    contains(v2, '--auto --standalone --prompt', 'the private server')
+    isFalse(/--model/.test(v2.split('Command:')[1]), 'no --model, which v2 refuses')
+    const v1 = dry('1.19.5')
+    contains(v1, "--auto --model 'a/b' --prompt", 'v1 unchanged')
+    isFalse(v1.includes('--standalone'), 'and without the v2 flag')
+  })
+
+  await check('setup: the v2 bridge is installed for v2 only, and the v1 form stays for the sandbox image', () => {
+    const setup = readFileSync(new URL('../setup/02-install-scripts.sh', import.meta.url), 'utf8')
+    contains(setup, 'fl-log-cap', 'the log filter is installed with the other scripts')
+    contains(setup, 'freilauf-v1-plugin.js', 'the v1 copy')
+    const plugin = setup.split("<<'EOF'").find(b => b.includes("id: 'freilauf'"))
+    contains(plugin, 'export default', 'the shape v2 demands')
+    contains(plugin, 'session.execution.started', 'busy')
+    contains(plugin, 'session.step.failed', 'errors')
+    contains(plugin, 'ctx.session.get', 'root only')
+  })
+
   group('opencode: what a run is really doing (opencode-store.mjs)')
 
   const { sessionTree, readRun, storeActivity } = await import('../server/opencode-store.mjs')
@@ -5812,6 +6087,8 @@ try {
         if (!f.isFile()) continue
         const p = j(root, dir, f.name)
         if (rf(p, 'utf8').slice(0, 40).includes('bash')) files.push(p)
+        // Not bash and so not checked by bash -n below: the log filter is plain sh.
+        if (rf(p, 'utf8').startsWith('#!/bin/sh')) execFileSync('sh', ['-n', p])
       }
     }
     isTrue(files.length >= 8, `found the scripts (${files.length})`)

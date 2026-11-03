@@ -1,6 +1,7 @@
 // Freilauf — processing of agent reports (fl-report → POST /api/runs/<id>/report
 // or fallback inbox.jsonl collected by the watcher). Planning 6 + 11.
 import { timingSafeEqual } from 'node:crypto'
+import { syncChat } from './opencode-chat.mjs'
 import db, { addEvent } from './db.mjs'
 // `notifyChannels` and not `notify`: `completeFollowUp()` below takes an option
 // literally called `notify`, and a parameter that silently shadows a module
@@ -699,6 +700,8 @@ export async function handleReport(runId, body, via = 'http') {
                   report_detail_md=COALESCE(report_detail_md, ?) WHERE id=?`)
         .run(text || null, detail || null, runId)
       addEvent(runId, 'done')
+      // Complete the moment the run says it is: what follows this line may read it.
+      syncChat(db.prepare('SELECT * FROM runs WHERE id=?').get(runId))
       await notifyRun(runId, 'done', doneText(db.prepare('SELECT * FROM runs WHERE id=?').get(runId) ?? run, text, gate?.mergeLine ?? null),
         { fileName: `report-${runId.slice(0, 8)}.md`, fileContent: detail || text })
       // Closed, and the agent still has something to read: a submitted code

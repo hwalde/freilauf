@@ -9,18 +9,21 @@ import { RUNS_DIR, sh, parseDbUtc, shortId } from './util.mjs'
 import { notify, notifyOnFor } from './notify.mjs'
 import { handleReport, addEventOnce, notifyRun, branchSyncState, finishByTurnEnd, followUpHeader, clearAnomalies, abandonFollowUp } from './reports.mjs'
 import { transcriptState as cursorTranscriptState } from './cursor-transcript.mjs'
-import { storeActivity } from './opencode-store.mjs'
+import { storeActivity, openStore, runSessionIds, runStartMs, isV2Store, storeErrors } from './opencode-store.mjs'
+import { syncChat } from './opencode-chat.mjs'
+import { opencodeLogPath, claimNewLogText, errorLines, pruneLogCursors, storeCursor, advanceStoreCursor } from './opencode-log.mjs'
+import { readLogFrom } from './run-log.mjs'
 import { deliverPendingGoals } from './goal.mjs'
 import { claudeQuota, sevenForRun, quotaFullWindow, quotaKnown } from './quota.mjs'
 import { refreshClaudeLimits } from './claude-usage.mjs'
 import { scanNewBytes, transcriptErrors, rateLogHit, terminalText, incidentGoneReason,
-  sandboxDenialSummary, sandboxBlockedSeverity, agentCopedAfter } from './detect.mjs'
+  sandboxDenialSummary, sandboxBlockedSeverity, agentCopedAfter, typeFromText, isSessionStopped } from './detect.mjs'
 import { reportIncident, escalateIncident, dismissIncident, notifyDueIncidents, openIncidentsOf, resolveIncident, detectorLog, msFrom } from './incidents.mjs'
 import { checkHit, checkLlmActive } from './pruefer.mjs'
 import { HARNESS_PLUGINS, getHarness } from './harnesses/index.mjs'
 import { PROVIDER_PLUGINS } from './providers/index.mjs'
 import { flowsTick } from './flows/triggers.mjs'
-import { reconcileClosedSession, tmuxSnapshot, tmuxServerStartMs, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
+import { ensureLogPipe, reconcileClosedSession, tmuxSnapshot, tmuxServerStartMs, sessionGone, shouldAutoClose, currentKeepMs, shouldCloseArchived, archiveSessionKeepMs,
   sandboxRuntime, sandboxHubId, containerName, stopRunContainer, finishedAtMs, paneTarget } from './sessions.mjs'
 import { integrateTick, pushOperatorBase, integratorTimerOff, foreignChanges, ownWorktreePaths } from './integrate.mjs'
 import { maybeAutoCleanup } from './cleanup.mjs'
@@ -181,6 +184,10 @@ async function runTick() {
   for (const run of active) {
     try { await watchRun(run) } catch (e) { console.error(`[watcher] ${run.id}:`, e.message) }
   }
+  // opencode's own log and its readable chat: both read per file or per store, so
+  // outside the per-run loop. Before the assessment below, like every other hit.
+  try { await scanOpencodeLogs(active) } catch (e) { console.error('[watcher] opencode log:', e.message) }
+  try { syncOpenChats() } catch (e) { console.error('[watcher] opencode chat:', e.message) }
   // One message about every session this pass found lost — not one per run.
   try { await announceResumes() } catch (e) { console.error('[watcher] resume summary:', e.message) }
   // The titles that never arrived. The generated title is asked for once on the
@@ -454,6 +461,7 @@ async function watchRun(run) {
     // Rate limit / provider errors: hooks report themselves (reports.mjs); here are
     // the two sources the hub reads from the outside — transcript and pipe-pane log.
     await scanTranscript(run)
+    await ensureLogPipe(run)
     await scanLog(run)
     // cursor's second end channel, independent of any hook (see below).
     if (await cursorTurnEndDetected(run)) return
@@ -691,7 +699,8 @@ async function scanLog(run) {
   const logf = join(RUNS_DIR, run.id, 'log.txt')
   if (!existsSync(logf)) return
   let chunk
-  try { chunk = neueBytes(logf, run.log_offset ?? 0) } catch { return }
+  // A position in everything the run ever printed; fl-log-cap keeps only the end.
+  try { chunk = readLogFrom(logf, run.log_offset ?? 0) } catch { return }
   if (chunk.uebersprungen) detectorLog(run.id, { art: 'log', hinweis: 'backlog skipped', bytes: chunk.uebersprungen })
   if (!chunk.text) return
   // The sandbox family is asked of the same bytes, in the same pass, and only
@@ -737,6 +746,75 @@ async function scanLog(run) {
       beleg: (urteil?.zitat || t.zeile).slice(0, 300),
     })
   }
+}
+
+/**
+ * opencode's own record of its errors: the shared log for opencode 1
+ * (opencode-log.mjs), the session store for opencode 2. Only each active run's
+ * sessions, and only new ones. A hit starts yellow like one from the terminal
+ * recording and goes through the same assessment; the recording's scan stays,
+ * because a sandboxed run or another opencode version may leave this source empty.
+ * Both seeing one event within 90 s counts once (the dedupe in reportIncident).
+ *
+ * One occurrence per type and pass, as in scanLog(): a retry loop is judged by
+ * time, not by how many lines one pass happened to collect.
+ */
+async function scanOpencodeLogs(active) {
+  const runs = active.filter(r => r.harness === 'opencode' && r.workdir_effective)
+  const byPath = new Map()
+  for (const run of runs) {
+    const p = opencodeLogPath(run)
+    if (!byPath.has(p)) byPath.set(p, [])
+    byPath.get(p).push(run)
+  }
+  pruneLogCursors(RUNS_DIR, new Set([...byPath.keys(), ...runs.map(r => `store:${r.id}`)]))
+  for (const [path, members] of byPath) {
+    const lines = errorLines(claimNewLogText(path))
+    for (const run of members) {
+      const d = openStore(run)
+      if (!d) continue
+      const hits = []
+      try {
+        const ids = runSessionIds(d, run.workdir_effective, runStartMs(run))
+        if (isV2Store(d)) {
+          const after = storeCursor(run.id)
+          const found = storeErrors(d, ids, after)
+          if (found.length && advanceStoreCursor(run.id, after, found.at(-1).atMs)) {
+            hits.push(...found.map(f => ({ tsMs: f.atMs, text: f.text })))
+          }
+        }
+        const sessions = new Set(ids)
+        hits.push(...lines.filter(l => sessions.has(l.sessionId)))
+      } catch (e) {
+        console.error(`[watcher] opencode errors of ${run.id}: ${e.message}`)
+        continue
+      } finally { try { d.close() } catch {} }
+      const jeTyp = new Map()
+      for (const h of hits) {
+        if (isSessionStopped(h.text) || /abort|cancel/i.test(h.text.split(':')[0])) continue
+        jeTyp.set(typeFromText(h.text), h)      // the newest of its type
+      }
+      for (const [typ, h] of jeTyp) {
+        await reportIncident(run.id, { typ, quelle: 'log:opencode', schwere: 'gelb',
+          beleg: h.text.slice(0, 300), tsMs: h.tsMs })
+      }
+    }
+  }
+}
+
+/**
+ * Keep the chat file of every opencode run current that can still change: one in
+ * flight, one with an open session (a finished agent can be given more work), and
+ * for a day after a session closed, which makes the file complete however the
+ * run ended. A pass costs two small queries per session; the file is only written
+ * when the store moved.
+ */
+function syncOpenChats() {
+  const rows = db.prepare(`SELECT * FROM runs WHERE harness = 'opencode' AND (
+      status IN ('running', 'waiting_help')
+      OR (tmux_session IS NOT NULL AND tmux_closed_at IS NULL)
+      OR tmux_closed_at >= datetime('now', '-1 day'))`).all()
+  for (const run of rows) syncChat(run)
 }
 
 /**
