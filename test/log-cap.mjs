@@ -88,6 +88,15 @@ try {
       equal(r.text, 'new\n', 'and a scanner at the old offset reads the new bytes only')
     })
 
+    await check('a smaller log from before the cap just continues, and the count stays right', () => {
+      const f = join(SB, 'smaller.log')
+      writeFileSync(f, 'y'.repeat(200_000))
+      feed(f, Buffer.alloc(600_000, 0x7a), 600_000)
+      isTrue(!existsSync(`${f}.before-cap`), 'nothing moved aside')
+      isTrue(statSync(f).size <= 600_000, `limit holds: ${statSync(f).size}`)
+      equal(readLogFrom(f, 0).size, 800_000, 'everything ever written is counted')
+    })
+
     await check('what a filter killed in mid-rotation left behind is cleaned up', () => {
       const f = join(SB, 'stale.log')
       writeFileSync(`${f}.cap.12345`, 'half a copy')
@@ -107,7 +116,7 @@ try {
       isTrue(statSync(f).size <= 300_000, `limit holds: ${statSync(f).size}`)
       const r = readLogFrom(f, 0)
       equal(r.size, total, 'everything ever written')
-      equal(r.von + Buffer.byteLength(r.text), total, 'the bytes read end at the end')
+      equal(r.from + Buffer.byteLength(r.text), total, 'the bytes read end at the end')
       isTrue(r.text.endsWith(chunk(219).toString()), 'and they are the newest')
     })
 
@@ -174,13 +183,13 @@ try {
       await sleep(5000)
       const before = readLogFrom(f, 0)
       isTrue(before.skipped > 0, 'cut several times by now')
-      let offset = before.von + Buffer.byteLength(before.text)
+      let offset = before.from + Buffer.byteLength(before.text)
       writeFileSync(flag, '')
       await sleep(400)
       rmSync(flag)
       await sleep(300)
       const chunk = readLogFrom(f, offset)
-      const { treffer, neuerOffset } = scanNewBytes('hermes', chunk.text, chunk.von)
+      const { treffer, neuerOffset } = scanNewBytes('hermes', chunk.text, chunk.from)
       isTrue(treffer.some(t => t.typ === 'rate_limit'), 'the error line')
       isTrue(neuerOffset > offset, 'the position moved on')
       tmux('kill-session', '-t', `=${name}`)
@@ -205,7 +214,7 @@ try {
             nextPass += 30_000
             const c = readLogFrom(f, offset)
             lost += c.skipped
-            const { treffer, neuerOffset } = scanNewBytes('hermes', c.text, c.von)
+            const { treffer, neuerOffset } = scanNewBytes('hermes', c.text, c.from)
             offset = neuerOffset
             passes++
             if (treffer.some(t => t.typ === 'rate_limit')) found++

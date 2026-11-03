@@ -547,7 +547,7 @@ matcher `idle_prompt|permission_prompt` → `_waiting` (`claudeSettingsJson()`
 in runner.mjs); cursor `beforeSubmitPrompt` → `_working prompt`, `stop` →
 `_turn_end` (`hookFiles`); opencode 1 `session.status` of the root session,
 busy → `_working busy`, idle → `_waiting`, opencode 2 `session.execution.started`
-and `.succeeded`/`.failed` of the root session (the plugin in the form
+and `.succeeded`/`.failed`/`.interrupted` of the root session (the plugin in the form
 `setup/02-install-scripts.sh` picks for the installed version); hermes `pre_llm_call` → `_working
 prompt`, `on_session_end` → `_turn_end`
 (`hooks:` in `~/.hermes/config.yaml`, `fl-hermes-hook`, and `--accept-hooks`

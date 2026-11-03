@@ -1795,10 +1795,10 @@ try {
     const r = readLogFrom(f, 4)
     equal(r.text, 'two\n', 'from the offset')
     equal(r.size, 8, 'its size')
-    equal(r.von, 4, 'its position')
+    equal(r.from, 4, 'its position')
     equal(r.skipped, 0, 'nothing lost')
     equal(readLogFrom(f, 8).text, '', 'nothing new')
-    equal(readLogFrom(f, 100).von, 0, 'an offset past the end: recreated, start over')
+    equal(readLogFrom(f, 100).from, 0, 'an offset past the end: recreated, start over')
     equal(readLogTail(f, 4), 'two\n', 'the tail')
   })
 
@@ -1810,9 +1810,9 @@ try {
     const before = readLogFrom(f, 10)
     equal(before.text, 'abcdefgh', 'an offset that was cut away reads what is left')
     equal(before.skipped, 990, 'and says how much is gone')
-    equal(before.von, 1000, 'position of the first byte returned')
+    equal(before.from, 1000, 'position of the first byte returned')
     equal(readLogFrom(f, 1008).text, '', 'at the end: nothing, and no restart')
-    equal(readLogFrom(f, 2000).von, 1000, 'past the end: recreated')
+    equal(readLogFrom(f, 2000).from, 1000, 'past the end: recreated')
     equal(readLogTail(f, 100), 'abcdefgh', 'the tail never shows the header')
     equal(readLogTail(f, 3), 'fgh', 'and is the end')
     equal(readLogFrom(f, 1000, 3).text, 'fgh', 'the newest bytes when over the limit')
@@ -1822,7 +1822,7 @@ try {
     const f = capFile('utf8.log', 'aé\n')             // 'é' is two bytes, the cut lands between them
     const r = readLogFrom(f, 0, 2)
     equal(r.text, '\n', 'the broken half is dropped')
-    equal(r.von + Buffer.byteLength(r.text), r.size, 'position plus length is the end of the file')
+    equal(r.from + Buffer.byteLength(r.text), r.size, 'position plus length is the end of the file')
   })
 
   await check('unreadable means an exception for the caller, not an empty log', () => {
@@ -1934,6 +1934,44 @@ try {
       'Network connection lost.', 'the evidence')
     equal(ocType('ProviderHeaderTimeoutError: Provider response headers timed out'), 'provider_error', 'a named timeout')
     equal(ocType('provider.content-filter: refused'), 'provider_error', 'a typed store error')
+  })
+
+  await check('a periodic refresh waits its minute, every other caller gets it current', () => {
+    const id = `chat-throttle-${Date.now()}`
+    mkdirSync(join(process.env.FREILAUF_RUNS_DIR, id), { recursive: true })
+    const run = { id, harness: 'opencode', workdir_effective: '/wt/x', started_at: '1970-01-01 00:00:00' }
+    const { file, d } = chatStore([{ id: 'r', dir: '/wt/x' }], [{ s: 'r', role: 'user', data: { type: 'text', text: 'FIRST' } }])
+    process.env.FREILAUF_OPENCODE_DB = file
+    try {
+      equal(syncChat(run, { periodic: true }), true, 'the first one renders')
+      d.prepare('INSERT INTO message VALUES(?,?,?,?,?)').run('m9', 'r', 9000, 9000, JSON.stringify({ role: 'user' }))
+      d.prepare('INSERT INTO part VALUES(?,?,?,?,?,?)').run('p9', 'm9', 'r', 9000, 9000, JSON.stringify({ type: 'text', text: 'SECOND' }))
+      syncChat(run, { periodic: true })
+      isFalse(readFileSync(chatPath(id), 'utf8').includes('SECOND'), 'inside the window nothing is rendered')
+      syncChat(run)
+      contains(readFileSync(chatPath(id), 'utf8'), 'SECOND', 'a reader brings it up to date')
+    } finally { d.close(); delete process.env.FREILAUF_OPENCODE_DB }
+  })
+
+  await check('a cursor lives as long as its run', async () => {
+    const { pruneLogCursors, storeCursor, advanceStoreCursor } = await import('../server/opencode-log.mjs')
+    const { default: cdb } = await import('../server/db.mjs')
+    const runs = process.env.FREILAUF_RUNS_DIR
+    cdb.exec('PRAGMA foreign_keys = OFF')
+    cdb.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes) VALUES('cursor-run', 1, 'done', 'opencode', 'x', 'keiner', 5)`).run()
+    cdb.exec('PRAGMA foreign_keys = ON')
+    isTrue(advanceStoreCursor('cursor-run', 0, 500), 'first claim')
+    isFalse(advanceStoreCursor('cursor-run', 0, 600), 'a second reader of the same position gets nothing')
+    isTrue(advanceStoreCursor('gone-run', 0, 500), 'a run that will not exist')
+    cdb.prepare('INSERT INTO opencode_log_cursor(path, ino, offset) VALUES(?, 1, 1)').run(`${runs}/gone-run/home/opencode.log`)
+    cdb.prepare('INSERT INTO opencode_log_cursor(path, ino, offset) VALUES(?, 1, 1)').run('/home/x/shared.log')
+    pruneLogCursors(runs, { force: true })
+    equal(storeCursor('cursor-run'), 500, 'a run that merely stopped keeps its position')
+    equal(storeCursor('gone-run'), 0, 'a deleted one loses it')
+    equal(cdb.prepare('SELECT COUNT(*) AS n FROM opencode_log_cursor WHERE path LIKE ?').get(`${runs}/gone-run/%`).n, 0, 'its log too')
+    equal(cdb.prepare(`SELECT COUNT(*) AS n FROM opencode_log_cursor WHERE path = '/home/x/shared.log'`).get().n, 1, 'the shared log stays')
+    cdb.prepare(`DELETE FROM runs WHERE id = 'cursor-run'`).run()
+    cdb.exec('DELETE FROM opencode_log_cursor')
   })
 
   await check('the lines of opencode\'s log that count', () => {

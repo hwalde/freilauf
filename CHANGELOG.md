@@ -26,7 +26,7 @@ a day on which nothing was released.
 
 ### Changed
 
-- A run's raw terminal recording `log.txt` keeps only its last ~5 MB, for every coding agent (`bin/fl-log-cap`). The opencode TUI redraws at up to 2.5 GB per hour in an error state. Sessions already running keep their old recording until they end or are resumed.
+- A run's raw terminal recording `log.txt` keeps only its last ~5 MB, for every coding agent (`bin/fl-log-cap`). The opencode TUI redraws at up to 2.5 GB per hour in an error state. Sessions already running keep their old recording until they end or are resumed; a resumed run's existing log over about 4 MB is kept beside the new one as `log.txt.before-cap`.
 - A session that lost its recording filter gets it back on the next watcher pass.
 
 ### Fixed

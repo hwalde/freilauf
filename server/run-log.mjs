@@ -33,7 +33,7 @@ function readRange(fd, from, to) {
 
 /**
  * The bytes past `offset`, at most `maxBytes` and always the newest ones.
- * Returns `{ text, size, skipped, von }`: `size` and `von` are positions in
+ * Returns `{ text, size, skipped, from }`: `size` and `from` are positions in
  * everything ever written, `skipped` counts what cannot be read any more.
  * Throws when the file cannot be read.
  *
@@ -44,7 +44,7 @@ export function readLogFrom(path, offset, maxBytes = 2_000_000) {
   return withFile(path, (fd, fileSize, dropped, headerLen) => {
     const size = dropped + fileSize - headerLen
     let pos = offset > size ? 0 : offset
-    if (pos === size) return { text: '', size, skipped: 0, von: pos }
+    if (pos === size) return { text: '', size, skipped: 0, from: pos }
     const wanted = Math.max(pos, dropped, size - maxBytes)
     const skipped = wanted - pos
     let buf = readRange(fd, wanted - dropped + headerLen, fileSize)
@@ -58,7 +58,7 @@ export function readLogFrom(path, offset, maxBytes = 2_000_000) {
       buf = buf.subarray(skip)
       pos += skip
     }
-    return { text: buf.toString('utf8'), size, skipped, von: pos }
+    return { text: buf.toString('utf8'), size, skipped, from: pos }
   })
 }
 

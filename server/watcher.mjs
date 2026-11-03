@@ -708,7 +708,7 @@ async function scanLog(run) {
   // permission problem, and filing that as a sandbox denial would be a lie in
   // the data (SANDBOX.md).
   const { treffer, sandboxTreffer, neuerOffset } =
-    scanNewBytes(run.harness, chunk.text, chunk.von ?? run.log_offset ?? 0, { sandbox: run.sandbox === 1 })
+    scanNewBytes(run.harness, chunk.text, chunk.from, { sandbox: run.sandbox === 1 })
   // The claim is what makes "every line counts once" true rather than intended
   // — nothing below this line may run for bytes somebody else already read.
   if (!claimOffset('log_offset', run, run.log_offset ?? 0, neuerOffset)) return

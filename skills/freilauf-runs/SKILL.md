@@ -437,7 +437,8 @@ run is the one it points at), `base_sha`, `merged_sha`, `expected_minutes`,
 for each, all under `~/agents/runs/<uuid>/`: **`prompt.md`** (the full prompt,
 platform rules included), **`report.md`** and **`report-detail.md`** (what the
 agent wrote), **`log.txt`** (the tmux `pipe-pane` log — the last ~5 MB of what was
-on the agent's screen), **`chat`** → `chat.md` (opencode only: the readable
+on the agent's screen; a resumed older run may keep its earlier log beside it as
+`log.txt.before-cap`), **`chat`** → `chat.md` (opencode only: the readable
 conversation with shortened tool output, read this first), **`detektor.jsonl`** (every incident decision with its
 reasoning) and **`inbox.jsonl`** (reports that could not reach the hub; the
 watcher replays them). `worktree.path` in the same answer is where the agent

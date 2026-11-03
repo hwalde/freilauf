@@ -17,7 +17,7 @@
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync, chmodSync, readdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync, chmodSync, readdirSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { WebSocket } from 'ws'
@@ -1990,10 +1990,18 @@ try {
     const page = await fetchPath(`/runs/${run.id}`).then(r => r.text())
     contains(page, 'Please do the marked task', 'the page shows the chat')
     isFalse(page.includes('RECORDING-NOISE'), 'instead of the recording')
-    const api = await fetchPath(`/api/read/runs/${run.id}`).then(r => r.ok ? r.json() : null).catch(() => null)
-    if (api?.files) isTrue(api.files.chat.exists, 'the read API names the file')
+    // An old run with a store and no chat: the read API must answer for it by itself.
+    rmSync(f)
+    const api = await fetchPath(`/api/runs/${run.id}`).then(r => r.json())
+    isTrue(api.files.chat.exists, 'the read API brings the chat up to date and names it')
+    equal(api.files.chat.path, f, 'with its path')
     const { actions } = await import('../server/flows/actions.mjs')
     contains(await actions.runText(run.id, 'log'), 'Please do the marked task', 'a flow gets the chat')
+    // The store cannot answer for a moment: the chat on disk still beats the recording.
+    renameSync(OC_DB, `${OC_DB}.away`)
+    try {
+      contains(await actions.runText(run.id, 'log'), 'Please do the marked task', 'a flow still gets the chat')
+    } finally { renameSync(`${OC_DB}.away`, OC_DB) }
     stopRun(run.id)
   })
 
@@ -2060,6 +2068,17 @@ try {
     await watcherTick()
     equal(vorfaelle(other.id).length, 1, 'the completed line counts')
 
+    // A store that cannot answer for one pass must not cost the line: a run waiting on
+    // a long retry would never repeat it.
+    db.prepare(`UPDATE incidents SET geloest_am=datetime('now','-1 minutes') WHERE run_id=?`).run(other.id)
+    const countBefore = vorfaelle(other.id)[0].anzahl
+    renameSync(OC_DB, `${OC_DB}.away`)
+    writeFileSync(OC_LOG, freeUsageLine('ses_log_other'), { flag: 'a' })
+    try { await watcherTick() } finally { renameSync(`${OC_DB}.away`, OC_DB) }
+    equal(vorfaelle(other.id)[0].anzahl, countBefore, 'no store: not read yet')
+    await watcherTick()
+    equal(vorfaelle(other.id)[0].anzahl, countBefore + 1, 'the next pass finds it')
+
     // Rotation: a new file under the same name, smaller than the old offset.
     rmSync(OC_LOG)
     db.prepare(`UPDATE incidents SET geloest_am=datetime('now','-1 minutes') WHERE run_id=?`).run(other.id)
@@ -2103,6 +2122,12 @@ try {
     equal(vorfaelle(other.id).length, 0, 'none on the other run')
     await watcherTick()
     equal(vorfaelle(mine.id)[0].anzahl, 1, 'one row is one occurrence')
+    // A run that ended and was revived keeps its position in the store.
+    stopRun(mine.id)
+    await watcherTick()
+    db.prepare(`UPDATE runs SET status='running', ended_at=NULL WHERE id=?`).run(mine.id)
+    await watcherTick()
+    equal(vorfaelle(mine.id)[0].anzahl, 1, 'a revived run does not report its old errors again')
     const page = await fetchPath(`/runs/${mine.id}`).then(r => r.text())
     contains(page, 'THE-V2-TASK', 'the chat from session_message')
     stopRun(mine.id); stopRun(other.id)

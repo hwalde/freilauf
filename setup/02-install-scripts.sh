@@ -178,7 +178,7 @@ export default {
       for await (const event of ctx.event.subscribe()) {
         const data = event?.data ?? event?.properties ?? {}
         if (event?.type === 'session.execution.started' && await isRoot(data.sessionID)) await attention('busy')
-        else if (/^session\.execution\.(succeeded|failed|stopped)$/.test(event?.type ?? '') && await isRoot(data.sessionID)) await attention('idle')
+        else if (/^session\.execution\.(succeeded|failed|interrupted)$/.test(event?.type ?? '') && await isRoot(data.sessionID)) await attention('idle')
         else if (event?.type === 'session.step.failed') {
           const e = data.error ?? {}
           await report('_api_error', 'unknown', String(e.message ?? e.type ?? 'session.step.failed').slice(0, 300))

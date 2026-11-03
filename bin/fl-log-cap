@@ -82,8 +82,9 @@ rotate() {
 # What a filter killed in mid-rotation left behind.
 rm -f "$FILE".cap.* 2>/dev/null
 
-# A resumed run from before this cap: its big log is not ours to cut, so it moves aside
-# whole, and the new file counts it as gone. Only a file without a header can be that.
+# A resumed run from before this cap: its big log moves aside whole, and the new file
+# counts it as gone. Only a file without a header can be that, and only above the mark:
+# a smaller file cannot be told from a current one, and continues like any other.
 size=$(file_size)
 if [ "$size" -ge "$HIGH" ]; then
     read_header

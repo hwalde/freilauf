@@ -397,6 +397,8 @@ try {
       const v2 = readFileSync(join(dir, 'freilauf.js'), 'utf8')
       contains(v2, 'export default', 'opencode 2 gets the form it can load')
       contains(v2, 'process.env.CC_RUN_ID', 'with the old run-id variable too')
+      // Every way an execution can end, or a run stays latched on "working".
+      contains(v2, 'succeeded|failed|interrupted', 'all three terminal states of opencode 2')
       contains(readFileSync(join(HOME, '.config', 'opencode', 'freilauf-v1-plugin.js'), 'utf8'),
         'export const Freilauf', 'and the v1 form stays for a sandbox image pinned to opencode 1')
     })

@@ -688,7 +688,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   agent) and at or over 2 MB after a cut, because the watcher reads up to 2 MB per
   pass. The filter never stops draining stdin and never takes the session with it;
   a running session that lost it gets it back (`ensureLogPipe()`). A log from before
-  the cap is never cut: a resumed run moves it aside whole (`log.txt.before-cap`).
+  the cap that is at or over the high-water mark when a run resumes moves aside whole
+  (`log.txt.before-cap`); a smaller one simply continues and is cut like any other.
 - `runs.log_offset` counts every byte the run ever printed; the file's header says
   how many are gone, and only `server/run-log.mjs` translates between the two.
 - `tmuxVerdict()` answers `ok`/`no_server`/`unreachable`; `sessionGone()` is

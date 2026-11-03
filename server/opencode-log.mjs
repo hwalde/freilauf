@@ -135,8 +135,8 @@ function claim(path, row, ino, next) {
  * Hourly, because this walks the whole table.
  */
 let lastPrune = 0
-export function pruneLogCursors(runsDir) {
-  if (Date.now() - lastPrune < 3_600_000) return
+export function pruneLogCursors(runsDir, { force = false } = {}) {
+  if (!force && Date.now() - lastPrune < 3_600_000) return
   lastPrune = Date.now()
   const exists = db.prepare('SELECT 1 FROM runs WHERE id = ?')
   for (const { path } of db.prepare('SELECT path FROM opencode_log_cursor').all()) {
