@@ -44,6 +44,7 @@ import {
 import { t } from './i18n.mjs'
 import { caseEntries, caseEntryCount, caseState } from './supervision.mjs'
 import { runTranscript, transcriptLimits } from './transcript.mjs'
+import { listEscalations, escalationItem, isoUtc } from './escalations.mjs'
 
 const LIMIT_MAX = 200
 const LIMIT_DEFAULT = 50
@@ -302,6 +303,16 @@ export async function readApi(req, res, url) {
     const limits = transcriptLimits({ tail: url.searchParams.get('tail'), chars: url.searchParams.get('chars') })
     const tr = await runTranscript(run, limits)
     json(res, 200, { ok: true, run: { id: run.id, short_id: shortId(run.id), harness: run.harness }, ...limits, ...tr })
+    return true
+  }
+
+  // ---- escalations (server/escalations.mjs) — a FIXED contract ----------------
+  // What an external resolver collects (docs/escalations.md). `state` defaults to
+  // open; an unknown word is a 400 naming the valid ones. Bounded like every list.
+  if (path === '/api/escalations') {
+    const r = listEscalations({ state: url.searchParams.get('state'), limit: url.searchParams.get('limit') })
+    if (!r.ok) { json(res, r.code, { ok: false, error: r.error }); return true }
+    json(res, 200, { ok: true, now: isoUtc(Date.now()), escalations: r.rows.map(escalationItem) })
     return true
   }
 

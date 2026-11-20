@@ -513,6 +513,13 @@ inject (`injectedSubmission()` in reports.mjs), renames the source to
 unchanged — such a line opens no commission at ANY distance from the report,
 restarts none, and answers no help call.
 
+The hub also types into a session itself, for a supervisor's nudge, and has
+already done what that line means. Its echo is read as source `supervisor`
+(`submissionKind()`): by the tag `<freilauf-supervisor …>` the hub types first
+when a head is passed, and — for a hook without a head — by the moment of
+typing, once, within 30 seconds. A plugin needs to do nothing for this beyond
+passing `prompt_head` where its hook has the text.
+
 Four rules, and each of them was measured to go wrong otherwise:
 
 1. **Root session only, never a subagent's end.** opencode emits

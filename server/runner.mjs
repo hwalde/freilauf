@@ -32,6 +32,27 @@ const PLATFORM_RULES = [
 ].join('\n')
 
 /**
+ * What a run is told about supervision (server/supervision-acts.mjs) — only
+ * while the hub has an active supervisor agent, so a hub without one pays no
+ * tokens for it and its prompts stay byte for byte what they were.
+ *
+ * A supervised run learns what the nudge's tag means and how to answer; the
+ * authority comes from these lines, not from the message, which anybody could
+ * imitate. A supervisor run is told where its commands are instead, and that
+ * `fl-report help` is not its way to the operator: a round that waits for a
+ * human stops every later round (SPEC 7.16).
+ */
+const SUPERVISED_RULE = '- Supervision: a message that starts with <freilauf-supervisor …> is typed in by Freilauf '
+  + 'for this hub\'s supervisor, which acts on the operator\'s behalf and with the operator\'s authority — '
+  + 'treat it as the operator\'s instruction. Answer it with `fl-report reply "<your answer>"`; '
+  + 'nobody reads your screen.'
+
+const SUPERVISOR_RULE = '- You are this hub\'s SUPERVISOR. `fl-supervise --help` lists what you can do. Look at a case '
+  + '(`fl-supervise look <run>`) before you nudge it: waking an agent is expensive, looking is cheap. '
+  + 'Never call `fl-report help` — nobody answers a round; ask the operator about a case with '
+  + '`fl-supervise question` and finish your round.'
+
+/**
  * The one extra rule of a repo the hub integrates for (repos.merge_mode='hub').
  * It says the two things an agent cannot know by itself: that somebody else
  * merges, and that resolving a conflict is ITS job while it still knows what it
@@ -184,7 +205,7 @@ export function sandboxPromptSection(facts) {
  * Whatever the operator writes is now an ADDITION, placed where it reads like
  * one.
  */
-export function platformSuffix(run, branchRule, settings, repo = null, sandboxFacts = null) {
+export function platformSuffix(run, branchRule, settings, repo = null, sandboxFacts = null, supervision = null) {
   const own = String(settings.prompt_suffix ?? '').trim()
   const harnessRules = getHarness(run.harness)?.promptRules
   // Only where the hub really integrates. With merge_mode 'off' the prompt is
@@ -198,9 +219,16 @@ export function platformSuffix(run, branchRule, settings, repo = null, sandboxFa
   // was written from.
   // Code review (server/review.mjs) adds one sentence: the merge waits for a reviewer.
   const reviewed = hubMerges && reviewPlatformOf(run) ? `\n- ${REVIEW_PLATFORM_RULE}` : ''
-  const rules = hubMerges && !run.keep_on_branch
+  let rules = hubMerges && !run.keep_on_branch
     ? PLATFORM_RULES.replace('- Expected maximum working time', `${MERGE_RULE}${reviewed}\n- Expected maximum working time`)
     : PLATFORM_RULES
+  // `supervision` is decided by the launch (launchRun), so this stays pure:
+  // 'supervised' adds the nudge sentence after the help line, 'supervisor'
+  // replaces the help line, anything else leaves the rules untouched.
+  const HELP_LINES = '- If you need a human decision or discovered a big problem:\n'
+    + '  `fl-report help "<question/problem>"` — then WAIT for the answer in this session.'
+  if (supervision === 'supervised') rules = rules.replace(HELP_LINES, `${HELP_LINES}\n${SUPERVISED_RULE}`)
+  else if (supervision === 'supervisor') rules = rules.replace(HELP_LINES, SUPERVISOR_RULE)
   const finish = hubMerges
     ? FINISH_RULES.replace('  3. Only then stop.', `${MERGE_FINISH_LINE}\n  3. Only then stop.`)
     : FINISH_RULES
@@ -955,7 +983,8 @@ You continue the work of an earlier agent on this run: its record is in <previou
  * Everything the hub recorded about a run that a successor needs: its reports
  * (the first one and every follow-up, which `appendReport()` keeps in
  * `report_md`), the detailed reports, progress reports, questions and answers,
- * and the operator's messages — as tagged blocks, oldest first. Empty blocks
+ * the operator's messages and, apart from them, the supervisor's nudges — as
+ * tagged blocks, oldest first. Empty blocks
  * are left out; an empty result means the run left no record at all.
  * `current` is the instruction the successor is handed separately — its own
  * echo in the event list (`resume_requested`, `followup_started`) is left out.
@@ -967,8 +996,13 @@ export function runHistory(run, { current = '' } = {}) {
   tag('detailed_report', run.report_detail_md)
   if (run.followup_detail_md && run.followup_detail_md !== run.report_detail_md) tag('latest_followup_detailed_report', run.followup_detail_md)
   const rows = db.prepare(`SELECT ts, kind, payload FROM events WHERE run_id=?
-    AND kind IN ('progress','help','help_answered','followup_started','message_sent','flow_message','resume_requested') ORDER BY id`).all(run.id)
-  const text = (r) => { try { const p = JSON.parse(r.payload ?? 'null'); return String(p?.text ?? p?.message ?? '').trim() } catch { return '' } }
+    AND kind IN ('progress','help','help_answered','followup_started','message_sent','flow_message','resume_requested',
+                 'supervisor_message') ORDER BY id`).all(run.id)
+  const parsed = (r) => { try { return JSON.parse(r.payload ?? 'null') } catch { return null } }
+  const text = (r) => String(parsed(r)?.text ?? parsed(r)?.message ?? '').trim()
+  // A nudge is the supervisor's, on the operator's behalf — never a line the
+  // operator wrote. The commission it opened says so in `via`.
+  const bySupervisor = (r) => parsed(r)?.via === 'supervisor'
   const line = (r) => `- ${r.ts} UTC: ${text(r)}`
   tag('progress_reports', rows.filter(r => r.kind === 'progress' && text(r)).map(line).join('\n'))
   // Each question with the answer that followed it. A question recorded before
@@ -978,8 +1012,9 @@ export function runHistory(run, { current = '' } = {}) {
     if (r.kind === 'help') qa.push({ q: text(r) || null, a: null, ts: r.ts, asked: true })
     else if (r.kind === 'help_answered') {
       const open = [...qa].reverse().find(x => x.a === null)
-      if (open) open.a = text(r) || '(answered without text)'
-      else qa.push({ q: null, a: text(r), ts: r.ts })
+      const a = (bySupervisor(r) ? '(the supervisor, on the operator\'s behalf) ' : '') + (text(r) || '(answered without text)')
+      if (open) open.a = a
+      else qa.push({ q: null, a, ts: r.ts })
     }
   }
   // The row keeps the LATEST question: it names the newest question event
@@ -991,7 +1026,11 @@ export function runHistory(run, { current = '' } = {}) {
     `<question${x.ts ? ` at="${x.ts} UTC"` : ''}>${x.q ?? '(text not recorded)'}</question>\n<answer>${x.a ?? '(no answer recorded)'}</answer>`).join('\n'))
   const now = String(current ?? '').trim().slice(0, 500)
   tag('operator_messages', rows.filter(r => ['followup_started', 'message_sent', 'flow_message', 'resume_requested'].includes(r.kind)
-    && text(r) && text(r) !== now)
+    && !bySupervisor(r) && text(r) && text(r) !== now)
+    .map(line).join('\n'))
+  // The supervisor's nudges in a block of their own; the one that answered a
+  // help call already stands under its question.
+  tag('supervisor_messages', rows.filter(r => r.kind === 'supervisor_message' && parsed(r)?.into !== 'help' && text(r))
     .map(line).join('\n'))
   return blocks.join('\n\n')
 }
@@ -1472,8 +1511,13 @@ export async function launchRun(runId) {
   const sandboxFacts = sandbox
     ? (await import('./sandbox/index.mjs')).sandboxPromptFacts(sandbox)
     : null
+  // Supervision lines only while a supervisor agent is active (and never for a
+  // run taken out of it); decided here so platformSuffix() stays pure.
+  const { activeSupervisorAgent } = await import('./supervision.mjs')
+  const supervision = run.supervisor === 1 ? 'supervisor'
+    : run.supervision_off !== 1 && activeSupervisorAgent() ? 'supervised' : null
   const platformPrompt = platformSuffix({ ...run, id: runId, workdir_effective: workdir },
-    branchRule, settings, repo, sandboxFacts).trim()
+    branchRule, settings, repo, sandboxFacts, supervision).trim()
   const fullPrompt = [taskPrompt, platformPrompt].filter(Boolean).join('\n\n')
   let promptFile = join(runDir, 'prompt.md')
   // The resume form's argv, when this launch continues a conversation.

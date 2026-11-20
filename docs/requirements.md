@@ -5,7 +5,7 @@ must not break; where the reason is not obvious it follows in the same
 sentence. The code is the source of truth for *how* any of it is done — a line
 here that the code no longer satisfies is removed or corrected, never kept.
 Contracts for third parties live elsewhere: `docs/plugins.md`,
-`docs/panels.md`, `server/flows/AGENTS.md`, `SANDBOX.md`. Which modules
+`docs/panels.md`, `docs/escalations.md`, `server/flows/AGENTS.md`, `SANDBOX.md`. Which modules
 belong to which section is the "Where is what" table in `AGENTS.md`.
 
 Sections: [Deploying and restarts](#deploying-and-restarts) ·
@@ -514,7 +514,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   to call `completeFollowUp()` (event, flows re-armed, notification); the
   status never changes.
 - A follow-up commission opens when the operator sends into a finished run
-  (`POST /send`) or the agent's hook reports a submitted line
+  (`POST /send`), a supervisor nudges it (`followup_started {via:'supervisor'}`)
+  or the agent's hook reports a submitted line
   (`_working prompt`); it displays as running, runs the expected duration
   from the commission (`watchFollowUps()`, its own anomalies and notify type),
   restarts its clock on each new human line (`restartCommissionOnWorking()`),
@@ -523,6 +524,12 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   pane, kill route, the end-followup button) ends the clock and assesses
   leftovers from `merged_sha ?? base_sha`, refusing to write `nothing` over
   an existing answer.
+- `fl-report reply` is the one report kind that is not about the work: from a
+  working or a finished run it writes a `reply` entry into the run's own case
+  file and changes nothing else (no status, progress, help or commission); an
+  identical reply with no nudge since is written once, so an inbox replay is
+  not a second reply; an empty one is refused by `fl-report` itself, because a
+  refusal from the hub would be filed in the inbox.
 - `runs.telegram_on` unticked means no message about this run on any
   channel; the suppressed message is written as `notify_muted` and the
   notified flag is not set.
@@ -535,7 +542,7 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 
   | Route | Types | In the smart mode |
   |---|---|---|
-  | urgent | `help`, `access`, `merge_blocked`, `review_changes`, `review_resolver`, `aborted_unmerged`, `followup_unmerged`, `unpushed`, `start_failed`, `max_runtime` | sent at once, unchanged (also in "urgent only") |
+  | urgent | `help`, `access`, `merge_blocked`, `review_changes`, `review_resolver`, `aborted_unmerged`, `followup_unmerged`, `unpushed`, `start_failed`, `max_runtime`, `supervisor_question`, `escalation` | sent at once, unchanged (also in "urgent only") |
   | deputy | `done`, `failed`, `followup`, `followup_failed`, `exit_without_report`, `pane_died` | the deputy decides |
   | interim | `overrun`, `followup_overrun` | the deputy decides, without a report |
   | digest | `deferred`, `resolving`, `review_merged`, `review_closed` | only in the digest; judged like interim while the digest is off |
@@ -564,7 +571,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - `decideLevel()`: outside the smart mode nothing is sent; the run's mute
   switch wins over everything; a run or follow-up the operator ended
   (`aborted {by:'user'}`, `aborted {source:'web'}`, `followup_abandoned` from
-  the page) is summarised but never announced; "always" turns none into info
+  the page) is summarised but never announced, and one a supervisor ended
+  (`{by|source:'supervisor'}`) is not the operator's; "always" turns none into info
   for reports, never for an interim check; "only critical" sends critical
   only.
 - A deputy message is the level, project and name, the deputy's sentences
@@ -619,7 +627,13 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   call; `_working tool`/`busy` only after the grace window since the last
   report; an `injected` head (`injectedSubmission()`, measured shapes at the
   start of the line, bounded, stored nowhere) opens nothing and answers no
-  help call; an absent head is unknown, not injected.
+  help call.
+- A nudge's echo (`submissionKind()` → source `supervisor`) opens nothing,
+  restarts nothing and answers no help call, because the nudge already did
+  each of them as the supervisor's: it is recognised by the tag the hub types
+  first, or — where the hook sends no head (cursor, hermes) — by
+  `runs.nudge_typed_at` within `NUDGE_ECHO_MS`, once (the reader clears it);
+  any other absent head is a person's, as it always was.
 - `agentWaiting()` is the one predicate for the five readers and is the
   agent's word unless `last_activity_at` contradicts it by more than
   `ATTENTION_STALE_MS`; silence never overrules a hook.
@@ -628,7 +642,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   timestamp).
 - The first key a person types into the terminal or the send route flips
   `waiting` → `working` and nothing else (`noteOperatorInput()`,
-  `isOperatorInput()` drops mouse and focus reports).
+  `isOperatorInput()` drops mouse and focus reports); a nudge does the same
+  with the source `supervisor`, never as the operator.
 - The two columns are NULLed with the session (exit, pane death, kill,
   retry, resume).
 
@@ -709,7 +724,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   touches only sessions carrying a run of this hub.
 - The run's terminal is writable as long as its session and pane are;
   `/api/runs/<id>/kill` on a `failed` run sets `aborted`, on `done`/`aborted`
-  only closes the session.
+  only closes the session; the route and a supervisor's `end` are one function
+  (`endRun()`), differing only in attribution, and a supervisor's end also
+  announces unmerged leftovers, because the operator did not see it happen.
 - `reconcileClosedSession()` is the single place a closed session becomes a
   run event (abort with reason, flows fired, commission abandoned).
 - Session memory is measured through `listSessionsSnapshot()` for the whole
@@ -820,6 +837,49 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   names which, and everything is bounded (`tail` ≤ 200, `chars` ≤ 60 000).
 - What a transcript reader read is never written to a log, an event or an
   entry: it can hold a secret the agent printed.
+- A nudge is typed by the hub only: the tag `<freilauf-supervisor from=<short
+  id>>` as keystrokes, then a pasted header and the supervisor's text verbatim
+  (`composeNudge()`); control characters other than newline and tab are
+  removed first, so a text cannot end the paste and type keys of its own;
+  over `NUDGE_TEXT_MAX` it is refused, never cut.
+- A nudge reuses the functions behind `POST /send`, never the route:
+  `supervisor_message {by}` always, `help_answered` / `followup_started`
+  `{via:'supervisor', by}` by the run's state, a `message` entry; nothing a
+  nudge writes reads as the operator, and the handover history lists nudges
+  in their own block.
+- A nudge is refused, with nothing typed or recorded, when the run has no live
+  session, its pane is dead, tmux cannot say, or the run has had
+  `supervision_nudge_limit` (default 3) nudges since the operator's last
+  answer.
+- Limit of the header's authenticity: on an unsandboxed machine any local
+  process can type into any tmux session, and `tmux show-environment` shows a
+  supervisor run's token; the header is authenticated only as far as the
+  report channel's per-run token reaches, and a sandbox makes it a boundary.
+- The platform rules explain the tag and `fl-report reply` only for a run
+  launched while a supervisor agent is active and that is neither a supervisor
+  run nor taken out; a supervisor run gets its own line instead of the help
+  line; without an active supervisor the prompt is byte for byte what it was.
+- A case has at most one open question (a `question` entry without an
+  `answer` after it); the question goes out on the urgent route with
+  `dedupe:false`, a muted run gets the entry and no message, and the
+  supervisor is told which happened.
+- `nudge` and `end` refuse an integrator's conflict run (`resolves_run_id`),
+  because acting on it would fight the merge it exists for.
+- A run a supervisor ended (`aborted {by:'supervisor'}`, or its last follow-up
+  `followup_abandoned {source:'supervisor'}`) is never due again.
+- Escalations: `server/escalations.mjs` is the only writer; the routes,
+  fields, codes and orders are the contract in `docs/escalations.md`; every
+  transition is one conditional UPDATE, so two resolvers cannot both win;
+  `summary` and `run.title` leave the hub as one line without control
+  characters, bounded; the same class about the same run is refused while one
+  is open or claimed.
+- Raising writes an `escalated` entry; resolving or dismissing writes a
+  `resolved` entry (author `resolver:<by>`, else `resolver:<claimed_by>`, else
+  `operator`; the page's own form is the operator), which makes the case due.
+- With `supervision_escalation_grace_minutes` at 0 (the default) the operator
+  hears of an escalation when it is raised, on the urgent route; the timed
+  announcements (`escalationNotices()`) mark what they sent, so a clock never
+  repeats one.
 
 ## Skills
 

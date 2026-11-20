@@ -41,7 +41,8 @@ code cannot say by itself:
    covers.
 2. **Contracts** third parties write against: `docs/plugins.md` (coding
    agents, model providers, notifiers), `docs/panels.md` (a project's own
-   sidebar numbers), `server/flows/AGENTS.md` (flow steps), `SANDBOX.md`
+   sidebar numbers), `docs/escalations.md` (an external resolver's routes),
+   `server/flows/AGENTS.md` (flow steps), `SANDBOX.md`
    (container profiles and the measurements behind them).
 3. **Measured traps** in the tools we drive (tmux, git, docker, the agent
    CLIs) that the code cannot show and that hurt when unknown:
@@ -119,7 +120,7 @@ only `PASS` ends the task.
 | The hub's own LLM calls, titles, alerts | `server/llm/`, `server/title.mjs` | LLM layer |
 | Usage, balances, OpenRouter routing | `server/usage.mjs`, `server/claude-usage.mjs`, `server/balances.mjs`, `server/providers/openrouter-routing.mjs` | Quota and gates |
 | Repos, archive, panels, read API | `server/web.mjs`, `server/panels.mjs`, `server/read-api.mjs`, `bin/fl-api` | Repos and archive; Panels |
-| Supervision: the flag, case files, the due check, the bundle, the supervisor route, transcripts | `server/supervision.mjs`, `server/supervision-pages.mjs`, `server/transcript.mjs`, `bin/fl-supervise` | Supervision |
+| Supervision: the flag, case files, the due check, the bundle, the supervisor route, transcripts, nudges, questions, ends, escalations | `server/supervision.mjs`, `server/supervision-acts.mjs`, `server/escalations.mjs`, `server/supervision-pages.mjs`, `server/transcript.mjs`, `bin/fl-supervise` | Supervision (+ `docs/escalations.md`) |
 | Shipped agent skills | `skills/`, `server/skills.mjs` | Skills |
 | Sandbox | `server/sandbox/`, `sandbox/` | `SANDBOX.md` |
 | No-code flows | `server/flows/` | `server/flows/AGENTS.md` |

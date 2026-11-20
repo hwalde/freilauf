@@ -29,7 +29,7 @@ import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
   archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { activeSupervisorAgent, startSupervisorRound } from './supervision.mjs'
-import { caseSection, supervisionSwitch, supervisorNotice } from './supervision-pages.mjs'
+import { caseSection, supervisionSwitch, supervisorNotice, escalationsPageBody, escalationNav } from './supervision-pages.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
 // cached there, `null` when it cannot be established. See providerChoiceBlock().
@@ -941,8 +941,11 @@ export async function layout(req, title, active, content, selectedRepo = null, w
   // sandbox, so an installation without it sees no trace of it.
   const reviewNav = reviewInUse()
     ? [['/reviews', t('nav.reviews') + (openReviews().length ? ` (${openReviews().length})` : '')]] : []
+  // "Escalations" the same way: only while a supervisor agent is active or any
+  // escalation exists, with the number still waiting for somebody.
+  const escNav = escalationNav()
   const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
-    ...reviewNav, ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
+    ...reviewNav, ...(escNav ? [escNav] : []), ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   // Only ACTIVE repos are offered. This one query feeds both the header
   // switcher and the Quick-Run dialog (which takes the list as a parameter), so
@@ -1735,7 +1738,7 @@ export async function pageRun(req, res, url, id) {
   ${run.report_detail_md ? `<h3>${e(t('run.detail_report'))}</h3><pre>${e(run.report_detail_md)}</pre>` : ''}
   ${flowSection(run)}
   ${incidentSection(id, run)}
-  ${caseSection(run)}
+  ${caseSection(run, Date.now(), { error: url.searchParams.get('case_error') === 'empty' })}
   <h3>${e(t('run.metrics'))}</h3>
   ${runMetrics(run)}
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
@@ -2389,6 +2392,7 @@ export async function repoDelete(req, res, url, formBody) {
     // but this transaction says every child it removes rather than relying on it.
     db.prepare('DELETE FROM case_entries WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
     db.prepare('DELETE FROM case_state WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    db.prepare('DELETE FROM escalations WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
     db.prepare('DELETE FROM runs WHERE repo_id=?').run(repo.id)
     db.prepare('DELETE FROM agents WHERE repo_id=?').run(repo.id)
     db.prepare('DELETE FROM repos WHERE id=?').run(repo.id)
@@ -3054,6 +3058,12 @@ export async function reviewSettingsSave(req, res, url, formBody) {
   setSetting('review_default', rv.review_default)
   setSetting('review_platform', rv.review_platform)
   redirect(res, '/settings/review')
+}
+
+/** The Escalations page (server/escalations.mjs): one state filter at a time, open by default. */
+export async function pageEscalations(req, res, url) {
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('escalation.page_title'), '/escalations', escalationsPageBody(url.searchParams.get('state') ?? 'open')))
 }
 
 /** The Reviews page: every open code review, and the latest decided ones. */

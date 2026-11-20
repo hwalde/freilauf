@@ -27,6 +27,10 @@ import { shortId, toDbUtc, parseDbUtc, fmtDurationEn, detailUrl } from './util.m
 import { numSetting } from './scheduler.mjs'
 import { activeAnomalies, openIncidentsOf } from './incidents.mjs'
 import { escapeData } from './report-context.mjs'
+// The op handlers of stage B. Both modules import this one back; that cycle is
+// safe because only hoisted function declarations cross it at load time.
+import { nudgeOp, questionOp, endOp } from './supervision-acts.mjs'
+import { escalateOp } from './escalations.mjs'
 
 // ------------------------------------------------------------------ pure helpers
 
@@ -262,7 +266,7 @@ function dueConditions(run, facts, nowMs, cfg) {
  *   state  its `case_state` row, or null
  *   facts  what `caseFacts()` read: mergeMode, waitingSince, helpSince,
  *          anomalies, incidents, paneDied, abortedBy, followupAbandonedBy
- *          (the last follow-up ended by 'operator' or the 'hub'), entries {reply, answer,
+ *          (the last follow-up ended by 'operator', 'supervisor' or the 'hub'), entries {reply, answer,
  *          resolved}, lastInput {id, kind, ts}, lastLookId, lastClosedId,
  *          supervisionSince
  *   cfg    { waitMs, intervalMs } (`supervisionConfig()`)
@@ -284,8 +288,8 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
   if (run.status === 'aborted' && ['operator', 'flow', 'supervisor'].includes(facts.abortedBy)) {
     return no(`ended_by_${facts.abortedBy}`)
   }
-  if (FINISHED.includes(run.status) && !followUpActive(run) && facts.followupAbandonedBy === 'operator') {
-    return no('ended_by_operator')
+  if (FINISHED.includes(run.status) && !followUpActive(run) && ['operator', 'supervisor'].includes(facts.followupAbandonedBy)) {
+    return no(`ended_by_${facts.followupAbandonedBy}`)
   }
   if (state?.parked_at) return no('parked')
 
@@ -441,7 +445,7 @@ export function caseFacts(run, { since = getSetting('supervision_since') } = {})
       ('followup_started','followup_reported','followup_done','followup_failed','done','failed') LIMIT 1`).get(run.id, ab.id)
     let src = null
     try { src = JSON.parse(ab.payload ?? '{}')?.source ?? null } catch { src = null }
-    if (!later) followupAbandonedBy = ['user', 'operator', 'web'].includes(src) ? 'operator' : 'hub'
+    if (!later) followupAbandonedBy = ['user', 'operator', 'web'].includes(src) ? 'operator' : src === 'supervisor' ? 'supervisor' : 'hub'
   }
   const counts = { reply: 0, answer: 0, resolved: 0 }
   for (const r of db.prepare(`SELECT kind, count(*) c FROM case_entries WHERE run_id=? AND kind IN ('reply','answer','resolved')
@@ -956,6 +960,22 @@ registerSupervisorOp('cases', {
       text: casesText(cases, { total: r.total, considered: r.considered, capped: r.capped, nowMs }) }
   },
 })
+
+// Acting (server/supervision-acts.mjs) and handing over (server/escalations.mjs).
+// Registered here so importing this module is enough to serve every op; the
+// handlers live beside what they write.
+
+/** `nudge {run, text}`: type a message into the run's session, header by the hub (SPEC 4.5). */
+registerSupervisorOp('nudge', { handler: nudgeOp })
+
+/** `question {run, text, choices?}`: one prepared question to the operator (SPEC 4.6, 7.19, 7.20). */
+registerSupervisorOp('question', { handler: questionOp })
+
+/** `end {run, reason}`: end the run on purpose, the kill route's semantics (SPEC 4.6). */
+registerSupervisorOp('end', { handler: endOp })
+
+/** `escalate {run, class, summary}`: hand a problem to an external resolver (SPEC 4.8). */
+registerSupervisorOp('escalate', { handler: escalateOp })
 
 /**
  * `POST /api/runs/<callerId>/supervise`, served on the loopback listener and the

@@ -6,6 +6,9 @@
 import { escapeHtml as e, fmtDuration, fmtDbUtc, parseDbUtc, shortId } from './util.mjs'
 import { t } from './i18n.mjs'
 import { caseEntries, caseState, activeSupervisorAgent, supervisorAgents, DUE_REASONS } from './supervision.mjs'
+import { questionForPage } from './supervision-acts.mjs'
+import { listEscalations, escalationItem, pendingEscalationCount, anyEscalation,
+  ESCALATION_STATE_FILTERS, ESCALATIONS_LIMIT_MAX } from './escalations.mjs'
 
 /** How many entries the run page shows; the read API reaches further back. */
 const PAGE_ENTRIES = 50
@@ -32,7 +35,19 @@ function dataLine(entry) {
   const d = entry.data ?? {}
   if (entry.kind === 'action') {
     if (d.op === 'again') return t('case.action_again', { minutes: d.minutes, at: fmtDbUtc(d.at) })
+    if (d.op === 'end') {
+      return t(d.outcome === 'aborted' ? 'case.action_end_aborted' : 'case.action_end_closed')
+        + (d.followup_abandoned ? ` ${t('case.action_end_followup')}` : '')
+    }
     return t('case.action_other', { op: String(d.op ?? '?') })
+  }
+  if (entry.kind === 'message' && ['help', 'followup', 'running'].includes(d.into)) return t(`case.message_into_${d.into}`)
+  if (entry.kind === 'question' && Array.isArray(d.choices) && d.choices.length) {
+    return t('case.question_choices', { choices: d.choices.join(' · ') })
+  }
+  if (entry.kind === 'escalated' && d.escalation) return t('case.escalated_line', { id: d.escalation, cls: String(d.class ?? '') })
+  if (entry.kind === 'resolved' && d.escalation) {
+    return t('case.resolved_line', { id: d.escalation, outcome: t(`escalation.outcome_${ESCALATION_OUTCOME_WORDS.includes(d.outcome) ? d.outcome : 'other'}`) })
   }
   if (entry.kind === 'note' && d.again_minutes) return t('case.note_again', { minutes: d.again_minutes })
   if (entry.kind === 'answer' && d.choice) return t('case.answer_choice', { choice: d.choice })
@@ -63,12 +78,16 @@ function stateLine(state, nowMs) {
  * when the file has entries, or while a supervisor agent is active (then an
  * operator may leave a remark before anybody asked).
  *
- * The form is a plain POST to `/api/runs/<id>/case/answer`; a question's choices
- * (stage B) become `<button name="choice" value="…">` beside the send button.
+ * The form is a plain POST to `/api/runs/<id>/case/answer`; an open question's
+ * choices become `<button name="choice" value="…" formnovalidate>` beside the
+ * send button, so one click answers without a text. `error` is the redirect's
+ * `?case_error=empty`: an answer of only spaces passed the browser and was
+ * refused, and the operator is told so instead of finding nothing changed.
  */
-export function caseSection(run, nowMs = Date.now()) {
+export function caseSection(run, nowMs = Date.now(), { error = false } = {}) {
   const entries = caseEntries(run.id, { limit: PAGE_ENTRIES })
   const state = caseState(run.id)
+  const question = questionForPage(run.id)
   const show = entries.length > 0 || (run.supervisor !== 1 && !!activeSupervisorAgent())
   const items = entries.map(en => {
     const extra = dataLine(en)
@@ -79,19 +98,82 @@ export function caseSection(run, nowMs = Date.now()) {
       ${extra ? `<div class="dim">${e(extra)}</div>` : ''}</li>`
   }).join('')
   const st = stateLine(state, nowMs)
-  // `required` while the form has nothing but the text: an empty answer from the
-  // page would otherwise be a 400 the browser shows as nothing happening. A
-  // question's choice buttons (stage B) must drop it or carry `formnovalidate`.
+  // `required` on the text: an empty answer from the page would otherwise be a
+  // 400. The choice buttons carry `formnovalidate`, so a click needs no text.
+  const choices = (question?.choices ?? []).map(c =>
+    `<button name="choice" value="${e(c)}" formnovalidate class="case-choice">${e(c)}</button>`).join('')
   return `<section class="card case-file" id="run-case"${show ? '' : ' hidden'}>
     <h3>${e(t('case.title'))}</h3>
     ${st ? `<p class="dim">${st}</p>` : ''}
     ${items ? `<ol class="case-entries">${items}</ol>` : `<p class="dim">${e(t('case.empty'))}</p>`}
+    ${error ? `<p class="warn" id="case-error">${e(t('case.err_answer_empty'))}</p>` : ''}
     <form method="post" action="/api/runs/${e(run.id)}/case/answer" class="case-answer">
       <input type="hidden" name="back" value="/runs/${e(run.id)}#run-case">
+      ${question ? `<p class="case-open-question">${e(t('case.question_open'))}</p>` : ''}
       <label>${e(t('case.answer_label'))}
         <textarea name="text" rows="3" required placeholder="${e(t('case.answer_ph'))}"></textarea></label>
-      <div class="btn-row"><button>${e(t('case.answer_send'))}</button></div>
+      <div class="btn-row"><button>${e(t('case.answer_send'))}</button>${choices}</div>
     </form></section>`
+}
+
+// ------------------------------------------------------------------ escalations
+
+/** The outcome words the page has a translation for; anything else reads as "other". */
+const ESCALATION_OUTCOME_WORDS = ['solved', 'unsolved', 'operator', 'dismissed']
+
+/**
+ * The escalations page (`/escalations`): the list for one state filter in the
+ * read API's order (waiting ones oldest first), each with the run it is about and, while it
+ * is open or claimed, the operator's two buttons — resolve (with an outcome
+ * and a note) and dismiss ("not a problem"). Plain POST forms to the contract's
+ * own routes, sent back here; the resolve form carries `operator=1` so the
+ * case file names the operator, whoever had claimed it.
+ */
+export function escalationsPageBody(filter = 'open', nowMs = Date.now()) {
+  const state = ESCALATION_STATE_FILTERS.includes(filter) ? filter : 'open'
+  const list = listEscalations({ state, limit: ESCALATIONS_LIMIT_MAX })
+  const back = `/escalations?state=${state}`
+  const tabs = ESCALATION_STATE_FILTERS.map(s =>
+    `<a href="/escalations?state=${s}" class="${s === state ? 'on' : ''}">${e(t(`escalation.state_${s}`))}</a>`).join(' · ')
+  const rows = (list.rows ?? []).map(row => {
+    const it = escalationItem(row)
+    const age = t('case.ago', { age: fmtDuration(Math.max(0, (nowMs - parseDbUtc(row.created_at)) / 1000)) })
+    const runLabel = it.run.title ?? it.run.short_id
+    const pending = ['open', 'claimed'].includes(it.state)
+    const claimed = it.claimed_by ? ` · ${e(t('escalation.claimed_by', { name: it.claimed_by }))}` : ''
+    const result = it.outcome ? ` · ${e(t(`escalation.outcome_${ESCALATION_OUTCOME_WORDS.includes(it.outcome) ? it.outcome : 'other'}`))}` : ''
+    const outcomes = ['solved', 'unsolved', 'operator'].map(o =>
+      `<option value="${o}">${e(t(`escalation.outcome_${o}`))}</option>`).join('')
+    return `<li class="escalation esc-${e(it.state)}" id="escalation-${it.id}">
+      <div><b>#${it.id}</b> · <span class="dim">${e(t(`escalation.class_${it.class}`))}</span> ·
+        <span class="dim" title="${e(fmtDbUtc(row.created_at))}">${e(age)}</span> ·
+        ${e(t(`escalation.state_${it.state}`))}${claimed}${result}</div>
+      <div class="esc-summary">${e(it.summary)}</div>
+      <div class="dim">${e(t('escalation.about_run'))} <a href="/runs/${e(it.run.id)}">${e(runLabel)}</a>
+        ${it.run.repo ? `· ${e(it.run.repo)}` : ''}</div>
+      ${it.note ? `<div class="dim">${e(t('escalation.note'))}: ${e(it.note)}</div>` : ''}
+      ${pending ? `<div class="btn-row">
+        <form method="post" action="/api/escalations/${it.id}/resolve" class="inline">
+          <input type="hidden" name="back" value="${e(back)}"><input type="hidden" name="operator" value="1">
+          <select name="outcome" aria-label="${e(t('escalation.outcome'))}">${outcomes}</select>
+          <input name="note" maxlength="500" placeholder="${e(t('escalation.note_ph'))}">
+          <button>${e(t('escalation.resolve'))}</button></form>
+        <form method="post" action="/api/escalations/${it.id}/dismiss" class="inline">
+          <input type="hidden" name="back" value="${e(back)}">
+          <button>${e(t('escalation.dismiss'))}</button></form></div>` : ''}
+    </li>`
+  }).join('')
+  return `<h2>${e(t('escalation.page_title'))}</h2>
+    <p class="dim">${e(t('escalation.intro'))}</p>
+    <p class="esc-tabs">${tabs}</p>
+    ${rows ? `<ol class="escalations">${rows}</ol>` : `<p class="dim" id="escalations-empty">${e(t('escalation.none'))}</p>`}`
+}
+
+/** The nav entry: shown while a supervisor agent is active or any escalation exists, with the pending count. */
+export function escalationNav() {
+  if (!activeSupervisorAgent() && !anyEscalation()) return null
+  const n = pendingEscalationCount()
+  return ['/escalations', t('nav.escalations') + (n ? ` (${n})` : '')]
 }
 
 /**

@@ -21,6 +21,27 @@
 #   fl-supervise close <run> "<reason>"
 #                                   Close the case; it reopens only when
 #                                   something about the run changes.
+#   fl-supervise nudge <run> "<text>"
+#                                   Have the hub type a message into the run's
+#                                   session, under a header that says it comes
+#                                   from you on the operator's behalf. It wakes a
+#                                   waiting agent, answers a help call, and opens
+#                                   a follow-up in a finished run. A few per case
+#                                   (3 unless set) until the operator answers.
+#   fl-supervise question <run> "<text>" [--choice "<label>"]...
+#                                   Ask the operator one question about the case
+#                                   (up to 6 one-click choices). One open
+#                                   question per case; the answer makes it due.
+#   fl-supervise end <run> "<reason>"
+#                                   End the run on purpose (like the operator's
+#                                   kill button, recorded as yours). A finished
+#                                   run only loses its session; unmerged work stays.
+#   fl-supervise escalate <run> <class> "<summary>"
+#                                   Hand a problem to somebody outside the hub.
+#                                   <class>: hub_defect, server_service,
+#                                   credentials, quota_or_credit, external_system,
+#                                   needs_access, other. Summary: one line, at
+#                                   most 300 characters.
 #   fl-supervise --help             This text.
 #
 # <run> is the run's full id or its short id (the first 8 characters).
@@ -34,7 +55,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
@@ -47,6 +68,7 @@ die_usage() { printf 'fl-supervise: %s\n' "$1" >&2; printf 'Run "fl-supervise --
 # A new subcommand is one more branch here plus its lines in the usage text; the
 # hub decides everything else (server/supervision.mjs, the op table).
 RUN=""; TEXT=""; MINUTES=""; REASON=""; AGAIN=""; LIMIT=""; TAIL=""; CHARS=""; EVENTS=""; ENTRIES=""; FORMAT="json"
+CLASS=""; CHOICES=()
 num_arg() { [[ "${2:-}" =~ ^[0-9]+$ ]] || die_usage "$1 takes a whole number"; }
 case "$CMD" in
     -h|--help|help) usage; exit 0 ;;
@@ -91,6 +113,26 @@ case "$CMD" in
         [[ $# -eq 2 ]] || die_usage 'close needs a run and a reason: fl-supervise close <run> "<reason>"'
         RUN="$1"; REASON="$2"
         ;;
+    nudge)
+        [[ $# -eq 2 ]] || die_usage 'nudge needs a run and a text: fl-supervise nudge <run> "<text>"'
+        RUN="$1"; TEXT="$2"
+        ;;
+    question)
+        [[ $# -ge 2 ]] || die_usage 'question needs a run and a text: fl-supervise question <run> "<text>" [--choice "<label>"]...'
+        RUN="$1"; TEXT="$2"; shift 2
+        while [[ $# -gt 0 ]]; do
+            [[ "$1" == "--choice" && $# -ge 2 ]] || die_usage 'after the text only --choice "<label>" is understood'
+            CHOICES+=("$2"); shift 2
+        done
+        ;;
+    end)
+        [[ $# -eq 2 ]] || die_usage 'end needs a run and a reason: fl-supervise end <run> "<reason>"'
+        RUN="$1"; REASON="$2"
+        ;;
+    escalate)
+        [[ $# -eq 3 ]] || die_usage 'escalate needs a run, a class and a summary: fl-supervise escalate <run> <class> "<summary>"'
+        RUN="$1"; CLASS="$2"; TEXT="$3"
+        ;;
     *) die_usage "unknown command: $CMD" ;;
 esac
 
@@ -107,9 +149,10 @@ fi
 
 # The body as JSON, built by python3 so no text can break the quoting. Minutes
 # travel as the string they were typed as: the hub checks them, not this script.
-PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" "$LIMIT" "$TAIL" "$CHARS" "$EVENTS" "$ENTRIES" <<'PY'
+PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" "$LIMIT" "$TAIL" "$CHARS" "$EVENTS" "$ENTRIES" "$CLASS" ${CHOICES[@]+"${CHOICES[@]}"} <<'PY'
 import json, sys
-cmd, run, text, minutes, reason, again, limit, tail, chars, events, entries = sys.argv[1:12]
+cmd, run, text, minutes, reason, again, limit, tail, chars, events, entries, klass = sys.argv[1:13]
+choices = sys.argv[13:]
 op = {"look": "bundle"}.get(cmd, cmd)
 body = {"op": op}
 if cmd != "cases":
@@ -131,8 +174,16 @@ if cmd == "note":
         body["again"] = again
 elif cmd == "again":
     body["minutes"] = minutes
-elif cmd == "close":
+elif cmd == "close" or cmd == "end":
     body["reason"] = reason
+elif cmd == "nudge":
+    body["text"] = text
+elif cmd == "question":
+    body["text"] = text
+    body["choices"] = choices
+elif cmd == "escalate":
+    body["class"] = klass
+    body["summary"] = text
 print(json.dumps(body))
 PY
 )"

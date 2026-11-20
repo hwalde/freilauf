@@ -990,6 +990,85 @@ function releaseSandbox(runId, source) {
 }
 
 /**
+ * End a run on purpose — THE body of the kill route, and of a supervisor's
+ * `end` (server/supervision-acts.mjs). One function so "ended by the operator"
+ * and "ended by the supervisor" cannot come to mean two different ends; only
+ * the attribution differs:
+ *
+ *   by 'user'        the kill route: `aborted {by:'user'}`, `followup_abandoned`
+ *                    and `tmux_closed` `{source:'user'}` — exactly as before;
+ *   by 'supervisor'  `aborted {by:'supervisor', supervisor_run, reason}`, the
+ *                    others `{source:'supervisor', supervisor_run}` — never read
+ *                    as the operator (`abortedByFrom()`, `endedByOperator()`).
+ *
+ * The container goes FIRST, and the order is not tidiness (§7.11): the pane's
+ * process IS the container's client, so killing the session first leaves a
+ * container whose client has gone — the orphan case §8.18 is about, rather than
+ * a clean stop. An unsandboxed run answers `stopped: false` and nothing happens.
+ *
+ * 'done' and 'aborted' are final answers, so an end can only close the session
+ * they left standing: 'done' came through cleanly and must not be rewritten (the
+ * coding agents keep their session after the work is done — that is the
+ * ordinary state of a finished run, not a corner case), and 'aborted' already IS
+ * what the button means. Same rule, and same event, as reconcileClosedSession().
+ * 'failed' is deliberately NOT in that list. The button was rendered while the
+ * run was still going, so a click that lands after the watcher has written
+ * 'failed' (pane died in between — measured: two seconds) is still a cancel,
+ * and the final status has to say what the CLICK said, not what the race
+ * decided. Cancelling a failed run IS setting it to 'aborted'.
+ *
+ * What is left behind is assessed either way; the operator is told about
+ * unmerged leftovers only when he did not end it himself (whoever clicked the
+ * button is looking at the page; a supervisor's end he has not seen).
+ *
+ * Returns `{ outcome, followupAbandoned }`: `'session_closed'` for a run that
+ * had already finished, `'aborted'` otherwise, `null` for no such run.
+ */
+export async function endRun(runId, { by = 'user', supervisorRun = null, reason = null } = {}) {
+  const run = getRun(runId)
+  const supervisor = by === 'supervisor'
+  const who = supervisor ? { source: 'supervisor', supervisor_run: supervisorRun } : { source: 'user' }
+  if (run) {
+    try { await stopRunContainer(run) } catch { /* fail-soft: the session still has to go */ }
+  }
+  if (run?.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
+  if (!run) return { outcome: null, followupAbandoned: false }
+  if (['done', 'aborted'].includes(run.status)) {
+    // With the session goes the way a follow-up could report: an open
+    // follow-up commission is given up with it — and what it left in the
+    // worktree is assessed, exactly as the abort path below assesses its own
+    // leftovers.
+    db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')),
+                agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(runId)
+    let followupAbandoned = false
+    if (run.followup_since) {
+      addEvent(runId, 'followup_abandoned', supervisor ? { ...who, reason } : who)
+      abandonFollowUp(runId, supervisor)
+      followupAbandoned = true
+    }
+    if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', who)
+    return { outcome: 'session_closed', followupAbandoned }
+  }
+  // Set tmux_closed_at right away: otherwise the detail page tries to attach
+  // a terminal to the dead session until the next watcher tick (410 in the browser).
+  // followup_since=NULL: a FAILED run can carry an open follow-up commission —
+  // with the cancel it is given up, like with any other end of the session.
+  // …and what the agent last said about its attention goes with the session.
+  db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
+              tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), finish_state=NULL,
+              followup_since=NULL, agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(runId)
+  // Same event kind reconcileClosedSession() writes, so "why did this run
+  // stop?" has one answer to look for rather than two.
+  addEvent(runId, 'aborted', supervisor ? { by: 'supervisor', supervisor_run: supervisorRun, reason } : { by: 'user' })
+  // An end somebody ASKED for is an abort, even in the finish gate — and what
+  // it leaves behind is assessed like any other unfinished run.
+  assessLater(runId, supervisor)
+  // "run finished" triggers, without waiting for the watcher
+  import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
+  return { outcome: 'aborted', followupAbandoned: !!run.followup_since }
+}
+
+/**
  * An aborted run leaves work behind too. The assessment always happens (the
  * detail page shows it); only the run the WATCHER aborted — a session that
  * vanished on its own, which nobody was watching for — also says so to the operator.

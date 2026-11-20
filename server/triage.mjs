@@ -106,7 +106,7 @@ export function generalRules() {
  */
 export const ROUTES = Object.freeze({
   urgent: ['help', 'access', 'merge_blocked', 'review_changes', 'review_resolver', 'aborted_unmerged',
-    'followup_unmerged', 'unpushed', 'start_failed', 'max_runtime'],
+    'followup_unmerged', 'unpushed', 'start_failed', 'max_runtime', 'supervisor_question', 'escalation'],
   deputy: ['done', 'failed', 'followup', 'followup_failed', 'exit_without_report', 'pane_died'],
   interim: ['overrun', 'followup_overrun'],
   digest: ['deferred', 'resolving', 'review_merged', 'review_closed'],

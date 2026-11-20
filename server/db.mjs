@@ -517,7 +517,32 @@ CREATE TABLE IF NOT EXISTS case_state (
   parked_at TEXT,
   last_round_at TEXT
 );
+-- Problems a supervisor handed to somebody outside the hub (server/escalations.mjs,
+-- the only writer). The list an external resolver collects through
+-- GET /api/escalations; the run it is about keeps the result in its case file.
+CREATE TABLE IF NOT EXISTS escalations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  raised_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  class TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open',
+  claimed_by TEXT,
+  claimed_at TEXT,
+  resolved_at TEXT,
+  outcome TEXT,
+  note TEXT,
+  announced_at TEXT,
+  reminded_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_state ON escalations(state, id);
+CREATE INDEX IF NOT EXISTS idx_escalations_run ON escalations(run_id);
 `)
+// When the hub last typed a supervisor's nudge into this run (server/supervision-acts.mjs).
+// The agent's own `_working prompt` hook follows a beat later; where the hook
+// carries no head (cursor, hermes) this moment is how its echo is recognised.
+addColumn('runs', 'nudge_typed_at', 'TEXT')
 /**
  * Drop the CHECK rule on `agents.harness` — once, idempotently.
  *
