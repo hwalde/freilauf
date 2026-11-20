@@ -90,14 +90,16 @@ export function runInfo(runId) {
  * `transcript` capability (server/transcript.mjs; claude's JSONL, cursor's
  * transcript, opencode's store). '' for a harness without one, or a run whose
  * record cannot be found; runText() then falls back to the log tail. Tool calls
- * and results are one line each — the model needs the gist, not the payloads.
+ * and results are one line each — the model needs the gist, not the payloads —
+ * and a message is kept whole up to the budget, so a long closing answer is not
+ * cut to its end.
  */
 async function transcriptText(runId) {
   const run = getRun(runId)
   if (!run) return ''
   const tr = await harnessTranscript(run, { tail: TRANSCRIPT_TAIL_MAX })
   if (!tr) return ''
-  const { messages } = boundMessages(tr.messages, { tail: TRANSCRIPT_TAIL_MAX, chars: TRANSCRIPT_CHARS })
+  const { messages } = boundMessages(tr.messages, { tail: TRANSCRIPT_TAIL_MAX, chars: TRANSCRIPT_CHARS, messageMax: TRANSCRIPT_CHARS })
   return messages.map(m => `### ${m.role}\n${m.text}`).join('\n\n')
 }
 

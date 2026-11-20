@@ -4,14 +4,15 @@
 #   fl-supervise cases [--text] [--limit <n>]
 #                                   What is due now, most urgent first, each with
 #                                   its reason and ages (JSON; --text: readable).
-#   fl-supervise look <run> [--json] [--tail <n>] [--chars <n>]
+#   fl-supervise look <run> [--json] [--tail <n>] [--chars <n>] [--events <n>] [--entries <n>]
 #                                   Everything about one case: the task, its
 #                                   state, why it is due, events, git, the tail
 #                                   of its transcript, the case file, how to
 #                                   attach. Readable text; --json: the object.
 #                                   Records that you looked. --tail (messages,
 #                                   up to 200) and --chars (up to 60000) widen
-#                                   the transcript.
+#                                   the transcript; --events and --entries (up
+#                                   to 200) show more of the history.
 #   fl-supervise note <run> "<text>" [--again <minutes>]
 #                                   Write a note into the run's case file;
 #                                   --again also says when to look again.
@@ -33,7 +34,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
@@ -45,7 +46,7 @@ die_usage() { printf 'fl-supervise: %s\n' "$1" >&2; printf 'Run "fl-supervise --
 # One branch per subcommand, each filling OP and the fields of the JSON body.
 # A new subcommand is one more branch here plus its lines in the usage text; the
 # hub decides everything else (server/supervision.mjs, the op table).
-RUN=""; TEXT=""; MINUTES=""; REASON=""; AGAIN=""; LIMIT=""; TAIL=""; CHARS=""; FORMAT="json"
+RUN=""; TEXT=""; MINUTES=""; REASON=""; AGAIN=""; LIMIT=""; TAIL=""; CHARS=""; EVENTS=""; ENTRIES=""; FORMAT="json"
 num_arg() { [[ "${2:-}" =~ ^[0-9]+$ ]] || die_usage "$1 takes a whole number"; }
 case "$CMD" in
     -h|--help|help) usage; exit 0 ;;
@@ -68,6 +69,8 @@ case "$CMD" in
                 --text) FORMAT="text"; shift ;;
                 --tail) num_arg --tail "${2:-}"; TAIL="$2"; shift 2 ;;
                 --chars) num_arg --chars "${2:-}"; CHARS="$2"; shift 2 ;;
+                --events) num_arg --events "${2:-}"; EVENTS="$2"; shift 2 ;;
+                --entries) num_arg --entries "${2:-}"; ENTRIES="$2"; shift 2 ;;
                 *) die_usage "look: unknown option $1" ;;
             esac
         done
@@ -104,9 +107,9 @@ fi
 
 # The body as JSON, built by python3 so no text can break the quoting. Minutes
 # travel as the string they were typed as: the hub checks them, not this script.
-PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" "$LIMIT" "$TAIL" "$CHARS" <<'PY'
+PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" "$LIMIT" "$TAIL" "$CHARS" "$EVENTS" "$ENTRIES" <<'PY'
 import json, sys
-cmd, run, text, minutes, reason, again, limit, tail, chars = sys.argv[1:10]
+cmd, run, text, minutes, reason, again, limit, tail, chars, events, entries = sys.argv[1:12]
 op = {"look": "bundle"}.get(cmd, cmd)
 body = {"op": op}
 if cmd != "cases":
@@ -118,6 +121,10 @@ if cmd == "look":
         body["tail"] = tail
     if chars:
         body["chars"] = chars
+    if events:
+        body["events"] = events
+    if entries:
+        body["entries"] = entries
 if cmd == "note":
     body["text"] = text
     if again:

@@ -782,8 +782,13 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - `dueVerdict()` is the one due predicate: pure (no subprocess, git, tmux or
   database), fed by `caseFacts()`, applied to every candidate by `dueCases()`;
   its exclusions come before its conditions, and a supervisor, taken-out,
-  archived, conflict, parked run or one ended by the operator, a flow or a
-  supervisor is never due.
+  archived, conflict, parked run or one ended by the operator (the kill, or
+  the last follow-up abandoned from the page), a flow or a supervisor is never
+  due.
+- `dueCases()` takes as candidates only runs that are working, ended since
+  supervision began in a state that can be due, or have a look-again time or
+  unseen news, working runs first, so runs that ended fine never push an old
+  stuck run past its fence; a hit fence is said in the answer.
 - `supervision_since` is set once, when supervision first becomes active; a
   run that ended before it is never due for how it ended, so switching a
   supervisor on does not make the past a case.

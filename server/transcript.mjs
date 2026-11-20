@@ -72,18 +72,20 @@ export function oneLine(text, max = TOOL_LINE_MAX) {
 /**
  * The newest `tail` messages whose texts fit into `chars`, newest last. Every
  * message is cut at `MESSAGE_CHARS_MAX` first (keeping its end, where the answer
- * usually is); then the oldest go until the rest fits — and if the newest alone
- * is over the budget, its end is kept. Says what was cut, so the reader knows
+ * usually is; `messageMax` widens that for a caller that wants whole
+ * messages); then the oldest go until the rest fits — and if the newest alone
+ * is over the budget, its end is kept. Never longer than `chars`. Says what was cut, so the reader knows
  * that there is more and how to ask for it.
  */
-export function boundMessages(messages, { tail, chars }) {
+export function boundMessages(messages, { tail, chars, messageMax = MESSAGE_CHARS_MAX }) {
   const all = (messages ?? []).filter(m => m && String(m.text ?? '').trim())
   const total = all.length
+  const keepEnd = (text, max) => (max > 1 ? '…' + text.slice(-(max - 1)) : '…')
   const keep = all.slice(-tail).map(m => {
     const text = String(m.text).trim()
-    const long = text.length > MESSAGE_CHARS_MAX
+    const long = text.length > messageMax
     return { role: String(m.role ?? 'unknown'), at: m.at ?? null,
-      text: long ? '…' + text.slice(-(MESSAGE_CHARS_MAX - 1)) : text, ...(long ? { cut: true } : {}) }
+      text: long ? keepEnd(text, messageMax) : text, ...(long ? { cut: true } : {}) }
   })
   let used = 0
   let first = keep.length
@@ -96,7 +98,7 @@ export function boundMessages(messages, { tail, chars }) {
   let charsCut = first > 0
   if (!out.length && keep.length) {
     const last = keep[keep.length - 1]
-    out = [{ ...last, text: '…' + last.text.slice(-(chars - 1)), cut: true }]
+    out = [{ ...last, text: keepEnd(last.text, chars), cut: true }]
     charsCut = true
   }
   return {

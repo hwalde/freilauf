@@ -37,8 +37,9 @@ function dataLine(entry) {
   if (entry.kind === 'note' && d.again_minutes) return t('case.note_again', { minutes: d.again_minutes })
   if (entry.kind === 'answer' && d.choice) return t('case.answer_choice', { choice: d.choice })
   if (entry.kind === 'look' && 'due' in d) {
-    return d.due && DUE_REASONS[d.due] !== undefined
-      ? t('case.look_due', { reason: t(`case.reason_${d.due}`) }) : t('case.look_not_due')
+    if (!d.due) return t('case.look_not_due')
+    // A reason this page has no words for is shown as it is, never as "not due".
+    return t('case.look_due', { reason: DUE_REASONS[d.due] !== undefined ? t(`case.reason_${d.due}`) : String(d.due) })
   }
   return ''
 }

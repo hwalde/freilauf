@@ -261,7 +261,8 @@ function dueConditions(run, facts, nowMs, cfg) {
  *   run    the run row
  *   state  its `case_state` row, or null
  *   facts  what `caseFacts()` read: mergeMode, waitingSince, helpSince,
- *          anomalies, incidents, paneDied, abortedBy, entries {reply, answer,
+ *          anomalies, incidents, paneDied, abortedBy, followupAbandonedBy
+ *          (the last follow-up ended by 'operator' or the 'hub'), entries {reply, answer,
  *          resolved}, lastInput {id, kind, ts}, lastLookId, lastClosedId,
  *          supervisionSince
  *   cfg    { waitMs, intervalMs } (`supervisionConfig()`)
@@ -282,6 +283,9 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
   if (run.resolves_run_id) return no('conflict_resolver')
   if (run.status === 'aborted' && ['operator', 'flow', 'supervisor'].includes(facts.abortedBy)) {
     return no(`ended_by_${facts.abortedBy}`)
+  }
+  if (FINISHED.includes(run.status) && !followUpActive(run) && facts.followupAbandonedBy === 'operator') {
+    return no('ended_by_operator')
   }
   if (state?.parked_at) return no('parked')
 
@@ -428,6 +432,17 @@ export function caseFacts(run, { since = getSetting('supervision_since') } = {})
   if (run.status === 'aborted') {
     try { abortedBy = abortedByFrom(JSON.parse(ev('aborted')?.payload ?? '{}') ?? {}) } catch { abortedBy = 'hub' }
   }
+  // A follow-up the operator ended himself is "ended by the operator" too
+  // (`endedByOperator()` reads it the same way) — as long as nothing came after it.
+  let followupAbandonedBy = null
+  const ab = db.prepare(`SELECT id, payload FROM events WHERE run_id=? AND kind='followup_abandoned' ORDER BY id DESC LIMIT 1`).get(run.id)
+  if (ab) {
+    const later = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND id > ? AND kind IN
+      ('followup_started','followup_reported','followup_done','followup_failed','done','failed') LIMIT 1`).get(run.id, ab.id)
+    let src = null
+    try { src = JSON.parse(ab.payload ?? '{}')?.source ?? null } catch { src = null }
+    if (!later) followupAbandonedBy = ['user', 'operator', 'web'].includes(src) ? 'operator' : 'hub'
+  }
   const counts = { reply: 0, answer: 0, resolved: 0 }
   for (const r of db.prepare(`SELECT kind, count(*) c FROM case_entries WHERE run_id=? AND kind IN ('reply','answer','resolved')
       GROUP BY kind`).all(run.id)) counts[r.kind] = r.c
@@ -443,6 +458,7 @@ export function caseFacts(run, { since = getSetting('supervision_since') } = {})
       anzahl: i.anzahl, beleg: i.beleg })),
     paneDied: !!ev('pane_died'),
     abortedBy,
+    followupAbandonedBy,
     entries: counts,
     lastInput: lastInput ? { id: lastInput.id, kind: lastInput.kind, ts: lastInput.ts } : null,
     lastLookId: maxId('look'),
@@ -454,23 +470,44 @@ export function caseFacts(run, { since = getSetting('supervision_since') } = {})
 /** How many runs `dueCases()` judges at most per call — a fence, not a limit anybody should reach. */
 export const DUE_CANDIDATES_MAX = 500
 
+/** A run somebody is working in: always a candidate, and judged first. */
+const LIVE_SQL = `(r.status IN ('running', 'waiting_help') OR r.followup_open = 1 OR r.followup_since IS NOT NULL)`
+
 /**
  * THE query behind the due check: every run that could be a case, judged by
  * `dueVerdict()`, the due ones most urgent first (then the longest-standing).
  * Candidates are the runs that are not archived, not supervisors, not taken out
- * and not conflict runs, and are working, have an open follow-up, ended since
- * supervision began, or have a case file. Returns `{ cases, considered, since }`,
- * each case `{ run, verdict }`. Stage C's clock calls this; so does `cases`.
+ * and not conflict runs, and are working or have an open follow-up, or ended
+ * since supervision began in a state that can be due, or have a case file
+ * with a look-again time or news nobody looked at. Returns `{ cases, total,
+ * considered, capped, since }`, each case `{ run, verdict }`; `capped` says the
+ * fence was hit and the oldest finished candidates were not judged. Stage C's clock calls this; so does `cases`.
  */
 export function dueCases({ nowMs = Date.now(), limit = 50, begin = false } = {}) {
   const since = supervisionSince(nowMs, { begin })
   const cfg = supervisionConfig()
-  const rows = db.prepare(`SELECT * FROM runs r WHERE r.archived_at IS NULL AND r.supervisor = 0
+  // Narrow on purpose: every run that ended fine since supervision began would
+  // otherwise be a candidate, and the fence below would start cutting off the
+  // OLDEST stuck runs — the ones this exists for. Working runs come first, so
+  // they are always judged; a hit fence is reported, never silent.
+  const rows = db.prepare(`SELECT r.* FROM runs r WHERE r.archived_at IS NULL AND r.supervisor = 0
       AND r.supervision_off = 0 AND r.resolves_run_id IS NULL
-      AND (r.status IN ('running', 'waiting_help') OR r.followup_open = 1 OR r.followup_since IS NOT NULL
-           OR (r.status IN ('done', 'failed', 'aborted') AND (? IS NULL OR r.ended_at IS NULL OR r.ended_at >= ?))
-           OR EXISTS (SELECT 1 FROM case_state c WHERE c.run_id = r.id))
-      ORDER BY r.started_at DESC LIMIT ?`).all(since, since, DUE_CANDIDATES_MAX)
+      AND (${LIVE_SQL}
+        OR (r.status IN ('done', 'failed', 'aborted') AND (? IS NULL OR r.ended_at IS NULL OR r.ended_at >= ?) AND (
+             r.status = 'failed' OR r.merge_status LIKE 'blocked_%'
+             OR r.merge_status IN ('unmerged_commits', 'unmerged_both', 'unmerged_dirty')
+             OR (r.status = 'done' AND r.merge_status IS NULL AND r.finish_state IS NULL
+                 AND EXISTS (SELECT 1 FROM repos p WHERE p.id = r.repo_id AND p.merge_mode = 'hub'))
+             OR EXISTS (SELECT 1 FROM events e WHERE e.run_id = r.id AND e.kind IN
+                  ('pane_died', 'anomaly:exit_without_report', 'anomaly:overrun', 'anomaly:no_activity', 'anomaly:followup_overrun'))
+             OR EXISTS (SELECT 1 FROM incidents i WHERE i.run_id = r.id AND i.geloest_am IS NULL
+                  AND (i.schwere = 'rot' OR i.typ = 'merge_blocked'))))
+        OR EXISTS (SELECT 1 FROM case_state c WHERE c.run_id = r.id AND c.parked_at IS NULL AND (c.look_again_at IS NOT NULL
+             OR EXISTS (SELECT 1 FROM case_entries x WHERE x.run_id = r.id AND x.kind IN ('reply', 'answer', 'resolved')
+                  AND x.id > COALESCE((SELECT max(y.id) FROM case_entries y WHERE y.run_id = r.id AND y.kind IN ('look', 'closed')), 0)))))
+      ORDER BY CASE WHEN ${LIVE_SQL} THEN 0 ELSE 1 END, r.started_at DESC LIMIT ?`).all(since, since, DUE_CANDIDATES_MAX + 1)
+  const capped = rows.length > DUE_CANDIDATES_MAX
+  if (capped) rows.length = DUE_CANDIDATES_MAX
   const cases = []
   for (const run of rows) {
     const verdict = dueVerdict(run, caseState(run.id), caseFacts(run, { since }), nowMs, cfg)
@@ -478,7 +515,7 @@ export function dueCases({ nowMs = Date.now(), limit = 50, begin = false } = {})
   }
   const age = (v) => (Number.isFinite(v.sinceMs) ? v.sinceMs : nowMs)
   cases.sort((a, b) => (b.verdict.urgency - a.verdict.urgency) || (age(a.verdict) - age(b.verdict)))
-  return { cases: cases.slice(0, Math.max(1, limit)), total: cases.length, considered: rows.length, since }
+  return { cases: cases.slice(0, Math.max(1, limit)), total: cases.length, considered: rows.length, capped, since }
 }
 
 // ----------------------------------------------------------------------- writers
@@ -577,6 +614,14 @@ export async function startSupervisorRound(agent) {
 export const BUNDLE_PROMPT_CHARS = 1500
 export const BUNDLE_EVENTS = 20
 export const BUNDLE_ENTRIES = 30
+/** The most events or entries a caller may ask a bundle for (`--events`, `--entries`). */
+export const BUNDLE_LIST_MAX = 200
+
+/** A whole number in [1, BUNDLE_LIST_MAX] from what a caller sent, or the default. */
+function boundedCount(raw, dflt) {
+  const s = String(raw ?? '').trim()
+  return /^\d+$/.test(s) && Number(s) >= 1 ? Math.min(Number(s), BUNDLE_LIST_MAX) : dflt
+}
 
 const fence = (s) => `<data>\n${escapeData(String(s ?? '').trim())}\n</data>`
 const inline = (s) => `<data>${escapeData(String(s ?? '').replace(/\s+/g, ' ').trim())}</data>`
@@ -588,7 +633,9 @@ const isoOf = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null)
  * (`recordLook()` does that). Never throws for a run whose worktree or session
  * is gone: that is said, and "could not answer" stays `null` / "unknown".
  */
-export async function caseBundle(run, { nowMs = Date.now(), tail, chars } = {}) {
+export async function caseBundle(run, { nowMs = Date.now(), tail, chars, events: evN, entries: enN } = {}) {
+  const nEvents = boundedCount(evN, BUNDLE_EVENTS)
+  const nEntries = boundedCount(enN, BUNDLE_ENTRIES)
   const { worktreeSummary, resumeCommand } = await import('./integrate.mjs')
   const { runTranscript } = await import('./transcript.mjs')
   const { paneAlive, sessionGone } = await import('./sessions.mjs')
@@ -632,14 +679,17 @@ export async function caseBundle(run, { nowMs = Date.now(), tail, chars } = {}) 
   }
 
   const evRows = db.prepare(`SELECT * FROM (SELECT id, ts, kind, payload FROM events WHERE run_id=? ORDER BY id DESC LIMIT ?)
-    ORDER BY id`).all(run.id, BUNDLE_EVENTS)
+    ORDER BY id`).all(run.id, nEvents)
   const evTotal = db.prepare('SELECT count(*) c FROM events WHERE run_id=?').get(run.id).c
-  const events = evRows.map(e => ({ ts: e.ts, kind: e.kind, payload: e.payload ? String(e.payload).slice(0, 200) : null }))
+  const events = evRows.map(e => {
+    const p = e.payload ? String(e.payload) : null
+    return { ts: e.ts, kind: e.kind, payload: p && p.length > 200 ? p.slice(0, 199) + '…' : p }
+  })
 
   let git
   try { git = await worktreeSummary(run, repo) } catch (err) { git = { error: String(err.message ?? err) } }
   const transcript = await runTranscript(run, { tail, chars }, nowMs)
-  const entries = caseEntries(run.id, { limit: BUNDLE_ENTRIES })
+  const entries = caseEntries(run.id, { limit: nEntries })
   const entryTotal = caseEntryCount(run.id)
   const alive = run.tmux_session ? await paneAlive(run.tmux_session) : null
   // paneAlive() answers null for a gone session too; only has-session tells it from "no answer".
@@ -708,6 +758,7 @@ function bundleText(b, { nowMs, cfg }) {
   for (const e of b.events.list) {
     L.push(`- ${agoEn(parseDbUtc(e.ts), nowMs)}: ${e.kind}${e.payload && e.payload !== '{}' && e.payload !== 'null' ? ` ${inline(e.payload)}` : ''}`)
   }
+  if (b.events.total > b.events.shown) L.push(`(Older events left out. More: fl-supervise look ${short} --events <n>, up to ${BUNDLE_LIST_MAX}.)`)
 
   const g = b.git ?? {}
   L.push('', '## Git')
@@ -753,6 +804,7 @@ function bundleText(b, { nowMs, cfg }) {
     L.push(`- ${agoEn(parseDbUtc(e.ts), nowMs)}, ${e.kind} by ${who}${data}${e.text ? ':' : ''}`)
     if (e.text) L.push(fence(e.text))
   }
+  if (c.total > c.entries.length) L.push(`(Older entries left out. More: fl-supervise look ${short} --entries <n>, up to ${BUNDLE_LIST_MAX}.)`)
 
   const at = b.attach
   L.push('', '## How a human would attach')
@@ -784,9 +836,10 @@ export function recordLook(runId, callerId, verdict, nowMs = Date.now()) {
 }
 
 /** One line per due case, for `fl-supervise cases` (English, ages computed here). */
-export function casesText(list, { total, considered, nowMs = Date.now() }) {
-  if (!list.length) return `Nothing is due (${considered} run(s) considered).`
-  const L = [`${total} case(s) due${total > list.length ? `, the ${list.length} most urgent shown` : ''}, most urgent first:`]
+export function casesText(list, { total, considered, capped = false, nowMs = Date.now() }) {
+  const fence = capped ? ` Only the first ${considered} candidates were judged (working runs first); older finished runs were not.` : ''
+  if (!list.length) return `Nothing is due (${considered} run(s) considered).${fence}`
+  const L = [`${total} case(s) due${total > list.length ? `, the ${list.length} most urgent shown` : ''}, most urgent first:${fence}`]
   for (const c of list) {
     L.push(`- ${c.short_id} ${inline(c.title ?? '(untitled)')} · ${c.repo ? inline(c.repo) : '?'}${c.agent ? ` · agent ${inline(c.agent)}` : ''} · ${c.harness} · ${c.display_status}`)
     L.push(`  why: ${c.why}; started ${agoEn(parseDbUtc(c.started_at), nowMs)}`)
@@ -863,13 +916,13 @@ registerSupervisorOp('close', {
 })
 
 /**
- * `bundle {run, tail?, chars?}`: everything about one case (SPEC 4.3), as the
+ * `bundle {run, tail?, chars?, events?, entries?}`: everything about one case (SPEC 4.3), as the
  * object plus `text`, and the look is recorded. The plain GET routes of the
  * read API never record a look (SPEC 7.6).
  */
 registerSupervisorOp('bundle', {
   async handler({ caller, target, body, nowMs }) {
-    const bundle = await caseBundle(target, { nowMs, tail: body.tail, chars: body.chars })
+    const bundle = await caseBundle(target, { nowMs, tail: body.tail, chars: body.chars, events: body.events, entries: body.entries })
     const look = recordLook(target.id, caller.id, bundle.due, nowMs)
     return { ...targetIds(target), look_entry: look.entry, looks_unchanged: look.looks_unchanged, ...bundle }
   },
@@ -899,8 +952,8 @@ registerSupervisorOp('cases', {
         why: dueSentence(verdict, nowMs, cfg),
       }
     })
-    return { cases, total: r.total, considered: r.considered, supervision_since: r.since,
-      text: casesText(cases, { total: r.total, considered: r.considered, nowMs }) }
+    return { cases, total: r.total, considered: r.considered, capped: r.capped, supervision_since: r.since,
+      text: casesText(cases, { total: r.total, considered: r.considered, capped: r.capped, nowMs }) }
   },
 })
 
