@@ -5255,7 +5255,7 @@ print(json.dumps([m.body_from_row(dict(row, supervisor=1)), m.body_from_row(dict
     isFalse(fr.log.some(l => l.msg === 'went down the failed branch'),
       'and switch_outcome never saw a made-up "failed" for a run that never existed')
   })
-  // A supervisor agent is the hub's to start (SPEC 7.1): actions.startAgent()
+  // A supervisor agent is the hub's to start: actions.startAgent()
   // answers `supervisor` for it, and the step treats that like a switched-off one.
   const supApi = { ...stubApi, startAgent: async () => ({ ok: true, runId: null, supervisor: true, name: 'SUP' }) }
   await check('start_agent on a supervisor agent: skipped without wait, failed with it', async () => {
@@ -15335,7 +15335,7 @@ process.stdout.write(JSON.stringify(out))
       equal(abortedByFrom(null), null, 'no payload')
     })
 
-    // ---- the due predicate, as a table (SPEC 4.7, 4.1a, 7.9–7.14) ----
+    // ---- the due predicate, as a table ----
     const NOW = Date.parse('2026-06-01T12:00:00Z')
     const ago = (min) => dbUtc(NOW - min * 60_000)
     const cfg = { waitMs: 30 * 60_000, intervalMs: 60 * 60_000 }
@@ -15356,9 +15356,9 @@ process.stdout.write(JSON.stringify(out))
         ['a working run', R(), null, F(), 'x:not_due'],
         ['waiting past the threshold', waiting(45), null, F({ waitingSince: ago(45) }), 'waiting_input'],
         ['waiting under the threshold', waiting(10), null, F({ waitingSince: ago(10) }), 'x:not_due'],
-        ['7.10: since the newest agent_waiting event, not the renewed column', waiting(45), null, F({ waitingSince: ago(50) }), 'waiting_input'],
-        ['7.11: help past the threshold', R({ status: 'waiting_help' }), null, F({ helpSince: ago(45) }), 'waiting_help'],
-        ['7.11: help under it — the operator was just paged', R({ status: 'waiting_help' }), null, F({ helpSince: ago(5) }), 'x:not_due'],
+        ['since the newest agent_waiting event, not the renewed column', waiting(45), null, F({ waitingSince: ago(50) }), 'waiting_input'],
+        ['help past the threshold', R({ status: 'waiting_help' }), null, F({ helpSince: ago(45) }), 'waiting_help'],
+        ['help under it — the operator was just paged', R({ status: 'waiting_help' }), null, F({ helpSince: ago(5) }), 'x:not_due'],
         ['overrun', R(), null, F({ anomalies: ['anomaly:overrun'] }), 'anomaly'],
         ['no activity', R(), null, F({ anomalies: ['anomaly:no_activity'] }), 'anomaly'],
         ['a soft overrun is no case', R(), null, F({ anomalies: ['anomaly:soft_overrun'] }), 'x:not_due'],
@@ -15368,19 +15368,19 @@ process.stdout.write(JSON.stringify(out))
         ['its pane died', failed(), null, F({ paneDied: true }), 'pane_died'],
         ['it failed', failed(), null, F(), 'failed'],
         ['merge blocked', R({ status: 'done', ended_at: ago(60), merge_status: 'blocked_conflict' }), null, F({ mergeMode: 'hub' }), 'merge_blocked'],
-        ['7.12: unmerged leftovers where the hub merges', R({ status: 'aborted', ended_at: ago(60), merge_status: 'unmerged_commits' }), null, F({ mergeMode: 'hub', abortedBy: 'hub' }), 'unmerged'],
-        ['7.12: done, no merge status, past the grace', R({ status: 'done', ended_at: ago(60) }), null, F({ mergeMode: 'hub' }), 'unmerged'],
-        ['7.12: …within the grace', R({ status: 'done', ended_at: ago(10) }), null, F({ mergeMode: 'hub' }), 'x:not_due'],
-        ['7.12: a repository with merging off is no case', R({ status: 'done', ended_at: ago(60) }), null, F(), 'x:not_due'],
+        ['unmerged leftovers where the hub merges', R({ status: 'aborted', ended_at: ago(60), merge_status: 'unmerged_commits' }), null, F({ mergeMode: 'hub', abortedBy: 'hub' }), 'unmerged'],
+        ['done, no merge status, past the grace', R({ status: 'done', ended_at: ago(60) }), null, F({ mergeMode: 'hub' }), 'unmerged'],
+        ['…within the grace', R({ status: 'done', ended_at: ago(10) }), null, F({ mergeMode: 'hub' }), 'x:not_due'],
+        ['a repository with merging off is no case', R({ status: 'done', ended_at: ago(60) }), null, F(), 'x:not_due'],
         ['merged is fine', R({ status: 'done', ended_at: ago(60), merge_status: 'merged' }), null, F({ mergeMode: 'hub' }), 'x:not_due'],
         ['an aborted run with nothing left is no case', R({ status: 'aborted', ended_at: ago(60) }), null, F({ abortedBy: 'hub' }), 'x:not_due'],
-        ['7.9: ended before supervision began', failed({ ended_at: ago(2000) }), null, F(), 'x:not_due'],
-        ['7.9: still waiting, whatever its age', R({ ...waiting(45), started_at: ago(5000) }), null, F({ waitingSince: ago(45) }), 'waiting_input'],
+        ['ended before supervision began', failed({ ended_at: ago(2000) }), null, F(), 'x:not_due'],
+        ['still waiting, whatever its age', R({ ...waiting(45), started_at: ago(5000) }), null, F({ waitingSince: ago(45) }), 'waiting_input'],
         // exclusions
         ['a supervisor run', failed({ supervisor: 1 }), null, F(), 'x:supervisor_run'],
-        ['4.1a: taken out', failed({ supervision_off: 1 }), null, F(), 'x:taken_out'],
+        ['taken out', failed({ supervision_off: 1 }), null, F(), 'x:taken_out'],
         ['archived', failed({ archived_at: ago(5) }), null, F(), 'x:archived'],
-        ['7.13: a conflict run', failed({ resolves_run_id: 'o' }), null, F(), 'x:conflict_resolver'],
+        ['a conflict run', failed({ resolves_run_id: 'o' }), null, F(), 'x:conflict_resolver'],
         ['ended by the operator', R({ status: 'aborted', ended_at: ago(60), merge_status: 'unmerged_commits' }), null, F({ mergeMode: 'hub', abortedBy: 'operator' }), 'x:ended_by_operator'],
         ['ended by a flow', R({ status: 'aborted', ended_at: ago(60) }), null, F({ abortedBy: 'flow', paneDied: true }), 'x:ended_by_flow'],
         ['ended by a supervisor', R({ status: 'aborted', ended_at: ago(60) }), null, F({ abortedBy: 'supervisor', paneDied: true }), 'x:ended_by_supervisor'],
@@ -15413,7 +15413,7 @@ process.stdout.write(JSON.stringify(out))
       }
     })
 
-    await check('7.14: a closed case and a pending look-again come back only on news', () => {
+    await check('a closed case and a pending look-again come back only on news', () => {
       const run = failed()
       const facts = F()
       const fp = fpOf(run, facts)
@@ -15895,8 +15895,34 @@ process.stdout.write(JSON.stringify(out))
       const verdict = sv.dueVerdict(r, null, sv.caseFacts(r), NOW, sv.supervisionConfig())
       let last
       for (let i = 0; i < sv.PARK_AFTER; i++) last = sv.recordLook(r.id, '5c000000-0000-4000-8000-0000000000ff', verdict, NOW + i)
-      equal(last.looks_unchanged, sv.PARK_AFTER, `${sv.PARK_AFTER} looks without a change are counted`)
-      equal(sv.PARK_AFTER, 6, 'six, as the spec says')
+      equal(last.looks_unchanged, sv.PARK_AFTER, `${sv.PARK_AFTER} looks without a change are counted outside a round`)
+      equal(sv.PARK_AFTER, 6, 'six, as docs/requirements.md says')
+    })
+
+    await check('the loop fence counts rounds, not looks: a round that looks twice has spent one round on the case', async () => {
+      const rounds = []
+      const round = () => {
+        const r = runRow({ supervisor: 1 })
+        db.prepare(`INSERT INTO events(run_id, kind, payload) VALUES(?, ?, '{"source":"clock","cases":[]}')`).run(r.id, sv.ROUND_EVENT)
+        rounds.push(r.id)
+        return r
+      }
+      const c = runRow({ status: 'failed', ended_at: ago(5) })
+      const first = round()
+      const look = async (caller, i) => (await sv.handleSupervise(caller.id, caller.report_token, { op: 'bundle', run: c.id }, NOW + i)).body
+      equal((await look(first, 0)).looks_unchanged, 1, 'the first look of a round counts')
+      const twice = await look(first, 1)
+      equal(`${twice.looks_unchanged}|${twice.parked}`, '1|false', 'the same round looking again does not')
+      let last
+      for (let i = 2; i <= sv.PARK_AFTER; i++) last = await look(round(), i)
+      equal(`${last.looks_unchanged}|${last.parked}`, `${sv.PARK_AFTER}|true`, 'six rounds that looked at the same state park it')
+      const d = runRow({ status: 'failed', ended_at: ago(5) })
+      const loose = runRow({ supervisor: 1 })
+      let l
+      for (let i = 0; i < 2; i++) l = (await sv.handleSupervise(loose.id, loose.report_token, { op: 'bundle', run: d.id }, NOW + i)).body
+      equal(l.looks_unchanged, 2, 'a supervisor run outside any round counts every look, as before')
+      // Ended, so they hold no clock for the checks that follow.
+      for (const id of rounds) db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(id)
     })
 
     await check('a case is not handed out again within the interval unless something arrived', () => {
@@ -16089,6 +16115,23 @@ process.stdout.write(JSON.stringify(out))
       setS('supervision_interval_minutes', '')
       equal(sv.supervisionConfig().intervalMs, 60 * 60_000, "'' is the default")
       equal(sv.supervisionConfig().casesPerRound, 8, 'eight cases per round by default')
+    })
+
+    await check('the nudge limit and the escalation grace are held to their range when read, like the other three', async () => {
+      const acts = await import('../server/supervision-acts.mjs')
+      const esc = await import('../server/escalations.mjs')
+      for (const [v, want, why] of [['', 3, "'' is the default"], ['0', 1, 'a stored 0 would refuse every nudge: held to 1'],
+        ['1', 1, 'the floor'], ['20', 20, 'the ceiling'], ['21', 20, 'above it: held to 20'], ['junk', 3, 'junk is the default']]) {
+        setS('supervision_nudge_limit', v)
+        equal(acts.nudgeLimit(), want, `nudge limit ${JSON.stringify(v)}: ${why}`)
+      }
+      for (const [v, want, why] of [['', 0, "'' is 0: tell at once"], ['0', 0, '0 is valid'], ['10080', 10080, 'the ceiling'],
+        ['20000', 10080, 'above it: held to a week'], ['-5', 0, 'below it: held to 0']]) {
+        setS('supervision_escalation_grace_minutes', v)
+        equal(esc.escalationGraceMs(), want * 60_000, `grace ${JSON.stringify(v)}: ${why}`)
+      }
+      setS('supervision_nudge_limit', '')
+      setS('supervision_escalation_grace_minutes', '')
     })
   }
 

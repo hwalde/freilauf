@@ -75,8 +75,9 @@ a flow or a supervisor. A run that ended before supervision was first switched
 on is never due for how it ended. Without news a case is not handed out again
 within one interval. A **closed** case comes back only on news (a reply, an
 answer, an escalation result) or when something about the run changes while a
-due condition holds. A case looked at six times without its state changing —
-or handed to six rounds that never looked at it — is **parked**: the operator
+due condition holds. A case six rounds looked at without its state changing (a
+round counts once, however often it looks) — or handed to six rounds that never
+looked at it — is **parked**: the operator
 is told once, and it comes back on news, on a change, or with the Un-park
 button in its case file.
 
@@ -131,7 +132,8 @@ id is the first eight). Output is the hub's JSON answer on stdout, except
 | 0 | done; the answer is on stdout |
 | 1 | refused; the hub's sentence is on stderr and says what is the case — do not repeat the same call |
 | 2 | wrong usage, or no `FL_RUN_ID` (not inside a run) |
-| 3 | the hub could not be reached (nothing was written), or it did not answer in time (the call may have been written: read the case before repeating it — stderr says which) |
+| 3 | the hub could not be reached; nothing was written |
+| 4 | the hub did not answer within 15 s, or the connection broke off; the call may have been written — read the case before repeating it |
 
 It works only inside a supervisor run: the hub checks the bearer token, that the
 run in the path is the caller, that the caller is a supervisor run, and that the

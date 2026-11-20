@@ -1,6 +1,6 @@
 // Freilauf — the supervision clock: when a supervisor round starts, with which
-// cases, and what keeps rounds and cases from going nowhere (SPEC 4.7, 7.2,
-// 7.9–7.18, the timed half of 4.8).
+// cases, and what keeps rounds and cases from going nowhere (the rules:
+// docs/requirements.md, "Supervision"; the operator's view: docs/supervision.md).
 //
 // No model is asked anything here. The watcher pass calls `supervisionTick()`;
 // "Start now" on the supervisor agent calls `startSupervisorRound()`. Both
@@ -44,7 +44,7 @@ export function lastRoundStartMs() {
 }
 
 /**
- * How long a round may stay open before the hub ends it (SPEC 7.16):
+ * How long a round may stay open before the hub ends it:
  * max(2 x interval, 3 x the round's expected duration). Pure.
  */
 export function roundBoundMs(round, intervalMs) {
@@ -202,7 +202,7 @@ async function startRound(agent, cases, { total, capped, nowMs, cfg, source }) {
 }
 
 /**
- * "Start now" on a supervisor agent (SPEC 7.2): the due check by hand and one
+ * "Start now" on a supervisor agent: the due check by hand and one
  * round with whatever is due — an empty list is told to the agent as "nothing
  * is due", and it ends at once. Not gated by the pipeline switch, the interval
  * or the env fence (a deliberate start, like every "Start now"); refused, with
@@ -218,7 +218,7 @@ export async function startSupervisorRound(agent, { nowMs = Date.now(), source =
   if (busy.length) return { ok: false, runId: null, error: t('supervision.round_in_flight', { id: shortId(busy[0].id) }), inFlight: busy[0].id }
   starting = true
   try {
-    supervisionSince(nowMs, { begin: true })   // the first round marks where supervision began (SPEC 7.9)
+    supervisionSince(nowMs, { begin: true })   // the first round marks where supervision began
     const cfg = supervisionConfig()
     const due = dueCases({ nowMs, limit: 50, begin: true })
     const cases = await pickCases(due.cases, cfg, nowMs)

@@ -36,8 +36,9 @@
 #                                   question per case; the answer makes it due.
 #   fl-supervise end <run> "<reason>"
 #                                   End the run on purpose (like the operator's
-#                                   kill button, recorded as yours). A done run
-#                                   only loses its session; unmerged work stays.
+#                                   kill button, recorded as yours). A done or
+#                                   aborted run only loses its session, a failed
+#                                   one becomes aborted; unmerged work stays.
 #   fl-supervise escalate <run> <class> "<summary>"
 #                                   Hand a problem to somebody outside the hub.
 #                                   <class>: hub_defect, server_service,
@@ -49,8 +50,9 @@
 # <run> is the run's full id or its short id (the first 8 characters).
 # Output: the hub's JSON answer on stdout (look: its text), exit 0. A refusal: the hub's sentence
 # on stderr, exit 1 — it says what is the case; do not retry the same call.
-# Exit 2: wrong usage. Exit 3: the hub could not be reached (nothing was written),
-# or did not answer in time (it may have written: read the case before repeating).
+# Exit 2: wrong usage. Exit 3: the hub could not be reached (nothing was written).
+# Exit 4: no answer in time, or the connection broke off (it may have written:
+# read the case first).
 #
 # Works only inside a supervisor run (a run of an agent marked as supervisor):
 # the hub hands such a run FL_RUN_ID and FL_RUN_TOKEN and checks both, and the
@@ -58,7 +60,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
@@ -224,13 +226,18 @@ fi
 if [[ $RC -eq 7 ]]; then
     OUT="$(send_http 2>/dev/null)" && RC=0 || RC=$?
 fi
-if [[ $RC -eq 7 ]]; then
+# 7 (refused), 6 (host not resolved), 3 (malformed URL): nothing was sent.
+if [[ $RC -eq 7 || $RC -eq 6 || $RC -eq 3 ]]; then
     echo "fl-supervise: the hub is not reachable (socket: ${SOCKET:-none}, url: $HUB). Nothing was written." >&2
     exit 3
 fi
+# Reached but no answer — curl 28, its 15 s timeout, or a connection that broke
+# off (52, 56, …): the hub may already have written. Exit 4, told apart from 3 ("not
+# reached", nothing written), like fl-api does.
 if [[ $RC -ne 0 ]]; then
-    echo "fl-supervise: no answer from the hub (curl exit $RC). The call may or may not have been written — read the case file before repeating it." >&2
-    exit 3
+    if [[ $RC -eq 28 ]]; then why="did not answer within 15 s"; else why="broke the connection off (curl exit $RC)"; fi
+    echo "fl-supervise: the hub $why. The call may or may not have been written — read the case file before repeating it." >&2
+    exit 4
 fi
 CODE="${OUT##*$'\n'}"
 BODY="${OUT%$'\n'*}"

@@ -126,7 +126,7 @@ export function routeFor(type) {
  * or an interim note.
  */
 /**
- * A supervisor round's own end of work (SPEC 7.18): its `done` and its
+ * A supervisor round's own end of work: its `done` and its
  * follow-up reports are neither announced nor noted for the deputy — a round
  * every interval would otherwise be a message every interval, and what it did
  * is read in the case files. Its failures go the normal way. THE one place

@@ -130,7 +130,7 @@ function logStart(agent, slot, r) {
 }
 
 /**
- * The fixed rule of SPEC 4.9, independent of any supervisor: a run that keeps
+ * A fixed rule, independent of any supervisor: a run that keeps
  * its agent's schedule blocked while it has been waiting (for input or for
  * help) or silent for this long is announced to the operator — at most once in
  * this long, until it ends. Before, the skipped slots were only events.
@@ -138,7 +138,7 @@ function logStart(agent, slot, r) {
 export const SCHEDULE_BLOCKED_MS = 24 * 60 * 60_000
 
 /**
- * Since when `run` has been stuck in a way that matters for 4.9, or null when
+ * Since when `run` has been stuck in a way that matters for the 24-hour rule, or null when
  * it has not been for `SCHEDULE_BLOCKED_MS`. Pure. "Waiting" is the newest
  * `agent_waiting` event (the column is renewed on every assertion), "waiting
  * for help" the newest `help` event, "silent" `last_activity_at`; the earliest
@@ -163,14 +163,14 @@ export function scheduleBlockedSince(run, { waitingSince = null, helpSince = nul
   return hits[0] ?? null
 }
 
-/** May the next 4.9 notice go out? Pure: none before, or the last one is `SCHEDULE_BLOCKED_MS` old. */
+/** May the next 24-hour notice go out? Pure: none before, or the last one is `SCHEDULE_BLOCKED_MS` old. */
 export function scheduleBlockedNoticeDue(lastNoticeMs, nowMs = Date.now()) {
   return !Number.isFinite(lastNoticeMs) || nowMs - lastNoticeMs >= SCHEDULE_BLOCKED_MS
 }
 
 /**
  * A slot of `agent` was skipped because its run `busyId` is still open: the
- * event and the protocol row as always, then the 4.9 check. Shared by the tick
+ * event and the protocol row as always, then the 24-hour check. Shared by the tick
  * and the catch-up, so the rule sits at the exact moment a slot is lost.
  * The throttle reads the last notice of this type — sent, or held back because
  * the run is muted — so a muted run is not asked again every minute.
@@ -211,7 +211,7 @@ async function catchUpMissed(now) {
   const last = parseDbUtc(getSetting('last_tick_at'))
   if (!(hours > 0) || !Number.isFinite(last)) return
   const from = Math.max(last, now.getTime() - hours * 3_600_000)
-  // A supervisor agent is never started by its schedule (SPEC 7.2) — see tick().
+  // A supervisor agent is never started by its schedule — see tick().
   const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND supervisor = 0
     AND schedule_kind IN ('cron','woechentlich')`).all()
   for (const agent of agents) {
@@ -271,7 +271,7 @@ export async function tick() {
   // A supervisor agent (server/supervision.mjs) is never started by this tick,
   // whatever schedule it carries: the hub starts it when cases are due, and a
   // round started by the clock alone would have no case list and cost a full
-  // context for nothing (SPEC 7.2). Its form says so.
+  // context for nothing. Its form says so.
   const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND supervisor = 0
     AND schedule_kind <> 'manuell'`).all()
   const slot = now.toISOString().slice(0, 16)
@@ -554,7 +554,7 @@ export async function startRun(def, {
   // that was going to be contained and is not carries `sandbox:bypassed {by,
   // reason}`, and the overview and the notification read it from there.
   for (const [kind, payload] of sandboxPlan.events) addEvent(runId, kind, payload)
-  // Taken out of supervision at the start (SPEC 4.1a): a decision about the
+  // Taken out of supervision at the start: a decision about the
   // run, so it is part of its history from the first moment, like every later
   // switch on the run page.
   if (supervisionOff === 1) addEvent(runId, 'supervision_off', { by: 'operator', at_start: true })

@@ -34,7 +34,7 @@ import { escalateOp } from './escalations.mjs'
 
 // ------------------------------------------------------------------ pure helpers
 
-/** Every kind an entry may have (SPEC 4.2). Anything else is refused. */
+/** Every kind an entry may have. Anything else is refused. */
 export const CASE_KINDS = ['look', 'note', 'message', 'reply', 'question', 'answer',
   'action', 'escalated', 'resolved', 'closed', 'reopened']
 
@@ -96,8 +96,8 @@ function cleanRef(ref) {
 }
 
 /**
- * Every sentence a supervisor can be refused with. English literals on purpose
- * (SPEC 7.7): an agent reads them, and they must say what IS the case so the
+ * Every sentence a supervisor can be refused with. English literals on purpose:
+ * an agent reads them, and they must say what IS the case so the
  * agent does not retry what cannot work.
  */
 export const REFUSALS = {
@@ -153,7 +153,7 @@ export function supervisionRefusal(caller, op, target, ref = '') {
 
 // --------------------------------------------------------- the due check (pure)
 //
-// When is a run a case? SPEC 4.7 with resolutions 7.9–7.14. `dueVerdict()`
+// When is a run a case (docs/requirements.md, "Supervision")? `dueVerdict()`
 // decides over a run row, its case state and the facts `caseFacts()` gathers —
 // no subprocess, no git, no tmux, no database — so the whole table of
 // conditions and exclusions is a unit test. `dueCases()` below feeds it.
@@ -196,10 +196,10 @@ export const EXCLUSION_WORDS = {
   not_due: 'none of the due conditions holds',
 }
 
-/** The anomalies that make a run due (SPEC 4.7): overrun and silence; `exit_without_report` is `no_report`. */
+/** The anomalies that make a run due: overrun and silence; `exit_without_report` is `no_report`. */
 export const DUE_ANOMALIES = ['anomaly:overrun', 'anomaly:no_activity', 'anomaly:followup_overrun']
 
-/** Leftover work the hub would merge but has not (only where `merge_mode = 'hub'`, SPEC 7.12). */
+/** Leftover work the hub would merge but has not (only where `merge_mode = 'hub'`: elsewhere a done run has no merge status). */
 export const UNMERGED_STATES = ['unmerged_commits', 'unmerged_both', 'unmerged_dirty']
 
 /** A done run in a merging repository with no merge status yet is left alone this long. */
@@ -214,14 +214,18 @@ export const SUPERVISION_SETTINGS = {
   wait: { key: 'supervision_wait_minutes', dflt: 30, min: 1, max: 7 * 24 * 60 },
   interval: { key: 'supervision_interval_minutes', dflt: 60, min: 5, max: 7 * 24 * 60 },
   cases: { key: 'supervision_cases_per_round', dflt: 8, min: 1, max: 50 },
+  // A stored 0 would refuse every nudge, so the floor is 1, as on the form.
+  nudges: { key: 'supervision_nudge_limit', dflt: 3, min: 1, max: 20 },
+  // 0 is meaningful here: tell the operator when the escalation is raised.
+  grace: { key: 'supervision_escalation_grace_minutes', dflt: 0, min: 0, max: 7 * 24 * 60 },
 }
 
-/** Looks without a change of state (or hand-outs without any look) after which a case is parked (SPEC 4.7). */
+/** Looks without a change of state (or hand-outs without any look) after which a case is parked. */
 export const PARK_AFTER = 6
 
 /**
  * The state of a run as one short string: when it changes, something happened
- * that a supervisor has not seen (SPEC 7.14), and a case looked at six times
+ * that a supervisor has not seen, and a case six rounds looked at
  * with the same one is parked. Status, display status, finish and
  * merge state, the open incidents, the anomalies still speaking, the help
  * question, the follow-up commission and how many replies, answers and results
@@ -238,11 +242,11 @@ export function stateFingerprint(run, facts = {}) {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16)
 }
 
-/** The conditions of SPEC 4.7 that hold for this run, each `{ reason, sinceMs, detail? }`. */
+/** The due conditions that hold for this run, each `{ reason, sinceMs, detail? }`. */
 function dueConditions(run, facts, nowMs, cfg) {
   const out = []
   const ended = FINISHED.includes(run.status) && !followUpActive(run)
-  // 7.9: a run that ENDED before supervision began is never due for how it ended.
+  // a run that ENDED before supervision began is never due for how it ended.
   if (ended) {
     const since = parseDbUtc(facts.supervisionSince)
     const endedMs = parseDbUtc(run.ended_at)
@@ -250,13 +254,13 @@ function dueConditions(run, facts, nowMs, cfg) {
   }
   const ds = displayStatus(run)
   if (ds === 'waiting_input') {
-    // 7.10: since the newest `agent_waiting` event; the column is renewed on every assertion.
+    // since the newest `agent_waiting` event; the column is renewed on every assertion.
     let w = parseDbUtc(facts.waitingSince)
     if (!Number.isFinite(w)) w = parseDbUtc(run.agent_state_at)
     if (Number.isFinite(w) && nowMs - w >= cfg.waitMs) out.push({ reason: 'waiting_input', sinceMs: w })
   }
   if (run.status === 'waiting_help') {
-    // 7.11: the same threshold, so the supervisor does not race the operator who was paged.
+    // the same threshold, so the supervisor does not race the operator who was paged.
     let h = parseDbUtc(facts.helpSince)
     if (!Number.isFinite(h)) h = parseDbUtc(run.last_activity_at)
     if (Number.isFinite(h) && nowMs - h >= cfg.waitMs) out.push({ reason: 'waiting_help', sinceMs: h })
@@ -335,14 +339,14 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
     sinceMs: conds[0].sinceMs, details: Object.fromEntries(conds.filter(x => x.detail).map(x => [x.reason, x.detail])),
     fp, ...extra,
   })
-  // A parked case (the loop fence, SPEC 4.7) comes back only on news or when
+  // A parked case (the loop fence) comes back only on news or when
   // its state changed and a real condition holds — never on what stood when it
   // was parked; the operator's button un-parks it too (`unparkCase()`).
   if (state?.parked_at) {
     if (input || (changed && conds.length)) return hit({ unpark: true, changed, ...(state.closed_at ? { reopen: true } : {}) })
     return no('parked')
   }
-  // 7.14: a closed case comes back only on news — never on the conditions that stood when it was closed.
+  // a closed case comes back only on news — never on the conditions that stood when it was closed.
   if (state?.closed_at) {
     if (input) return hit({ reopen: true, changed })
     return changed && conds.length ? hit({ reopen: true, changed: true }) : no('closed')
@@ -354,13 +358,13 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
     return { ...no('look_again_pending'), held: conds.length > 0 }
   }
   if (!conds.length) return no('not_due')
-  // 4.7: not again within the same interval unless something came in (handled above).
+  // Not again within the same interval unless something came in (handled above).
   const lastSeen = Math.max(parseDbUtc(state?.last_look_at) || 0, parseDbUtc(state?.last_round_at) || 0)
   if (lastSeen > 0 && nowMs - lastSeen < c.intervalMs) return no('looked_recently')
   return hit({ changed })
 }
 
-/** The reason in English words, durations phrased by the hub (SPEC 4.3, 7.32). */
+/** The reason in English words, durations phrased by the hub. */
 export function dueSentence(v, nowMs = Date.now(), cfg = {}) {
   if (!v?.due) return `not due: ${EXCLUSION_WORDS[v?.exclusion] ?? 'unknown'} (${v?.exclusion ?? 'unknown'})`
   const age = Number.isFinite(v.sinceMs) ? fmtDurationEn(Math.max(0, (nowMs - v.sinceMs) / 1000)) : null
@@ -460,7 +464,7 @@ export function supervisionConfig() {
 }
 
 /**
- * When supervision began (SPEC 7.9), as a database timestamp. Set ONCE, the
+ * When supervision began, as a database timestamp. Set ONCE, the
  * first time it is asked while a supervisor agent is active (or by a supervisor
  * run itself, `begin`, which proves supervision is on); runs that ended
  * before it are never due for how they ended, so switching a supervisor on
@@ -642,9 +646,9 @@ export function answerCase(runId, { text = '', choice = '' } = {}) {
 // through t() and the bundle shows them as data.
 
 /**
- * Park a case (the loop fence, SPEC 4.7): the clock stops handing it out until
+ * Park a case (the loop fence): the clock stops handing it out until
  * its state changes, news arrives or the operator un-parks it. `why` is
- * `looks` (looked at `PARK_AFTER` times with the same state) or `handouts`
+ * `looks` (`PARK_AFTER` rounds found the same state) or `handouts`
  * (handed to that many rounds and never looked at). One `action` entry and one
  * message to the operator per parking, on the urgent route — a muted run keeps
  * its meaning. `fp` is the state it was parked in. Idempotent: a parked case is
@@ -660,7 +664,7 @@ export async function parkCase(runId, { why = 'looks', count = PARK_AFTER, fp = 
   const { notifyRun, reportHeader } = await import('./reports.mjs')
   const what = why === 'handouts'
     ? `The hub handed this run to ${count} supervisor rounds and none of them looked at it`
-    : `The supervisor looked at this run ${count} times and its state did not change`
+    : `${count} supervisor rounds looked at this run and its state did not change`
   const delivered = run ? await notifyRun(runId, 'supervision_parked', `${reportHeader(run, 'SUPERVISION PARKED')}\n\n`
     + `🅿️ ${what}, so the hub stopped handing it out. It comes back by itself when something about it changes or `
     + 'somebody answers; otherwise un-park it in the case file on its page.', { dedupe: false }) : false
@@ -687,7 +691,7 @@ export function unparkCase(runId, { by = 'operator', why = 'operator', nowMs = D
 }
 
 /**
- * A closed case that is due again (SPEC 7.14) is reopened for real: a
+ * A closed case that is due again is reopened for real: a
  * `reopened` entry by the hub and `closed_at` cleared — otherwise the next look
  * would read it as closed again. Returns whether it was closed.
  */
@@ -717,7 +721,7 @@ export function markHandedOut(runId, nowMs = Date.now()) {
 
 // ------------------------------------------------------------------ the bundle
 //
-// Everything about one case in one answer (SPEC 4.3), in the order a supervisor
+// Everything about one case in one answer, in the order a supervisor
 // should reason: what the run was asked to do, its state, why it is due, its
 // last events, its git state, the tail of its transcript, the case file, how a
 // human would attach. Looking is cheap and waking is expensive, so this is
@@ -915,7 +919,7 @@ function bundleText(b, { nowMs, cfg }) {
     const ms = parseDbUtc(cs.look_again_at)
     L.push(ms > nowMs ? `Look again in ${fmtDurationEn((ms - nowMs) / 1000)}.` : `The look-again time passed ${agoEn(ms, nowMs)}.`)
   }
-  if (cs?.last_look_at) L.push(`Last looked at ${agoEn(parseDbUtc(cs.last_look_at), nowMs)}; looks without a change of state: ${cs.looks_unchanged ?? 0}.`)
+  if (cs?.last_look_at) L.push(`Last looked at ${agoEn(parseDbUtc(cs.last_look_at), nowMs)}; rounds that found it unchanged: ${cs.looks_unchanged ?? 0} (parked at ${PARK_AFTER}).`)
   if (!c.entries.length) L.push('(no entries yet)')
   for (const e of c.entries) {
     const who = e.author === 'run' ? 'the run' : e.author === 'operator' ? 'the operator' : e.author === 'hub' ? 'the hub'
@@ -939,15 +943,22 @@ function bundleText(b, { nowMs, cfg }) {
 }
 
 /**
- * Record that a supervisor looked (SPEC 4.3): a `look` entry with the verdict
+ * Record that a supervisor looked: a `look` entry with the verdict
  * it saw, and the case state — `last_look_at`, the fingerprint, the count of
- * looks without a change, and a look-again time that has come is spent.
+ * rounds that looked without a change (one per round, however often it looked),
+ * and a look-again time that has come is spent.
  */
 export function recordLook(runId, callerId, verdict, nowMs = Date.now()) {
   const before = caseState(runId)
+  // The loop fence counts rounds, not looks: a round that looks at a case twice
+  // (before and after acting, say) has still spent one round on it. A look
+  // outside any round (a supervisor run the clock did not start) counts each time.
+  const againThisRound = !!roundOf(callerId) && !!db.prepare(`SELECT 1 FROM case_entries
+      WHERE run_id = ? AND kind = 'look' AND author = ? LIMIT 1`).get(runId, callerId)
   const e = addCaseEntry(runId, { kind: 'look', author: callerId,
     data: verdict.due ? { due: verdict.reason } : { due: null, exclusion: verdict.exclusion } })
-  const unchanged = before?.state_fp && before.state_fp === verdict.fp ? (before.looks_unchanged ?? 0) + 1 : 1
+  const same = !!before?.state_fp && before.state_fp === verdict.fp
+  const unchanged = same ? Math.max(1, (before.looks_unchanged ?? 0) + (againThisRound ? 0 : 1)) : 1
   const againMs = parseDbUtc(before?.look_again_at)
   db.prepare(`UPDATE case_state SET last_look_at = ?, state_fp = ?, looks_unchanged = ?, handouts_unlooked = 0,
       look_again_at = CASE WHEN ? THEN NULL ELSE look_again_at END WHERE run_id = ?`)
@@ -1031,7 +1042,7 @@ registerSupervisorOp('close', {
     }
     const e = addCaseEntry(target.id, { kind: 'closed', author: caller.id, text: body.reason })
     // The fingerprint at closing is what "something changed since" is measured
-    // against (SPEC 7.14): the case comes back only on news.
+    // against: the case comes back only on news.
     db.prepare(`UPDATE case_state SET closed_at = datetime('now'), closed_reason = ?, state_fp = ? WHERE run_id = ?`)
       .run(boundCaseText(body.reason).text, stateFingerprint(target, caseFacts(target)), target.id)
     return { ...targetIds(target), entry: e.id, closed_at: caseState(target.id).closed_at }
@@ -1039,15 +1050,15 @@ registerSupervisorOp('close', {
 })
 
 /**
- * `bundle {run, tail?, chars?, events?, entries?}`: everything about one case (SPEC 4.3), as the
+ * `bundle {run, tail?, chars?, events?, entries?}`: everything about one case, as the
  * object plus `text`, and the look is recorded. The plain GET routes of the
- * read API never record a look (SPEC 7.6).
+ * read API never record a look.
  */
 registerSupervisorOp('bundle', {
   async handler({ caller, target, body, nowMs }) {
     const bundle = await caseBundle(target, { nowMs, tail: body.tail, chars: body.chars, events: body.events, entries: body.entries })
     // A closed or parked case that is due again is reopened / un-parked for
-    // real before the look is recorded (SPEC 7.14), or the next look would read
+    // real before the look is recorded, or the next look would read
     // it as closed or parked again.
     const moved = applyVerdict(target.id, bundle.due, nowMs)
     const look = recordLook(target.id, caller.id, bundle.due, nowMs)
@@ -1061,7 +1072,7 @@ registerSupervisorOp('bundle', {
     const notes = [
       moved.reopened ? 'The hub reopened this closed case because of what is said under "Why it is due".' : null,
       moved.unparked ? 'The hub un-parked this case because of what is said under "Why it is due".' : null,
-      park.parked ? `This was look ${look.looks_unchanged} at the same state: the hub parked the case and told the operator. `
+      park.parked ? `${look.looks_unchanged} rounds have now found the same state: the hub parked the case and told the operator. `
         + 'It comes back by itself when something about the run changes or somebody answers.' : null,
     ].filter(Boolean)
     return { ...targetIds(target), look_entry: look.entry, looks_unchanged: look.looks_unchanged, parked: park.parked,
@@ -1098,7 +1109,7 @@ function caseItem(run, verdict, nowMs, cfg, repos) {
  * round at its start, most urgent first, each with the reason it was handed out
  * for (ages phrased now) and whether this round has looked at it yet. With
  * `due` — or in a supervisor run the clock did not start — what is due right
- * now, most urgent first (SPEC 4.7). Both with `text`.
+ * now, most urgent first. Both with `text`.
  */
 registerSupervisorOp('cases', {
   target: false,
@@ -1134,16 +1145,16 @@ registerSupervisorOp('cases', {
 // Registered here so importing this module is enough to serve every op; the
 // handlers live beside what they write.
 
-/** `nudge {run, text}`: type a message into the run's session, header by the hub (SPEC 4.5). */
+/** `nudge {run, text}`: type a message into the run's session, header by the hub. */
 registerSupervisorOp('nudge', { handler: nudgeOp })
 
-/** `question {run, text, choices?}`: one prepared question to the operator (SPEC 4.6, 7.19, 7.20). */
+/** `question {run, text, choices?}`: one prepared question to the operator. */
 registerSupervisorOp('question', { handler: questionOp })
 
-/** `end {run, reason}`: end the run on purpose, the kill route's semantics (SPEC 4.6). */
+/** `end {run, reason}`: end the run on purpose, the kill route's semantics. */
 registerSupervisorOp('end', { handler: endOp })
 
-/** `escalate {run, class, summary}`: hand a problem to an external resolver (SPEC 4.8). */
+/** `escalate {run, class, summary}`: hand a problem to an external resolver. */
 registerSupervisorOp('escalate', { handler: escalateOp })
 
 /**

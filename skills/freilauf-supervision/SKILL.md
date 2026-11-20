@@ -141,7 +141,7 @@ on`); every round needs the agent switched on.
   the answer is given in the run's case file (a choice button or a text) or
   with `fl-api -X POST /api/runs/<uuid>/case/answer text="…" choice="…"`. It
   makes the case due again, so a later round acts on it.
-- **Parked cases.** A case looked at six times without anything changing (or
+- **Parked cases.** A case six rounds looked at without anything changing (or
   handed to six rounds that never looked) is parked and announced once.
   Settings → Supervision lists them; the Un-park button in the case file brings
   one back. A parked case usually means the prompt lacks a rule for it.

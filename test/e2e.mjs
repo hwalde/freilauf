@@ -3386,7 +3386,7 @@ try {
     }, { asBrowser: true })
     equal(b.status, 303, 'agent B created')
     // C: a supervisor agent with a schedule that fires every minute — the tick
-    // must never start it (SPEC 7.2; the hub starts it when cases are due).
+    // must never start it: the hub starts it when cases are due.
     const c = await postForm('/agents/edit', {
       repo_id: repoId, name: 'e2e-supervisor-cron', harness: 'claude', prompt: 'E2E-Supervisor',
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'cron', schedule: '* * * * *', active: '1', supervisor: '1',
@@ -8977,7 +8977,7 @@ export default {
       const j = await supervise(SUP, ['look', short, '--json'])
       equal(j.json?.state?.display_status, 'waiting_input', '--json gives the object')
       equal(j.json?.due?.exclusion, 'looked_recently', 'looked at a moment ago: not due again within the interval')
-      equal((await caseOf(WAIT)).state.looks_unchanged, 2, 'a second look at the same state counts')
+      equal((await caseOf(WAIT)).state.looks_unchanged, 1, 'a second look by the same round does not count again (rounds, not looks)')
       const page = await (await fetchPath(`/runs/${WAIT}`)).text()
       contains(page, 'Due because: its agent waits for input', 'the operator reads the look on the run page')
       const c = await supervise(SUP, ['cases', '--due', '--limit', '50'])
@@ -9243,6 +9243,23 @@ export default {
       equal((await supervise(SUP, ['end', shortIdOf(D3), ' '])).code, 1, 'an end without a reason is refused')
     })
 
+    await check('end on a failed run: it becomes aborted, attributed to the supervisor, and the case file says so', async () => {
+      const F2 = await freshRun('fails and keeps its session')
+      isTrue((await flReport(F2, ['failed', 'the build broke'])).ok, 'the run reports failed')
+      await waitFor(() => lauf(F2).status === 'failed', { what: `run ${F2} failed`, timeoutMs: 15_000 })
+      const e = await supervise(SUP, ['end', shortIdOf(F2), 'a failed attempt nobody will continue'])
+      equal(e.code, 0, `ended (${e.stderr.trim()})`)
+      equal(e.json?.outcome, 'aborted', 'a failed run is aborted, not merely closed')
+      contains(e.json?.message ?? '', 'is now aborted', 'and the supervisor is told so')
+      contains(e.json?.message ?? '', 'Unmerged work stays', 'with what was left behind')
+      equal(lauf(F2).status, 'aborted', 'its status is aborted')
+      const ab = evPayloads(F2, 'aborted').at(-1)
+      equal(`${ab?.by}|${ab?.supervisor_run}|${ab?.reason}`, `supervisor|${SUP}|a failed attempt nobody will continue`, 'attributed to the supervisor run, with its reason')
+      const entry = (await caseOf(F2)).entries.at(-1)
+      equal(`${entry.kind}|${entry.author}|${entry.data?.op}|${entry.data?.outcome}|${entry.data?.status_before}`,
+        `action|${SUP}|end|aborted|failed`, 'the case entry records the end, its outcome and the status it had')
+    })
+
     await check('a question: one at a time, answered by a choice or a text, and a muted run is recorded but not announced', async () => {
       const Q2 = await freshRun('needs a decision')
       const q = await supervise(SUP, ['question', shortIdOf(Q2), 'Merge the branch or drop it?', '--choice', 'merge', '--choice', 'drop'])
@@ -9440,6 +9457,14 @@ export default {
       sk.setSetting('pipeline_on', '0')
       equal((await tickAt(Date.now())).quiet, 'pipeline_off', 'pipeline off: quiet')
       sk.setSetting('pipeline_on', '1')
+      // An end assesses what the run left behind after it answers, so the kill
+      // above (and the ends of the checks before) may still write an event or
+      // two. Measure the clock pass against a settled count, not against those.
+      let settled = -1
+      for (let i = 0; i < 20 && settled !== count('events'); i++) {
+        settled = count('events')
+        await new Promise(r => setTimeout(r, 750))
+      }
       const runs = count('runs')
       const events = count('events')
       const r = await tickAt(Date.now() + 2 * HOUR)
@@ -9529,7 +9554,7 @@ export default {
 
     let ROUND4 = null
     let ESC = null
-    await check('six looks at the same state park the case; the run page un-parks it', async () => {
+    await check('six rounds looking at the same state park the case; the run page un-parks it', async () => {
       const P = await freshRun('goes nowhere')
       makeWaiting(P, 45)
       const start = await postForm('/agents/start', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
@@ -9543,9 +9568,21 @@ export default {
       equal(busy.status, 400, 'a second "Start now" while it runs is refused')
       contains(await busy.text(), 'still open', 'saying why')
       let last = null
-      for (let i = 1; i <= 6; i++) last = await supervise(ROUND4, ['look', shortIdOf(P), '--json'])
-      equal(last.json?.looks_unchanged, 6, 'six looks at the same state')
-      equal(last.json?.parked, true, 'the sixth parks it')
+      for (let i = 1; i <= 2; i++) last = await supervise(ROUND4, ['look', shortIdOf(P), '--json'])
+      equal(`${last.json?.looks_unchanged}|${last.json?.parked}`, '1|false', 'one round looking twice is one round, not two')
+      // Five more rounds look once each at the same state. Written as rows (a
+      // supervisor run and its round event), so no five sessions are started;
+      // each is ended after its look, so none holds the clock afterwards.
+      for (let i = 2; i <= 6; i++) {
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id, repo_id, harness, prompt, branch_mode, expected_minutes, status, supervisor)
+          VALUES(?, ?, 'claude', 'x', 'keiner', 10, 'running', 1)`).run(id, repoId)
+        db.prepare(`INSERT INTO events(run_id, kind, payload) VALUES(?, 'supervision_round', '{"source":"clock","cases":[]}')`).run(id)
+        last = await supervise(id, ['look', shortIdOf(P), '--json'])
+        db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(id)
+      }
+      equal(last.json?.looks_unchanged, 6, 'six rounds looked at the same state')
+      equal(last.json?.parked, true, 'the sixth round parks it')
       contains(last.json?.message ?? '', 'parked the case', 'and the supervisor is told')
       const k = await caseOf(P)
       isTrue(!!k.state.parked_at, 'parked')

@@ -523,7 +523,7 @@ async function api(req, res, url) {
     const r = await handleSupervise(m[1], bearerToken(req), b)
     return json(res, r.code, r.body)
   }
-  // Take a run out of supervision, or put it back (SPEC 4.1a). Works whether or
+  // Take a run out of supervision, or put it back. Works whether or
   // not a supervisor is active — the decision is about the run. Each change is
   // an event; the same value twice changes nothing.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/supervision$/))) {

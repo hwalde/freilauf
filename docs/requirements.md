@@ -827,7 +827,7 @@ resolver's routes).
   transaction.
 - `GET /api/runs/<id>/case` and `/transcript` are read-only and bounded; only
   the supervisor route's `bundle` records a look (entry, `last_look_at`,
-  fingerprint, looks without a change).
+  fingerprint, rounds without a change).
 - The case section (`#run-case`) is always rendered and part of the run-detail
   fragment, hidden unless the case file has entries or, on a run that is not a
   supervisor run, a supervisor agent is active; the operator's answer needs a
@@ -861,7 +861,9 @@ resolver's routes).
   a round took it (`last_round_at`); the bundle ignores `last_round_at`, so the
   round that took a case sees why.
 - A case is parked (`parkCase()`, announced once as `supervision_parked`) after
-  `PARK_AFTER` looks at the same fingerprint while it is a case (due, or held
+  `PARK_AFTER` rounds looked at the same fingerprint (a round counts once however
+  often it looks, because the fence is about rounds spent; a look outside any
+  round counts each time) while it is a case (due, or held
   back only by its interval or look-again time — never a healthy run or a
   closed case), or when it would be handed to a round after that many rounds
   that never looked at it; it comes back only on news, on a changed
@@ -970,8 +972,9 @@ resolver's routes).
   a round that hangs.
 - Settings → Supervision writes only its five keys: `''` means the default, a
   value is a whole number in its range, 0 is valid only for the escalation
-  grace, and a save with one bad field saves nothing; the interval, the cases
-  per round and the waiting threshold are held to their range when read.
+  grace, and a save with one bad field saves nothing; a value outside the range
+  that reached the database otherwise is held to it when read
+  (`supervisionSetting()`), so a stored 0 cannot switch nudges off.
 
 ## Skills
 

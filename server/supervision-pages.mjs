@@ -8,9 +8,9 @@ import { t } from './i18n.mjs'
 import db from './db.mjs'
 import { caseEntries, caseState, activeSupervisorAgent, supervisorAgents, DUE_REASONS, SUPERVISION_SETTINGS,
   supervisionSetting, ROUND_EVENT } from './supervision.mjs'
-import { questionForPage, NUDGE_LIMIT_KEY, NUDGE_LIMIT_DEFAULT, nudgeLimit } from './supervision-acts.mjs'
+import { questionForPage } from './supervision-acts.mjs'
 import { listEscalations, escalationItem, pendingEscalationCount, anyEscalation,
-  ESCALATION_CLASSES, ESCALATION_STATE_FILTERS, ESCALATIONS_LIMIT_MAX, ESCALATION_GRACE_KEY, escalationGraceMs } from './escalations.mjs'
+  ESCALATION_CLASSES, ESCALATION_STATE_FILTERS, ESCALATIONS_LIMIT_MAX } from './escalations.mjs'
 
 /** How many entries the run page shows; the read API reaches further back. */
 const PAGE_ENTRIES = 50
@@ -209,7 +209,7 @@ export function supervisionSwitch(run) {
 
 /**
  * The line on the agents page and the agent form when more than one agent is
- * marked as supervisor: v1 runs one, the lowest id, and says which (SPEC 4.1).
+ * marked as supervisor: v1 runs one, the lowest id, and says which.
  */
 export function supervisorNotice() {
   const all = supervisorAgents()
@@ -232,8 +232,8 @@ export function supervisionSettingFields() {
     { name: 'interval', key: S.interval.key, dflt: S.interval.dflt, min: S.interval.min, max: S.interval.max },
     { name: 'cases', key: S.cases.key, dflt: S.cases.dflt, min: S.cases.min, max: S.cases.max },
     { name: 'wait', key: S.wait.key, dflt: S.wait.dflt, min: S.wait.min, max: S.wait.max },
-    { name: 'nudges', key: NUDGE_LIMIT_KEY, dflt: NUDGE_LIMIT_DEFAULT, min: 1, max: 20 },
-    { name: 'grace', key: ESCALATION_GRACE_KEY, dflt: 0, min: 0, max: 7 * 24 * 60 },
+    { name: 'nudges', key: S.nudges.key, dflt: S.nudges.dflt, min: S.nudges.min, max: S.nudges.max },
+    { name: 'grace', key: S.grace.key, dflt: S.grace.dflt, min: S.grace.min, max: S.grace.max },
   ]
 }
 
@@ -261,8 +261,6 @@ export function supervisionSettingsFromForm(b = {}) {
 
 /** What a field is in effect, as the page shows it under an empty input. */
 function effective(name) {
-  if (name === 'nudges') return nudgeLimit()
-  if (name === 'grace') return escalationGraceMs() / 60_000
   return supervisionSetting(name)
 }
 

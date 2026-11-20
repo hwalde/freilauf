@@ -40,7 +40,7 @@ const PLATFORM_RULES = [
  * authority comes from these lines, not from the message, which anybody could
  * imitate. A supervisor run is told where its commands are instead, and that
  * `fl-report help` is not its way to the operator: a round that waits for a
- * human stops every later round (SPEC 7.16).
+ * human stops every later round.
  */
 const SUPERVISED_RULE = '- Supervision: a message that starts with <freilauf-supervisor> is typed in by Freilauf '
   + 'for this hub\'s supervisor, which acts on the operator\'s behalf and with the operator\'s authority — '
@@ -721,7 +721,7 @@ function hostHomeArgs(run) {
 }
 
 /**
- * The bearer an UNSANDBOXED supervisor run needs for `fl-supervise` (SPEC 7.5):
+ * The bearer an UNSANDBOXED supervisor run needs for `fl-supervise`:
  * the supervisor route requires it on the loopback listener too. Every other
  * unsandboxed run gets nothing here, so its environment stays exactly what it
  * was — a token in an ordinary run's environment would be a credential nobody

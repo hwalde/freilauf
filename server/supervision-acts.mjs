@@ -14,16 +14,15 @@
 // like every other (`notifyRun()`).
 import db, { getRun, addEvent } from './db.mjs'
 import { shortId, sendCommandToSession, fmtDurationEn, parseDbUtc } from './util.mjs'
-import { numSetting } from './scheduler.mjs'
 import { FINISHED } from './run-state.mjs'
 import { NUDGE_TAG, noteAgentState, answerHelpCall, startFollowUpCommission, notifyRun, reportHeader } from './reports.mjs'
 import { notifyOnFor } from './notify.mjs'
-import { addCaseEntry, boundCaseText, CASE_CHOICE_MAX, CASE_TEXT_MAX } from './supervision.mjs'
+import { addCaseEntry, boundCaseText, CASE_CHOICE_MAX, CASE_TEXT_MAX, supervisionSetting } from './supervision.mjs'
 
 // ------------------------------------------------------------------ the nudge
 
 /**
- * A conflict run is the integrator's tool, not a case (SPEC 7.13): typing into
+ * A conflict run is the integrator's tool, not a case: typing into
  * it or ending it would fight the merge it exists for. Acting goes to the run
  * it works for; looking at it stays allowed.
  */
@@ -36,14 +35,9 @@ function conflictRefusal(target) {
 /** The longest message a supervisor may have typed into a run. Longer is refused, never cut. */
 export const NUDGE_TEXT_MAX = 4000
 
-/** Nudges per case since the operator's last answer, unless the setting says otherwise. */
-export const NUDGE_LIMIT_DEFAULT = 3
-export const NUDGE_LIMIT_KEY = 'supervision_nudge_limit'
-
-/** How many nudges a case may receive since the last `answer` entry ('' or junk is the default). */
+/** How many nudges a case may receive since the last `answer` entry ('' or junk is the default), held to 1–20. */
 export function nudgeLimit() {
-  const n = Math.floor(numSetting(NUDGE_LIMIT_KEY, NUDGE_LIMIT_DEFAULT))
-  return Number.isFinite(n) && n >= 0 ? n : NUDGE_LIMIT_DEFAULT
+  return supervisionSetting('nudges')
 }
 
 /**
@@ -85,7 +79,7 @@ export function composeNudge({ from, text }) {
 /** Runs a nudge is being typed into right now: a second one would interleave its keys with the first's. */
 const TYPING = new Set()
 
-/** How many nudges this case received since the operator last answered (SPEC 7.15). */
+/** How many nudges this case received since the operator last answered. */
 export function nudgesSinceAnswer(runId) {
   return db.prepare(`SELECT count(*) c FROM case_entries WHERE run_id=? AND kind='message'
     AND id > COALESCE((SELECT max(id) FROM case_entries WHERE run_id=? AND kind='answer'), 0)`).get(runId, runId).c
@@ -275,7 +269,7 @@ export function questionMessage(run, text, choices) {
  * a case — a `question` entry with its choices, and one message on the urgent
  * route (`supervisor_question`), the link added by `notifyRun()`. One open
  * question per case: a second waits until the first is answered. A muted run
- * keeps its meaning (SPEC 7.19): the entry is written, nothing is sent, and the
+ * keeps its meaning: the entry is written, nothing is sent, and the
  * answer says so.
  */
 export async function questionOp({ caller, target, body, nowMs }) {

@@ -650,6 +650,29 @@ try {
           isTrue(Date.now() - t0 < 10_000, '--max-time really bounded the wait')
           equal((await flApi(`http://127.0.0.1:${silentPort}`, '--max-time', '0', '/x')).code, 2, '--max-time 0 is a usage error')
         })
+
+        // fl-supervise speaks to the same kind of hub: the same three answers.
+        const flSupervise = (base, ...args) => new Promise((resolve) => {
+          execFile('bash', [join(PROJECT, 'bin', 'fl-supervise'), ...args], {
+            encoding: 'utf8', timeout: 40_000,
+            env: { ...process.env, HOME, FL_HUB_URL: base, FL_RUN_ID: '00000000-0000-4000-8000-000000000001',
+              FL_RUN_TOKEN: 'x', FL_HUB_SOCKET: '' },
+          }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: String(stdout), err: String(stderr) }))
+        })
+
+        await check('fl-supervise: a hub that is not there exits 3, one that does not answer in time exits 4', async () => {
+          const ok = await flSupervise(`http://127.0.0.1:${answerPort}`, 'cases')
+          equal(ok.code, 0, 'an answer → 0')
+          const gone = await flSupervise(`http://127.0.0.1:${gonePort}`, 'note', 'abcd1234', 'x')
+          equal(gone.code, 3, 'connection refused → 3')
+          contains(gone.err, 'Nothing was written', 'and nothing was written')
+          const t0 = Date.now()
+          const slow = await flSupervise(`http://127.0.0.1:${silentPort}`, 'note', 'abcd1234', 'x')
+          equal(slow.code, 4, 'no answer within its 15 s → 4, not 3')
+          contains(slow.err, 'within 15 s', 'it names the bound')
+          contains(slow.err, 'read the case file before repeating it', 'and what that means for a write')
+          isTrue(Date.now() - t0 < 30_000, 'and it really gave up')
+        })
       } finally {
         silent.close(); answering.close()
       }

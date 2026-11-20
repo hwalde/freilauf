@@ -812,7 +812,7 @@ export function notifyResultField(a = {}) {
  * The supervisor flag (server/supervision.mjs) as the agent form shows it. On the
  * AGENT form only: a supervisor is a recurring job the hub starts when there is
  * something to look at, so a single run, a favorite, Quick Run or a flow never
- * carries it (SPEC 7.1). The sentence says what the switch grants and that the
+ * carries it. The sentence says what the switch grants and that the
  * hub, not the schedule, starts such an agent.
  */
 export function supervisorField(a = {}) {
@@ -1236,8 +1236,8 @@ export function runTitleField(v = {}) {
 }
 
 /**
- * "Leave this run alone": the single run is never a case for the supervisor
- * (SPEC 4.1a). Single runs only — an operator who works in a run for hours does
+ * "Leave this run alone": the single run is never a case for the supervisor.
+ * Single runs only — an operator who works in a run for hours does
  * not want a supervisor cutting in, and an agent is a recurring job nobody sits
  * in. Absent means "supervised like any run", so no hidden companion is needed.
  * The caller renders it only while a supervisor agent is active.
@@ -1583,7 +1583,7 @@ export function defFromFlowProps(props) {
     ...sandboxFromFlowProps(props),
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
     skills: null,
-    // Never a supervisor (SPEC 7.1): a flow is an automatic start, and a run
+    // Never a supervisor: a flow is an automatic start, and a run
     // that may act on other runs is started by the hub when cases are due.
     supervisor: 0,
     // Deliberately no attached flows: a run a flow starts must not start flows

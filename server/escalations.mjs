@@ -20,8 +20,7 @@
 // when resolved or dismissed), written through `addCaseEntry()`.
 import db, { getRun, getRepo } from './db.mjs'
 import { shortId, parseDbUtc } from './util.mjs'
-import { numSetting } from './scheduler.mjs'
-import { addCaseEntry, boundCaseText } from './supervision.mjs'
+import { addCaseEntry, boundCaseText, supervisionSetting } from './supervision.mjs'
 import { notifyRun, reportHeader } from './reports.mjs'
 import { notifyOnFor } from './notify.mjs'
 
@@ -53,12 +52,9 @@ const NAME_RE = /^[A-Za-z0-9._@-]{1,64}$/
 /** A claimed escalation not resolved within this long is announced once (the supervision clock). */
 export const CLAIMED_REMIND_MS = 24 * 60 * 60_000
 
-/** How long an escalation may stay unclaimed before the operator hears of it; 0 = at once. */
-export const ESCALATION_GRACE_KEY = 'supervision_escalation_grace_minutes'
-
+/** The grace in ms, held to its range ('' or junk is 0: tell at once). */
 export function escalationGraceMs() {
-  const n = numSetting(ESCALATION_GRACE_KEY, 0)
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) * 60_000 : 0
+  return supervisionSetting('grace') * 60_000
 }
 
 // ------------------------------------------------------------------ pure helpers
@@ -91,7 +87,7 @@ export function resolverName(raw) {
 }
 
 /**
- * Who the `resolved` entry is by (SPEC 7.27): `resolver:<by>` when given, else
+ * Who the `resolved` entry is by: `resolver:<by>` when given, else
  * `resolver:<claimed_by>` when it was claimed, else the operator.
  */
 export function resolvedAuthor({ by = null, claimedBy = null } = {}) {
@@ -128,7 +124,7 @@ export function escalationById(id) {
   return db.prepare('SELECT * FROM escalations WHERE id=?').get(Number(s)) ?? null
 }
 
-/** One escalation in the shape of the contract (SPEC 4.8, 7.24, 7.28). */
+/** One escalation in the shape of the contract. */
 export function escalationItem(row) {
   const run = getRun(row.run_id)
   const agent = run?.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null

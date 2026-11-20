@@ -391,7 +391,7 @@ events and incidents stay.
 
 | action | call | what it does |
 |---|---|---|
-| stop / cancel / close | `-X POST /api/runs/<id>/kill` | kills the tmux session, and then depends on the status: `running`/`waiting_help` → `aborted` + leftover work assessed + flows fired; `scheduled`/`deferred` → `aborted` (this is how you cancel one); **`done`/`failed`/`aborted` → the session only**, event `tmux_closed`, the clean record is *not* rewritten |
+| stop / cancel / close | `-X POST /api/runs/<id>/kill` | kills the tmux session, and then depends on the status: `running`/`waiting_help` → `aborted` + leftover work assessed + flows fired; `scheduled`/`deferred` → `aborted` (this is how you cancel one); **`done`/`aborted` → the session only**, event `tmux_closed`, the clean record is *not* rewritten; **`failed` → `aborted`** (a click that lands after the watcher wrote `failed` is still a cancel) |
 | force a deferred start | `-X POST /api/runs/<id>/start` | only `deferred`; skips the budget gate, event `forced_start` |
 | run it again | `-X POST /api/runs/<id>/retry` | clears report, follow-ups, integration state and archive flag, then launches a **new session** |
 | archive | `-X POST /api/runs/<id>/archive` | only `done`/`failed`/`aborted`; also closes the tmux session (immediately by default) |
@@ -539,7 +539,7 @@ escalation ladder, what a conflict run is, or what `keep_on_branch` changes.
   scheduled and manual starts; its existing runs stay fully readable with an
   explicit `?repo=<id>`. If a start is refused with a problem naming the repo,
   that is why — see `../freilauf-repos/SKILL.md`.
-- **Killing a finished run does not un-finish it** — it only closes the session.
+- **Killing a done or aborted run does not un-finish it** — it only closes the session. A failed one becomes aborted.
   Killing a *live* one writes `aborted` over whatever it was.
 - **Branch mode `fest` with a branch another worktree holds is refused**, the
   classic case being the repo's base branch: git grants a branch to exactly one

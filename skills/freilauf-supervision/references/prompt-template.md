@@ -147,13 +147,13 @@ you:
 - `fl-supervise close <id> "<why nothing is left to do>"` when it is settled —
   it comes back by itself if something about the run changes;
 - `fl-supervise end <id> "<reason>"` when the run is not worth finishing. On a
-  run that is done this only closes its session and its status stays; either
-  way its work stays on its branch.
+  run that is done this only closes its session and its status stays; a failed
+  run becomes aborted; either way its work stays on its branch.
 
-Every look is recorded. A case looked at six times without anything about the
-run changing is parked by the hub and announced to the operator once — so when
-you find a case exactly as the case file last described it, do not just look
-again: end it, close it, ask, or escalate, and say why.
+A case that six rounds have found unchanged is parked by the hub and announced
+to the operator once. So when you find a case exactly as the case file last
+described it, do something about it — end it, close it, ask, or escalate — and
+say why. Looking at it again within your own round is free.
 
 ## Beyond the commands
 

@@ -2075,7 +2075,7 @@
   "supervision.round_in_flight": "仍有一个监督轮次未结束（{id}）；同一时间只运行一个。请等待它完成，或先结束它。",
   "case.state_parked": "自 {at} 起已搁置：在运行状态发生变化或有人回复之前，中心不会将此案件交给任何轮次。",
   "case.unpark": "取消搁置：在下一轮中查看",
-  "case.action_park_looks": "已被中心搁置：查看了 {count} 次，状态没有变化。",
+  "case.action_park_looks": "已被中心搁置：{count} 轮检查过它，状态没有变化。",
   "case.action_park_handouts": "已被中心搁置：交给了 {count} 个轮次，但从未被查看。",
   "case.action_unpark_operator": "已由你取消搁置：将在下一轮到期。",
   "case.action_unpark_hub": "已被中心取消搁置：运行有了变化，或有人回复了。",

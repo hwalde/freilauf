@@ -2075,7 +2075,7 @@
   "supervision.round_in_flight": "A supervisor round is still open ({id}); one runs at a time. Wait for it to finish, or end it first.",
   "case.state_parked": "Parked since {at}: the hub hands this case to no round until something about the run changes or somebody answers.",
   "case.unpark": "Un-park: look at it in the next round",
-  "case.action_park_looks": "Parked by the hub: looked at {count} times without a change.",
+  "case.action_park_looks": "Parked by the hub: {count} rounds looked at it without a change.",
   "case.action_park_handouts": "Parked by the hub: handed to {count} rounds and never looked at.",
   "case.action_unpark_operator": "Un-parked by you: due in the next round.",
   "case.action_unpark_hub": "Un-parked by the hub: something about the run changed, or somebody answered.",

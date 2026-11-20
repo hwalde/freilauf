@@ -207,7 +207,7 @@ export const actions = {
     if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
     if (agent.active === 0) return { ok: true, runId: null, inactive: true, name: agent.name }
     // A supervisor agent is started by the hub when cases are due, never by an
-    // automatic start (SPEC 7.1/7.2) — the scheduler skips it, and so does a
+    // automatic start — the scheduler skips it, and so does a
     // flow. Started without its flag it could only be refused at every
     // `fl-supervise` call, so it is not started at all; same answer shape as
     // a switched-off agent.
