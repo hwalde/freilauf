@@ -90,10 +90,9 @@ AUTH=()
 [[ -n "$TOKEN" ]] && AUTH=(-H "authorization: Bearer $TOKEN")
 
 # Each transport prints the body followed by a line with the HTTP status. curl
-# exits non-zero only when it could not talk to the hub at all — a refusal is an
-# answer, and is never retried on the other transport.
+# exits non-zero only when it could not get an answer — a refusal is an answer,
+# and is never retried on the other transport.
 send_socket() {
-    [[ -n "$SOCKET" && -S "$SOCKET" ]] || return 1
     curl -sS --max-time 15 -X POST --unix-socket "$SOCKET" \
          -H 'content-type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
          --data-binary "$PAYLOAD" -w '\n%{http_code}' \
@@ -106,8 +105,22 @@ send_http() {
          "$HUB/api/runs/$RUN_ID/supervise"
 }
 
-if ! OUT="$(send_socket 2>/dev/null)" && ! OUT="$(send_http 2>/dev/null)"; then
+# The socket first where there is one. Loopback is tried ONLY when the socket
+# could not be connected to at all (curl 7): after a timeout the hub may already
+# have written, and a second send would write the same note twice.
+RC=7
+if [[ -n "$SOCKET" && -S "$SOCKET" ]]; then
+    OUT="$(send_socket 2>/dev/null)" && RC=0 || RC=$?
+fi
+if [[ $RC -eq 7 ]]; then
+    OUT="$(send_http 2>/dev/null)" && RC=0 || RC=$?
+fi
+if [[ $RC -eq 7 ]]; then
     echo "fl-supervise: the hub is not reachable (socket: ${SOCKET:-none}, url: $HUB). Nothing was written." >&2
+    exit 3
+fi
+if [[ $RC -ne 0 ]]; then
+    echo "fl-supervise: no answer from the hub (curl exit $RC). The call may or may not have been written — read the case file before repeating it." >&2
     exit 3
 fi
 CODE="${OUT##*$'\n'}"

@@ -1452,7 +1452,7 @@
   "sandbox.profile.no_secrets": "Keine Zugangsdaten in der Box",
   "sandbox.profile.no_secrets_desc": "Wie „Ausgewogen“, aber im Container liegt ein Platzhalter statt deines API-Schlüssels — den echten setzt der Proxy nur bei den Hosts dieser Zugangsdaten ein. Braucht iron-proxy und eine Sandbox-CA.",
   "sandbox.socket.unauthorized": "Report-Token dieses Laufs fehlt oder passt nicht.",
-  "sandbox.socket.no_such_route": "Dieser Socket trägt nur die Report- und die Sandbox-Route eines Laufs; der Rest der API bleibt auf 127.0.0.1.",
+  "sandbox.socket.no_such_route": "Dieser Socket trägt nur die Report-, die Sandbox- und die Supervise-Route eines Laufs; der Rest der API bleibt auf 127.0.0.1.",
   "sandbox.socket.unknown_run": "Diesen Lauf gibt es nicht.",
   "sandbox.socket.not_sandboxed": "Dieser Lauf läuft ohne Sandbox: direkt auf dem Host, ohne Netz-Erlaubnisliste und ohne Ressourcengrenzen.",
   "sandbox.socket.ask_hint": "Wenn du einen Host, einen Pfad oder mehr Ressourcen brauchst, arbeite nicht an der Sandbox vorbei: rufe fl-report access \"<was du brauchst und warum>\" auf und mach mit dem weiter, was geht.",

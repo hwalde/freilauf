@@ -5239,6 +5239,20 @@ try {
     isFalse(fr.log.some(l => l.msg === 'went down the failed branch'),
       'and switch_outcome never saw a made-up "failed" for a run that never existed')
   })
+  // A supervisor agent is the hub's to start (SPEC 7.1): actions.startAgent()
+  // answers `supervisor` for it, and the step treats that like a switched-off one.
+  const supApi = { ...stubApi, startAgent: async () => ({ ok: true, runId: null, supervisor: true, name: 'SUP' }) }
+  await check('start_agent on a supervisor agent: skipped without wait, failed with it', async () => {
+    const id = await engine.startFlowRun({ id: null, name: 'sup-skip', definition: { sequence: [
+      step('start_agent', { agentId: '9', promptExtra: '', wait: false, outputVar: 'sv' })] } }, { kind: 'cron' }, supApi)
+    const fr = fdb.getFlowRun(id)
+    equal(fr.status, 'done', 'the flow run carries on')
+    equal(fr.context.vars.sv.skipped, true, 'skipped')
+    contains(fr.log.map(l => l.msg).join(' '), 'is a supervisor, which only the hub starts', 'the log says why')
+    const id2 = await engine.startFlowRun({ id: null, name: 'sup-wait', definition: { sequence: [
+      step('start_agent', { agentId: '9', promptExtra: '', wait: true, outputVar: 'sv' })] } }, { kind: 'cron' }, supApi)
+    equal(fdb.getFlowRun(id2).status, 'failed', 'with wait there is no run to wait for')
+  })
   await check('delay suspends until resume_at; resumeDelayed continues', async () => {
     const def = { sequence: [step('delay', { minutes: 10 }), step('note', { text: 'later' })] }
     const id = await engine.startFlowRun({ id: null, name: 'sleepy', definition: def }, trig, stubApi)
@@ -9596,12 +9610,17 @@ try {
       isFalse(tokensMatch(null, good), 'nor a run that carries none')
     })
 
-    await check('the socket serves two routes and nothing else', () => {
+    await check('the socket serves its three routes and nothing else', async () => {
       const id = '11111111-2222-3333-4444-555555555555'
+      const { SOCKET_ROUTE_NAMES } = await import('../server/hub-socket.mjs')
+      equal(SOCKET_ROUTE_NAMES.join(','), 'report,sandbox,supervise', 'exactly these, and no fourth')
+      equal(socketRoute('POST', `/api/runs/${id}/supervise`)?.name, 'supervise', 'the supervisor route')
+      equal(socketRoute('POST', `/api/runs/${id}/supervise`)?.runId, id, 'naming the calling run')
+      equal(socketRoute('GET', `/api/runs/${id}/supervise`), null, 'and only as a POST')
       equal(socketRoute('POST', `/api/runs/${id}/report`)?.name, 'report', 'the report route')
       equal(socketRoute('POST', `/api/runs/${id}/report`)?.runId, id, 'and it names the run')
       equal(socketRoute('GET', `/api/runs/${id}/sandbox`)?.name, 'sandbox', 'the sandbox route')
-      // A third path is the failure this allowlist exists for: it would hand the
+      // Another path is the failure this allowlist exists for: it would hand the
       // hub's own API back to the agent the socket was built to fence off.
       equal(socketRoute('POST', `/api/runs/${id}/kill`), null, 'killing a run is not on this socket')
       equal(socketRoute('POST', `/api/runs/${id}/send`), null, 'nor is typing into a session')
@@ -15037,9 +15056,17 @@ process.stdout.write(JSON.stringify(out))
         'a favorite / Quick Run body cannot smuggle it in')
       isFalse(rd.RUN_DEF_FLOW_FIELDS.some(f => f.key === 'supervisor'), 'the flow designer has no such field')
       equal(rd.defFromFlowProps({ harness: 'claude', prompt: 'p', supervisor: true }).supervisor, 0, 'a flow-started single run is never one')
-      const { asFlowStart } = await import('../server/flows/actions.mjs')
-      equal(asFlowStart({ id: 1, supervisor: 1 }).supervisor, 0, "a flow's start_agent starts a flagged agent without the flag")
-      equal(rd.defFromAgent(asFlowStart({ supervisor: 1, harness: 'claude', prompt: 'p' })).supervisor, 0, 'all the way to the definition')
+      // A flow never starts a flagged agent: start_agent and toggle_agent's
+      // "start now" answer like a switched-off agent, and no run row appears.
+      const { actions } = await import('../server/flows/actions.mjs')
+      const flagged = rd.saveAgent({ repoId, name: `sv-flow-${Date.now()}`, def: await rd.runDefFromForm(body, [], { agentForm: true }) })
+      const before = db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(flagged).c
+      const viaStep = await actions.startAgent(flagged, null, null)
+      isTrue(viaStep.ok && viaStep.runId === null && viaStep.supervisor === true, `start_agent: not started (${JSON.stringify(viaStep)})`)
+      const viaToggle = await actions.startAgentIfIdle(flagged, null)
+      isTrue(viaToggle.ok && viaToggle.runId === null && viaToggle.supervisor === true, 'toggle_agent with "start now": not started either')
+      equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(flagged).c, before, 'and no run row was written')
+      db.prepare('UPDATE agents SET supervisor=0, active=0 WHERE id=?').run(flagged)
       contains(rd.supervisorField({ supervisor: 1 }), 'checked', 'the form field shows the stored value')
     })
 

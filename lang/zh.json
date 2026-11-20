@@ -1452,7 +1452,7 @@
   "sandbox.profile.no_secrets": "容器内无密钥",
   "sandbox.profile.no_secrets_desc": "与“均衡”相同，但容器中放的是占位符而非你的 API 密钥——代理只在该凭据自己的主机上换入真实密钥。需要 iron-proxy 和沙箱 CA。",
   "sandbox.socket.unauthorized": "本次运行的上报令牌缺失或不匹配。",
-  "sandbox.socket.no_such_route": "此套接字只提供某一次运行的上报与沙箱两条路由；其余 API 仍在 127.0.0.1 上。",
+  "sandbox.socket.no_such_route": "此套接字只提供某一次运行的上报、沙箱与监督三条路由；其余 API 仍在 127.0.0.1 上。",
   "sandbox.socket.unknown_run": "没有这个运行。",
   "sandbox.socket.not_sandboxed": "本次运行未使用沙箱：它直接在主机上工作，没有网络白名单，也没有资源限制。",
   "sandbox.socket.ask_hint": "如果你需要某个主机、某个路径或更多资源，不要绕过沙箱：运行 fl-report access \"<你需要什么以及为什么>\"，同时继续做力所能及的事。",

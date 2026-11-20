@@ -74,6 +74,9 @@ export function caseSection(run, nowMs = Date.now()) {
       ${extra ? `<div class="dim">${e(extra)}</div>` : ''}</li>`
   }).join('')
   const st = stateLine(state, nowMs)
+  // `required` while the form has nothing but the text: an empty answer from the
+  // page would otherwise be a 400 the browser shows as nothing happening. A
+  // question's choice buttons (stage B) must drop it or carry `formnovalidate`.
   return `<section class="card case-file" id="run-case"${show ? '' : ' hidden'}>
     <h3>${e(t('case.title'))}</h3>
     ${st ? `<p class="dim">${st}</p>` : ''}
@@ -81,7 +84,7 @@ export function caseSection(run, nowMs = Date.now()) {
     <form method="post" action="/api/runs/${e(run.id)}/case/answer" class="case-answer">
       <input type="hidden" name="back" value="/runs/${e(run.id)}#run-case">
       <label>${e(t('case.answer_label'))}
-        <textarea name="text" rows="3" placeholder="${e(t('case.answer_ph'))}"></textarea></label>
+        <textarea name="text" rows="3" required placeholder="${e(t('case.answer_ph'))}"></textarea></label>
       <div class="btn-row"><button>${e(t('case.answer_send'))}</button></div>
     </form></section>`
 }

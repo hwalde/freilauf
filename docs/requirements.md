@@ -741,12 +741,13 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 ## Supervision
 
 - The supervisor flag exists on agents only and is copied to the run
-  (`runs.supervisor`): `runDefFromForm()` sets it only for the agent form,
-  `defFromFlowProps()` and a flow's `start_agent` (`asFlowStart()`) force it
-  off, so no request, favorite, Quick Run, conflict resolver or cleanup agent
-  starts a run that may act on other runs.
-- The scheduler's tick and catch-up never start a flagged agent; "Start now"
-  goes through `startSupervisorRound()`.
+  (`runs.supervisor`): `runDefFromForm()` sets it only for the agent form and
+  `defFromFlowProps()` forces it off, so no request, favorite, Quick Run,
+  conflict resolver, cleanup agent or flow-started single run may act on other
+  runs.
+- No automatic start starts a flagged agent: the scheduler's tick and catch-up
+  skip it, and a flow's `start_agent` and `toggle_agent` answer it like a
+  switched-off agent; "Start now" goes through `startSupervisorRound()`.
 - One supervisor per hub: `activeSupervisorAgent()` is the lowest id among
   flagged, switched-on agents in active repos, and the agents page names the
   others when there are several.
@@ -774,9 +775,10 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   the operator reads goes through `t()`.
 - `GET /api/runs/<id>/case` is read-only and bounded (`limit`, ceiling 200);
   only the supervisor route may record that a case was looked at.
-- The case section (`#run-case`) is always rendered and hidden when empty, and
-  is part of the run-detail fragment; the operator's answer needs a text or a
-  choice and is accepted with no question open.
+- The case section (`#run-case`) is always rendered and part of the run-detail
+  fragment; it is hidden unless the case file has entries or, on a run that is
+  not a supervisor run, a supervisor agent is active; the operator's answer
+  needs a text or a choice and is accepted with no question open.
 
 ## Skills
 

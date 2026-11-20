@@ -3414,6 +3414,8 @@ try {
     // The skip above proves a tick has passed since the three agents were saved.
     const idC = agent('e2e-supervisor-cron').id
     equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idC).c, 0, 'no run of the flagged agent')
+    // Not even considered: a skipped or failed slot would be a schedule_log row.
+    equal(db.prepare('SELECT count(*) c FROM schedule_log WHERE agent_id=?').get(idC).c, 0, 'and no slot of it was logged')
     // Switched off again, so later groups do not see an active supervisor.
     db.prepare('UPDATE agents SET active=0 WHERE id=?').run(idC)
   })
@@ -8771,8 +8773,12 @@ export default {
     await check('a missing or wrong bearer is refused on both listeners', async () => {
       const body = { op: 'note', run: PLAIN, text: 'nope' }
       for (const [what, token] of [['no token', null], ['a wrong token', 'f'.repeat(64)], ['another run\'s token', lauf(PLAIN).report_token]]) {
-        equal((await viaLoopback(`/api/runs/${SUP}/supervise`, { token, body })).status, 401, `loopback, ${what}`)
-        equal((await viaSocket(`/api/runs/${SUP}/supervise`, { token, body })).status, 401, `socket, ${what}`)
+        const l = await viaLoopback(`/api/runs/${SUP}/supervise`, { token, body })
+        const s = await viaSocket(`/api/runs/${SUP}/supervise`, { token, body })
+        equal(l.status, 401, `loopback, ${what}`)
+        equal(s.status, 401, `socket, ${what}`)
+        contains(l.json?.error ?? '', 'bearer token', `loopback, ${what}: the agent's sentence`)
+        equal(s.json?.error, l.json?.error, `socket, ${what}: the same English sentence on both listeners`)
       }
       const cli = await supervise(SUP, ['note', PLAIN, 'nope'], { token: null })
       equal(cli.code, 1, 'fl-supervise without FL_RUN_TOKEN is refused')

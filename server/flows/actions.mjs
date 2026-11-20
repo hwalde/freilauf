@@ -156,16 +156,6 @@ function logTail(runId) {
   return out.join('\n')
 }
 
-/**
- * An agent as a flow may start it: never as a supervisor (SPEC 7.1). A flagged
- * agent's runs may act on other runs, and only the hub starts those — a flow is
- * an automatic start like the schedule, which skips such an agent altogether.
- * Here the run still starts (the flow asked for its work), without the flag.
- */
-export function asFlowStart(agent) {
-  return agent?.supervisor === 1 ? { ...agent, supervisor: 0 } : agent
-}
-
 export const actions = {
   now: () => Date.now(),
   runInfo: async (runId) => runInfo(runId),
@@ -248,7 +238,13 @@ export const actions = {
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId)
     if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
     if (agent.active === 0) return { ok: true, runId: null, inactive: true, name: agent.name }
-    const r = await startForAgent(asFlowStart(agent), promptExtra)
+    // A supervisor agent is started by the hub when cases are due, never by an
+    // automatic start (SPEC 7.1/7.2) — the scheduler skips it, and so does a
+    // flow. Started without its flag it could only be refused at every
+    // `fl-supervise` call, so it is not started at all; same answer shape as
+    // a switched-off agent.
+    if (agent.supervisor === 1) return { ok: true, runId: null, supervisor: true, name: agent.name }
+    const r = await startForAgent(agent, promptExtra)
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
   },
@@ -302,7 +298,9 @@ export const actions = {
     const busy = db.prepare(`SELECT id FROM runs WHERE agent_id = ?
                              AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agentId)
     if (busy) return { ok: true, runId: null, busy: true }
-    const r = await startForAgent(asFlowStart(agent))
+    // Not a flow's to start — see startAgent() above.
+    if (agent.supervisor === 1) return { ok: true, runId: null, supervisor: true, name: agent.name }
+    const r = await startForAgent(agent)
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
   },

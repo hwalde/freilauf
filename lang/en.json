@@ -1452,7 +1452,7 @@
   "sandbox.profile.no_secrets": "No secrets in the box",
   "sandbox.profile.no_secrets_desc": "Balanced, but the container holds a placeholder instead of your API key — the proxy swaps in the real one on that credential’s own hosts. Needs iron-proxy and a sandbox CA.",
   "sandbox.socket.unauthorized": "Missing or wrong report token for this run.",
-  "sandbox.socket.no_such_route": "This socket carries only the report and sandbox routes of one run; the rest of the API stays on 127.0.0.1.",
+  "sandbox.socket.no_such_route": "This socket carries only the report, sandbox and supervise routes of one run; the rest of the API stays on 127.0.0.1.",
   "sandbox.socket.unknown_run": "No such run.",
   "sandbox.socket.not_sandboxed": "This run is not sandboxed: it works on the host, with no network allowlist and no resource limits.",
   "sandbox.socket.ask_hint": "If you need a host, a path or more resources, do not work around the sandbox: run fl-report access \"<what you need and why>\" and carry on with what you can.",

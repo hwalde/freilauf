@@ -2062,6 +2062,11 @@ try {
     const p = await neueSeite(`/runs/${R_LIVE}`)
     await wartePage(p, () => !!document.querySelector('#run-case:not([hidden]) textarea[name=text]'), null,
       'the case section with its answer form')
+    // Premise: an entry on its own reaches the open page (it is announced, not
+    // an event), so the wait below is the guard's doing and not silence.
+    await postForm(`/api/runs/${R_LIVE}/case/answer`, { text: 'arrives by itself' })
+    await wartePage(p, () => document.querySelector('#run-case')?.textContent.includes('arrives by itself'), null,
+      'a new entry to arrive while nothing has the focus')
     await p.fill('#run-case textarea[name=text]', 'half an answer')
     isTrue(await p.$eval('#run-case textarea[name=text]', el => el === document.activeElement), 'premise: the field has the focus')
     // A new entry announces the run, and the open page asks for the fragment.

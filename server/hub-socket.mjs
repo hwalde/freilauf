@@ -63,6 +63,9 @@ const ROUTES = [
   { name: 'supervise', method: 'POST', re: /^\/api\/runs\/([0-9a-f-]{36})\/supervise$/ },
 ]
 
+/** The names on the allowlist, in order — what a test pins, so a fourth line cannot slip in. */
+export const SOCKET_ROUTE_NAMES = ROUTES.map(r => r.name)
+
 /**
  * Which of the allowed routes a request is, or null. Exported because the allowlist
  * is the security property worth a test of its own.
@@ -144,7 +147,10 @@ async function handle(req, res) {
   // The token is REQUIRED here, and it has to match the id in the path — which
   // is also what keeps a run from asking about another run: there is no way to
   // name a foreign id and still carry its token.
-  if (!reportTokenOk(route.runId, bearerToken(req))) {
+  // …except on the supervisor route, whose handler checks the same token
+  // itself and refuses with an English sentence an agent reads (SPEC 7.7) —
+  // one answer on both listeners.
+  if (route.name !== 'supervise' && !reportTokenOk(route.runId, bearerToken(req))) {
     return json(res, 401, { ok: false, error: t('sandbox.socket.unauthorized') })
   }
   if (route.name === 'report') {
