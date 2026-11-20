@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # fl-supervise — the command line of a Freilauf supervisor run.
 # Usage:
-#   fl-supervise cases [--text] [--limit <n>]
-#                                   What is due now, most urgent first, each with
-#                                   its reason and ages (JSON; --text: readable).
+#   fl-supervise cases [--text] [--due] [--limit <n>]
+#                                   This round's cases, as the hub handed them
+#                                   out, most urgent first, each with its reason
+#                                   and ages (JSON; --text: readable). --due: what
+#                                   is due right now instead (up to --limit).
 #   fl-supervise look <run> [--json] [--tail <n>] [--chars <n>] [--events <n>] [--entries <n>]
 #                                   Everything about one case: the task, its
 #                                   state, why it is due, events, git, the tail
@@ -55,7 +57,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
@@ -67,7 +69,7 @@ die_usage() { printf 'fl-supervise: %s\n' "$1" >&2; printf 'Run "fl-supervise --
 # One branch per subcommand, each filling OP and the fields of the JSON body.
 # A new subcommand is one more branch here plus its lines in the usage text; the
 # hub decides everything else (server/supervision.mjs, the op table).
-RUN=""; TEXT=""; MINUTES=""; REASON=""; AGAIN=""; LIMIT=""; TAIL=""; CHARS=""; EVENTS=""; ENTRIES=""; FORMAT="json"
+RUN=""; TEXT=""; MINUTES=""; REASON=""; AGAIN=""; LIMIT=""; TAIL=""; CHARS=""; EVENTS=""; ENTRIES=""; FORMAT="json"; DUE=""
 CLASS=""; CHOICES=()
 num_arg() { [[ "${2:-}" =~ ^[0-9]+$ ]] || die_usage "$1 takes a whole number"; }
 case "$CMD" in
@@ -78,6 +80,7 @@ case "$CMD" in
                 --text) FORMAT="text"; shift ;;
                 --json) FORMAT="json"; shift ;;
                 --limit) num_arg --limit "${2:-}"; LIMIT="$2"; shift 2 ;;
+                --due) DUE="1"; shift ;;
                 *) die_usage "cases: unknown option $1" ;;
             esac
         done
@@ -149,16 +152,18 @@ fi
 
 # The body as JSON, built by python3 so no text can break the quoting. Minutes
 # travel as the string they were typed as: the hub checks them, not this script.
-PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" "$LIMIT" "$TAIL" "$CHARS" "$EVENTS" "$ENTRIES" "$CLASS" ${CHOICES[@]+"${CHOICES[@]}"} <<'PY'
+PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" "$LIMIT" "$TAIL" "$CHARS" "$EVENTS" "$ENTRIES" "$CLASS" "$DUE" ${CHOICES[@]+"${CHOICES[@]}"} <<'PY'
 import json, sys
-cmd, run, text, minutes, reason, again, limit, tail, chars, events, entries, klass = sys.argv[1:13]
-choices = sys.argv[13:]
+cmd, run, text, minutes, reason, again, limit, tail, chars, events, entries, klass, due = sys.argv[1:14]
+choices = sys.argv[14:]
 op = {"look": "bundle"}.get(cmd, cmd)
 body = {"op": op}
 if cmd != "cases":
     body["run"] = run
 if cmd == "cases" and limit:
     body["limit"] = limit
+if cmd == "cases" and due:
+    body["due"] = True
 if cmd == "look":
     if tail:
         body["tail"] = tail

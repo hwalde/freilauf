@@ -1021,13 +1021,19 @@ function releaseSandbox(runId, source) {
  * unmerged leftovers only when he did not end it himself (whoever clicked the
  * button is looking at the page; a supervisor's end he has not seen).
  *
+ * `by` is `'user'` (the kill route), `'supervisor'` (a supervisor's `end`) or
+ * `'hub'` (the supervision clock ending a round stuck past its bound); only the
+ * first reads as the operator's end anywhere (`abortedByFrom()`).
+ *
  * Returns `{ outcome, followupAbandoned }`: `'session_closed'` for a run that
  * had already finished, `'aborted'` otherwise, `null` for no such run.
  */
 export async function endRun(runId, { by = 'user', supervisorRun = null, reason = null } = {}) {
   const run = getRun(runId)
   const supervisor = by === 'supervisor'
-  const who = supervisor ? { source: 'supervisor', supervisor_run: supervisorRun } : { source: 'user' }
+  const hub = by === 'hub'
+  const who = supervisor ? { source: 'supervisor', supervisor_run: supervisorRun }
+    : hub ? { source: 'hub', reason } : { source: 'user' }
   if (run) {
     try { await stopRunContainer(run) } catch { /* fail-soft: the session still has to go */ }
   }
@@ -1043,7 +1049,7 @@ export async function endRun(runId, { by = 'user', supervisorRun = null, reason 
     let followupAbandoned = false
     if (run.followup_since) {
       addEvent(runId, 'followup_abandoned', supervisor ? { ...who, reason } : who)
-      abandonFollowUp(runId, supervisor)
+      abandonFollowUp(runId, supervisor || hub)
       followupAbandoned = true
     }
     if (!run.tmux_closed_at) addEvent(runId, 'tmux_closed', who)
@@ -1059,10 +1065,11 @@ export async function endRun(runId, { by = 'user', supervisorRun = null, reason 
               followup_since=NULL, agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(runId)
   // Same event kind reconcileClosedSession() writes, so "why did this run
   // stop?" has one answer to look for rather than two.
-  addEvent(runId, 'aborted', supervisor ? { by: 'supervisor', supervisor_run: supervisorRun, reason } : { by: 'user' })
+  addEvent(runId, 'aborted', supervisor ? { by: 'supervisor', supervisor_run: supervisorRun, reason }
+    : hub ? { by: 'hub', reason } : { by: 'user' })
   // An end somebody ASKED for is an abort, even in the finish gate — and what
   // it leaves behind is assessed like any other unfinished run.
-  assessLater(runId, supervisor)
+  assessLater(runId, supervisor || hub)
   // "run finished" triggers, without waiting for the watcher
   import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
   return { outcome: 'aborted', followupAbandoned: !!run.followup_since }

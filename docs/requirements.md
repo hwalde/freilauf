@@ -219,6 +219,12 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   never fails on a convenience.
 - A relaunch of an existing row (retry, deferred, scheduled, resume) moves
   `started_at`; the orphan sweep's grace period reads it.
+- A slot skipped because the agent's run is still open goes through
+  `scheduleSkippedBusy()` (tick and catch-up alike): besides the event and the
+  `schedule_log` row, a run that has been waiting for input or help, or silent,
+  for more than 24 hours is announced as `schedule_blocked`, at most once per
+  24 hours per run (a muted notice counts), until it ends — independent of any
+  supervisor and of `FREILAUF_SUPERVISION_OFF`.
 
 ## Quota and gates
 
@@ -542,10 +548,15 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 
   | Route | Types | In the smart mode |
   |---|---|---|
-  | urgent | `help`, `access`, `merge_blocked`, `review_changes`, `review_resolver`, `aborted_unmerged`, `followup_unmerged`, `unpushed`, `start_failed`, `max_runtime`, `supervisor_question`, `escalation` | sent at once, unchanged (also in "urgent only") |
+  | urgent | `help`, `access`, `merge_blocked`, `review_changes`, `review_resolver`, `aborted_unmerged`, `followup_unmerged`, `unpushed`, `start_failed`, `max_runtime`, `supervisor_question`, `escalation`, `supervision_parked`, `supervision_round_stuck`, `schedule_blocked` | sent at once, unchanged (also in "urgent only") |
   | deputy | `done`, `failed`, `followup`, `followup_failed`, `exit_without_report`, `pane_died` | the deputy decides |
   | interim | `overrun`, `followup_overrun` | the deputy decides, without a report |
   | digest | `deferred`, `resolving`, `review_merged`, `review_closed` | only in the digest; judged like interim while the digest is off |
+- A supervisor round's own `done` and `followup` are neither sent nor noted
+  (`roundQuiet()`, asked by `routeMessage()` and `noteReport()`; `sweep()`
+  skips a round that ended `done`), in every mode, because a round per
+  interval would be a message per interval; its other types go their usual
+  route.
 - The modes: `classic` sends as always, `smart` lets the deputy decide,
   `urgent` sends only the urgent route; an update stays `classic` with the
   digest off, so nothing changes and nothing costs until the operator
@@ -724,9 +735,10 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   touches only sessions carrying a run of this hub.
 - The run's terminal is writable as long as its session and pane are;
   `/api/runs/<id>/kill` on a `failed` run sets `aborted`, on `done`/`aborted`
-  only closes the session; the route and a supervisor's `end` are one function
-  (`endRun()`), differing only in attribution, and a supervisor's end also
-  announces unmerged leftovers, because the operator did not see it happen.
+  only closes the session; the route, a supervisor's `end` and the clock's end
+  of a stuck round are one function (`endRun()`, `by` `user`, `supervisor` or
+  `hub`), differing only in attribution, and the latter two also announce
+  unmerged leftovers, because the operator did not see it happen.
 - `reconcileClosedSession()` is the single place a closed session becomes a
   run event (abort with reason, flows fired, commission abandoned).
 - Session memory is measured through `listSessionsSnapshot()` for the whole
@@ -743,8 +755,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   settings on two paths; the watcher, the flows and the incidents keep their
   view of a run whether it is archived or not — only displays that promise
   rows (the sidebar's overview-linked count, the read API's `archived` filter),
-  the retention and title-retry passes, and the supervisor's refusal and due
-  check (an archived run is not a case) read `archived_at`.
+  the retention and title-retry passes, the supervisor's refusal and due
+  check (an archived run is not a case) and the parked list of Settings →
+  Supervision read `archived_at`.
 - `repos.active=0` removes the repo from every dropdown and starts nothing
   (manual path included) while history stays reachable through an explicit
   `?repo=`.
@@ -762,8 +775,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   `defFromFlowProps()` forces it off, so no request, favorite, Quick Run,
   conflict resolver, cleanup agent or flow-started single run may act on other
   runs.
-- No automatic start starts a flagged agent: the scheduler's tick and catch-up
-  skip it, and a flow's `start_agent` and `toggle_agent` answer it like a
+- Only the supervision clock starts a flagged agent: the scheduler's tick and
+  catch-up skip it, and a flow's `start_agent` and `toggle_agent` answer it like a
   switched-off agent; "Start now" goes through `startSupervisorRound()`.
 - One supervisor per hub: `activeSupervisorAgent()` is the lowest id among
   flagged, switched-on agents in active repos, and the agents page names the
@@ -799,16 +812,18 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - `dueVerdict()` is the one due predicate: pure (no subprocess, git, tmux or
   database), fed by `caseFacts()`, applied to every candidate by `dueCases()`;
   its exclusions come before its conditions, and a supervisor, taken-out,
-  archived, conflict, parked run or one ended by the operator (the kill, or
-  the last follow-up abandoned from the page), a flow or a supervisor is never
-  due.
+  archived or conflict run, or one ended by the operator (the kill, or the
+  last follow-up abandoned from the page), a flow or a supervisor, is never
+  due; a parked case only as said below.
 - `dueCases()` takes as candidates only runs that are working, ended since
   supervision began in a state that can be due, or have a look-again time or
   unseen news, working runs first, so runs that ended fine never push an old
   stuck run past its fence; a hit fence is said in the answer.
-- `supervision_since` is set once, when supervision first becomes active; a
-  run that ended before it is never due for how it ended, so switching a
-  supervisor on does not make the past a case.
+- `supervision_since` is set once, by the first due check that runs while a
+  supervisor agent is active (a clock pass, "Start now", or a supervisor's
+  `cases`), not when the flag is saved; a run that ended before it is never
+  due for how it ended, so switching a supervisor on does not make the past a
+  case.
 - "Waiting since" is the newest `agent_waiting` event, and waiting for help is
   due only after the same threshold, so the supervisor does not race the
   operator who was paged.
@@ -818,7 +833,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   after the last look or the closing (compared by entry id, not by second);
   the fingerprint holds no ages and no activity, so the clock alone never
   changes it; closing stores it.
-- Without news a case is not due again within the interval after a look.
+- Without news a case is not due again within the interval after a look or
+  after a round took it (`last_round_at`); the bundle ignores `last_round_at`,
+  so the round that took a case sees why it was handed out.
 - Text an agent reads (bundle, case list, refusals) phrases durations with
   `fmtDurationEn()`, never the UI-language `fmtDuration()`, and every age in
   it is computed by the hub.
@@ -885,6 +902,57 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   hears of an escalation when it is raised, on the urgent route; the timed
   announcements (`escalationNotices()`) mark what they sent, so a clock never
   repeats one.
+- The clock is `supervisionTick()` in the watcher pass, fenced by
+  `FREILAUF_SUPERVISION_OFF`; no model is asked whether anything is due, and a
+  pass that finds nothing due starts no run and writes no event.
+- One round at a time: a run carrying a `supervision_round` event that is
+  running, waiting for help, deferred or has an open follow-up holds the
+  clock; a new round starts at most once per `supervision_interval_minutes`,
+  measured from the newest round's stored start, so a restart does not reset
+  it, and the due check itself runs at most once per interval per process.
+- A round is started through `startForAgent()` and so passes the budget gate
+  like any start (a deferred round holds the clock); it honours `pipeline_on`
+  and the agent's `active` switch, and counts against its repository's
+  `max_parallel` without being gated by it, like the cleanup agent.
+- A round's case list is its `supervision_round` event, written by
+  `startRun()` before the launch so the agent's first `fl-supervise cases`
+  finds it; `cases` answers exactly that list and `cases --due` what is due
+  now; every case it took gets `last_round_at` and one more
+  `handouts_unlooked`.
+- The round's prompt extra (`roundBlock()`) is English, lists at most
+  `supervision_cases_per_round` cases most urgent first with the hub's
+  phrased ages, fences every title, repository and agent name as data, tells
+  the round to look first and never to call `fl-report help`, and says
+  "nothing is due" when the list is empty.
+- "Start now" on a flagged agent runs the due check by hand and is not gated
+  by the pipeline, the interval or the fence; it is refused for a flagged agent
+  that is not the active supervisor and while a round holds the clock, so a
+  hub never has two rounds acting at once.
+- A caller qualifies by its own `runs.supervisor = 1`: a round keeps working
+  after its agent is unflagged until it ends or hits its bound; only the clock
+  and "Start now" decide which agent starts rounds.
+- A round open longer than max(2 x interval, 3 x its expected minutes) —
+  measured from its open follow-up's commission when there is one, never while
+  deferred — is ended through `endRun({by:'hub'})` and announced once as
+  `supervision_round_stuck`; a supervisor round is never a case, so this is
+  the only thing that keeps a hanging round from stopping supervision.
+- A case is parked (`parkCase()`: `parked_at`, an `action` entry by the hub,
+  one `supervision_parked` message) after `PARK_AFTER` (6) looks with the same
+  fingerprint, or when it would be handed out after six rounds that never
+  looked at it; a parked case comes back only on news, on a changed
+  fingerprint with a real condition, or by the operator's un-park button
+  (due at the next round through a look-again time of now).
+- A closed or parked case that is due again is reopened or un-parked for real
+  (`applyVerdict()`: a `reopened` entry or an `unpark` action, `closed_at` /
+  `parked_at` cleared) before a round takes it or a look is recorded.
+- Escalation notices run on every clock pass whether or not a supervisor is
+  active, because an escalation that exists must not be swallowed.
+- Unflagging, deactivating or deleting the supervisor agent makes the clock
+  quiet and the platform-rules lines disappear for the next launch.
+- Settings → Supervision writes only its five keys: `''` means the default, a
+  value is a whole number in its range, and 0 is valid only for the
+  escalation grace; a value outside the range that reached the database
+  otherwise is held to it when read.
 
 ## Skills
 
@@ -910,8 +978,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   answer SIGINT/SIGTERM/SIGHUP, and a starting sandbox sweeps a dead one's
   list in parallel (`sandboxOrphaned()` never sweeps a live or kept sandbox).
 - The suites own the clocks: `FREILAUF_WATCHER_OFF`,
-  `FREILAUF_INTEGRATOR_OFF`, `FREILAUF_SANDBOX_REAPER_OFF`; watcher passes and
-  `integrateTick(nowMs)` are called by the test.
+  `FREILAUF_INTEGRATOR_OFF`, `FREILAUF_SANDBOX_REAPER_OFF`,
+  `FREILAUF_SUPERVISION_OFF`; watcher passes, `integrateTick(nowMs)` and
+  `supervisionTick(nowMs)` are called by the test.
 - A green run of the container layer proves the hub's own argument shapes and
   refusals only; anything depending on a daemon or image has to be run once
   against a real one.

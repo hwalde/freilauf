@@ -543,6 +543,10 @@ CREATE INDEX IF NOT EXISTS idx_escalations_run ON escalations(run_id);
 // The agent's own `_working prompt` hook follows a beat later; where the hook
 // carries no head (cursor, hermes) this moment is how its echo is recognised.
 addColumn('runs', 'nudge_typed_at', 'TEXT')
+// How often the clock handed this case to a round since a supervisor last
+// looked at it (server/supervision-clock.mjs): a case no round ever looks at is
+// parked like one looked at six times without a change, not handed out forever.
+addColumn('case_state', 'handouts_unlooked', 'INTEGER NOT NULL DEFAULT 0')
 /**
  * Drop the CHECK rule on `agents.harness` — once, idempotently.
  *

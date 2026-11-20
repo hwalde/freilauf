@@ -28,8 +28,10 @@ import { readLogTail } from './run-log.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
   archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
-import { activeSupervisorAgent, startSupervisorRound } from './supervision.mjs'
-import { caseSection, supervisionSwitch, supervisorNotice, escalationsPageBody, escalationNav } from './supervision-pages.mjs'
+import { activeSupervisorAgent } from './supervision.mjs'
+import { startSupervisorRound } from './supervision-clock.mjs'
+import { caseSection, supervisionSwitch, supervisorNotice, escalationsPageBody, escalationNav,
+  supervisionSettingsBody, supervisionSettingsFromForm, supervisionSettingsSummary } from './supervision-pages.mjs'
 import { resolveEscalation, dismissEscalation, ESCALATION_STATE_FILTERS } from './escalations.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
@@ -2807,6 +2809,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.review_hint', { setup: reviewSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/cleanup">${e(t('cleanup.settings_title'))}</a>
      <span class="dim">${e(t('settings.cleanup_hint', { setup: cleanupSettingsSummary() }))}</span></p>
+  <p><a class="btn" href="/settings/supervision">${e(t('supervision.settings_title'))}</a>
+     <span class="dim">${e(t('settings.supervision_hint', { setup: supervisionSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/skills">${e(t('flskills.title'))}</a>
      <span class="dim">${e(t('settings.skills_hint', { state: t(skillsInstallOn() ? 'layout.on' : 'layout.off') }))}</span></p>
   <p><a class="btn" href="/settings/sandbox">${e(t('sandbox.settings.title'))}</a>
@@ -3180,6 +3184,28 @@ export async function cleanupSettingsSave(req, res, url, formBody) {
   if (b.cleanup_repo_id) setSetting('cleanup_repo_id', String(b.cleanup_repo_id))
   setSetting('cleanup_prompt', String(b.cleanup_prompt ?? ''))
   redirect(res, '/settings/cleanup')
+}
+
+// ---------------- supervision (Settings → Supervision) ----------------
+//
+// The clock's numbers and which agent supervises. Its own page and its own
+// save handler, like the cleanup page: the handler writes exactly the keys of
+// this form (supervision-pages.mjs), so the big form's allowlist is not involved.
+
+export async function pageSupervisionSettings(req, res, url) {
+  const stored = Object.fromEntries(db.prepare(`SELECT key, value FROM settings WHERE key LIKE 'supervision_%'`).all()
+    .map(r => [r.key, r.value]))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('supervision.settings_title'), '/settings', supervisionSettingsBody(stored)))
+}
+
+export async function supervisionSettingsSave(req, res, url, formBody) {
+  const b = await formBody()
+  const { values, problems } = supervisionSettingsFromForm(b)
+  // All or nothing: a page that saved four of five numbers would look saved.
+  if (problems.length) return problemPage(req, res, t('supervision.settings_title'), problems, '/settings/supervision')
+  for (const [k, v] of Object.entries(values)) setSetting(k, v)
+  redirect(res, '/settings/supervision')
 }
 
 // ---------------------------------------------------------------------------
@@ -3865,9 +3891,15 @@ export async function agentStart(req, res, url, formBody) {
   // A manual start is allowed even with the pipeline switched off (planning
   // 4.8) — the switch only gates the SCHEDULED starts. Both branches used to
   // stand here, doing exactly the same thing.
-  // A supervisor agent goes through its own seam: the hub decides what its
-  // round looks at (server/supervision.mjs, startSupervisorRound).
-  const r = agent.supervisor === 1 ? await startSupervisorRound(agent) : await startForAgent(agent)
+  // A supervisor agent goes through its own seam: the hub runs the due check
+  // by hand and the round gets its case list (server/supervision-clock.mjs).
+  // Its refusals (not the active supervisor, a round still in flight) are said.
+  if (agent.supervisor === 1) {
+    const r = await startSupervisorRound(agent)
+    if (!r.runId && r.error) return problemPage(req, res, t('agents.start_now'), [r.error], `/agents?repo=${agent.repo_id}`)
+    return redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
+  }
+  const r = await startForAgent(agent)
   redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
 }
 

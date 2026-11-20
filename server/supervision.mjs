@@ -184,11 +184,19 @@ export const UNMERGED_STATES = ['unmerged_commits', 'unmerged_both', 'unmerged_d
 /** A done run in a merging repository with no merge status yet is left alone this long. */
 export const UNMERGED_GRACE_MS = 30 * 60_000
 
-/** The settings the due check reads, with their defaults in minutes (the page for them is stage C's). */
+/**
+ * The settings the due check and the clock read: key, default, and the range
+ * the settings page accepts (`''` stored means the default; a value outside the
+ * range that reached the database by hand is held to it).
+ */
 export const SUPERVISION_SETTINGS = {
-  wait: { key: 'supervision_wait_minutes', dflt: 30, min: 1 },
-  interval: { key: 'supervision_interval_minutes', dflt: 60, min: 5 },
+  wait: { key: 'supervision_wait_minutes', dflt: 30, min: 1, max: 7 * 24 * 60 },
+  interval: { key: 'supervision_interval_minutes', dflt: 60, min: 5, max: 7 * 24 * 60 },
+  cases: { key: 'supervision_cases_per_round', dflt: 8, min: 1, max: 50 },
 }
+
+/** Looks without a change of state (or hand-outs without any look) after which a case is parked (SPEC 4.7). */
+export const PARK_AFTER = 6
 
 /**
  * The state of a run as one short string: when it changes, something happened
@@ -291,15 +299,13 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
   if (FINISHED.includes(run.status) && !followUpActive(run) && ['operator', 'supervisor'].includes(facts.followupAbandonedBy)) {
     return no(`ended_by_${facts.followupAbandonedBy}`)
   }
-  if (state?.parked_at) return no('parked')
-
   const conds = dueConditions(run, facts, nowMs, c)
   // A reply, an answer or an escalation result nobody has looked at since it came.
   const seen = Math.max(Number(facts.lastLookId ?? 0), Number(facts.lastClosedId ?? 0))
   const input = facts.lastInput && Number(facts.lastInput.id) > seen ? facts.lastInput : null
   if (input) conds.push({ reason: input.kind, sinceMs: parseDbUtc(input.ts) })
   const againMs = parseDbUtc(state?.look_again_at)
-  const againReached = !state?.closed_at && Number.isFinite(againMs) && againMs <= nowMs
+  const againReached = !state?.closed_at && !state?.parked_at && Number.isFinite(againMs) && againMs <= nowMs
   if (againReached) conds.push({ reason: 'look_again', sinceMs: againMs })
   conds.sort((a, b) => (DUE_REASONS[b.reason] ?? 0) - (DUE_REASONS[a.reason] ?? 0))
   const changed = !!state?.state_fp && state.state_fp !== fp
@@ -308,6 +314,13 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
     sinceMs: conds[0].sinceMs, details: Object.fromEntries(conds.filter(x => x.detail).map(x => [x.reason, x.detail])),
     fp, ...extra,
   })
+  // A parked case (the loop fence, SPEC 4.7) comes back only on news or when
+  // its state changed and a real condition holds — never on what stood when it
+  // was parked; the operator's button un-parks it too (`unparkCase()`).
+  if (state?.parked_at) {
+    if (input || (changed && conds.length)) return hit({ unpark: true, changed, ...(state.closed_at ? { reopen: true } : {}) })
+    return no('parked')
+  }
   // 7.14: a closed case comes back only on news — never on the conditions that stood when it was closed.
   if (state?.closed_at) {
     if (input) return hit({ reopen: true, changed })
@@ -405,10 +418,20 @@ export function caseEntryCount(runId) {
   return db.prepare('SELECT count(*) c FROM case_entries WHERE run_id = ?').get(runId).c
 }
 
-/** The due check's thresholds in ms, read through the safe numeric helper ('' is the default). */
+/** One supervision setting, read through the safe numeric helper ('' is the default), held to its range. */
+export function supervisionSetting(name) {
+  const s = SUPERVISION_SETTINGS[name]
+  const n = Math.floor(numSetting(s.key, s.dflt))
+  return Math.min(s.max, Math.max(s.min, Number.isFinite(n) ? n : s.dflt))
+}
+
+/** The due check's thresholds in ms and the clock's cases per round. */
 export function supervisionConfig() {
-  const min = (s) => Math.max(s.min, numSetting(s.key, s.dflt)) * 60_000
-  return { waitMs: min(SUPERVISION_SETTINGS.wait), intervalMs: min(SUPERVISION_SETTINGS.interval) }
+  return {
+    waitMs: supervisionSetting('wait') * 60_000,
+    intervalMs: supervisionSetting('interval') * 60_000,
+    casesPerRound: supervisionSetting('cases'),
+  }
 }
 
 /**
@@ -506,7 +529,7 @@ export function dueCases({ nowMs = Date.now(), limit = 50, begin = false } = {})
                   ('pane_died', 'anomaly:exit_without_report', 'anomaly:overrun', 'anomaly:no_activity', 'anomaly:followup_overrun'))
              OR EXISTS (SELECT 1 FROM incidents i WHERE i.run_id = r.id AND i.geloest_am IS NULL
                   AND (i.schwere = 'rot' OR i.typ = 'merge_blocked'))))
-        OR EXISTS (SELECT 1 FROM case_state c WHERE c.run_id = r.id AND c.parked_at IS NULL AND (c.look_again_at IS NOT NULL
+        OR EXISTS (SELECT 1 FROM case_state c WHERE c.run_id = r.id AND ((c.parked_at IS NULL AND c.look_again_at IS NOT NULL)
              OR EXISTS (SELECT 1 FROM case_entries x WHERE x.run_id = r.id AND x.kind IN ('reply', 'answer', 'resolved')
                   AND x.id > COALESCE((SELECT max(y.id) FROM case_entries y WHERE y.run_id = r.id AND y.kind IN ('look', 'closed')), 0)))))
       ORDER BY CASE WHEN ${LIVE_SQL} THEN 0 ELSE 1 END, r.started_at DESC LIMIT ?`).all(since, since, DUE_CANDIDATES_MAX + 1)
@@ -587,19 +610,81 @@ export function answerCase(runId, { text = '', choice = '' } = {}) {
   return { ok: true, id: r.id }
 }
 
-// ------------------------------------------------------------------ rounds
+// --------------------------------------------- what the clock writes about a case
+//
+// The clock (server/supervision-clock.mjs) decides; these write. Every hub-made
+// entry is by `hub` and carries its facts in `data`, so the page renders them
+// through t() and the bundle shows them as data.
 
 /**
- * SEAM for the round start (stage C): "Start now" on a supervisor agent comes
- * here instead of going straight to `startForAgent()`. Today it starts the
- * agent like any other — the hub-written case list and the due check are not
- * built yet. Stage C replaces the body with: run the due check by hand, start
- * one round with whatever is due ("nothing is due" when the list is empty).
+ * Park a case (the loop fence, SPEC 4.7): the clock stops handing it out until
+ * its state changes, news arrives or the operator un-parks it. `why` is
+ * `looks` (looked at `PARK_AFTER` times with the same state) or `handouts`
+ * (handed to that many rounds and never looked at). One `action` entry and one
+ * message to the operator per parking, on the urgent route — a muted run keeps
+ * its meaning. `fp` is the state it was parked in. Idempotent: a parked case is
+ * not parked again.
  */
-export async function startSupervisorRound(agent) {
-  supervisionSince(Date.now(), { begin: true })   // the first round marks where supervision began (SPEC 7.9)
-  const { startForAgent } = await import('./scheduler.mjs')
-  return startForAgent(agent)
+export async function parkCase(runId, { why = 'looks', count = PARK_AFTER, fp = null, nowMs = Date.now() } = {}) {
+  ensureCaseState(runId)
+  const changed = db.prepare(`UPDATE case_state SET parked_at = ?, state_fp = COALESCE(?, state_fp)
+      WHERE run_id = ? AND parked_at IS NULL`).run(toDbUtc(nowMs), fp, runId).changes
+  if (!changed) return { parked: false }
+  addCaseEntry(runId, { kind: 'action', author: 'hub', data: { op: 'park', why, count } })
+  const run = getRun(runId)
+  const { notifyRun, reportHeader } = await import('./reports.mjs')
+  const what = why === 'handouts'
+    ? `The hub handed this run to ${count} supervisor rounds and none of them looked at it`
+    : `The supervisor looked at this run ${count} times and its state did not change`
+  const delivered = run ? await notifyRun(runId, 'supervision_parked', `${reportHeader(run, 'SUPERVISION PARKED')}\n\n`
+    + `🅿️ ${what}, so the hub stopped handing it out. It comes back by itself when something about it changes or `
+    + 'somebody answers; otherwise un-park it in the case file on its page.', { dedupe: false }) : false
+  return { parked: true, delivered }
+}
+
+/**
+ * Un-park a case. By the operator (the button on the run page): it is due at
+ * the next round, through a look-again time of now. By the hub: news or a
+ * change of state brought it back (`verdict.unpark`). Either way the counts
+ * start again. Returns whether it was parked.
+ */
+export function unparkCase(runId, { by = 'operator', why = 'operator', nowMs = Date.now() } = {}) {
+  const st = caseState(runId)
+  if (!st?.parked_at) return false
+  db.prepare(`UPDATE case_state SET parked_at = NULL, looks_unchanged = 0, handouts_unlooked = 0,
+      look_again_at = CASE WHEN ? THEN ? ELSE look_again_at END WHERE run_id = ?`)
+    .run(by === 'operator' ? 1 : 0, toDbUtc(nowMs), runId)
+  addCaseEntry(runId, { kind: 'action', author: by === 'operator' ? 'operator' : 'hub', data: { op: 'unpark', why } })
+  return true
+}
+
+/**
+ * A closed case that is due again (SPEC 7.14) is reopened for real: a
+ * `reopened` entry by the hub and `closed_at` cleared — otherwise the next look
+ * would read it as closed again. Returns whether it was closed.
+ */
+export function reopenCase(runId, { why = 'news' } = {}) {
+  const st = caseState(runId)
+  if (!st?.closed_at) return false
+  db.prepare('UPDATE case_state SET closed_at = NULL, closed_reason = NULL WHERE run_id = ?').run(runId)
+  addCaseEntry(runId, { kind: 'reopened', author: 'hub', data: { why, closed_reason: st.closed_reason ?? null } })
+  return true
+}
+
+/** What a due verdict asks to be written before a round or a look acts on it: un-park, reopen. */
+export function applyVerdict(runId, verdict, nowMs = Date.now()) {
+  if (!verdict?.due) return { unparked: false, reopened: false }
+  const why = ['answer', 'reply', 'resolved'].includes(verdict.reason) ? 'news' : 'changed'
+  const unparked = verdict.unpark ? unparkCase(runId, { by: 'hub', why, nowMs }) : false
+  const reopened = verdict.reopen ? reopenCase(runId, { why }) : false
+  return { unparked, reopened }
+}
+
+/** A round took this case: when (the interval rule reads it) and one more hand-out without a look. */
+export function markHandedOut(runId, nowMs = Date.now()) {
+  ensureCaseState(runId)
+  db.prepare('UPDATE case_state SET last_round_at = ?, handouts_unlooked = handouts_unlooked + 1 WHERE run_id = ?')
+    .run(toDbUtc(nowMs), runId)
 }
 
 // ------------------------------------------------------------------ the bundle
@@ -648,7 +733,10 @@ export async function caseBundle(run, { nowMs = Date.now(), tail, chars, events:
   const facts = caseFacts(run)
   const state = caseState(run.id)
   const cfg = supervisionConfig()
-  const verdict = dueVerdict(run, state, facts, nowMs, cfg)
+  // "Why is this a case" for whoever looks: the hand-out a round's start
+  // recorded (`last_round_at`) is the clock's bookkeeping, not a look, and must
+  // not make the round that took the case read it as "not due".
+  const verdict = dueVerdict(run, state ? { ...state, last_round_at: null } : state, facts, nowMs, cfg)
 
   // What it was asked to do.
   const prompt = [run.prompt, run.prompt_extra].filter(Boolean).join('\n\n')
@@ -833,19 +921,22 @@ export function recordLook(runId, callerId, verdict, nowMs = Date.now()) {
     data: verdict.due ? { due: verdict.reason } : { due: null, exclusion: verdict.exclusion } })
   const unchanged = before?.state_fp && before.state_fp === verdict.fp ? (before.looks_unchanged ?? 0) + 1 : 1
   const againMs = parseDbUtc(before?.look_again_at)
-  db.prepare(`UPDATE case_state SET last_look_at = ?, state_fp = ?, looks_unchanged = ?,
+  db.prepare(`UPDATE case_state SET last_look_at = ?, state_fp = ?, looks_unchanged = ?, handouts_unlooked = 0,
       look_again_at = CASE WHEN ? THEN NULL ELSE look_again_at END WHERE run_id = ?`)
     .run(toDbUtc(nowMs), verdict.fp, unchanged, Number.isFinite(againMs) && againMs <= nowMs ? 1 : 0, runId)
   return { entry: e.id, looks_unchanged: unchanged }
 }
 
 /** One line per due case, for `fl-supervise cases` (English, ages computed here). */
-export function casesText(list, { total, considered, capped = false, nowMs = Date.now() }) {
+export function casesText(list, { total, considered, capped = false, nowMs = Date.now(), round = false }) {
   const fence = capped ? ` Only the first ${considered} candidates were judged (working runs first); older finished runs were not.` : ''
+  if (round && !list.length) return 'This round has no cases: nothing was due when the hub started it. Finish the round.'
   if (!list.length) return `Nothing is due (${considered} run(s) considered).${fence}`
-  const L = [`${total} case(s) due${total > list.length ? `, the ${list.length} most urgent shown` : ''}, most urgent first:${fence}`]
+  const L = [round
+    ? `This round's ${list.length} case(s), most urgent first${total > list.length ? ` (${total - list.length} more were due and wait for a later round)` : ''}:`
+    : `${total} case(s) due${total > list.length ? `, the ${list.length} most urgent shown` : ''}, most urgent first:${fence}`]
   for (const c of list) {
-    L.push(`- ${c.short_id} ${inline(c.title ?? '(untitled)')} · ${c.repo ? inline(c.repo) : '?'}${c.agent ? ` · agent ${inline(c.agent)}` : ''} · ${c.harness} · ${c.display_status}`)
+    L.push(`- ${c.short_id} ${inline(c.title ?? '(untitled)')} · ${c.repo ? inline(c.repo) : '?'}${c.agent ? ` · agent ${inline(c.agent)}` : ''} · ${c.harness} · ${c.display_status}${c.looked ? ' · looked at in this round' : ''}`)
     L.push(`  why: ${c.why}; started ${agoEn(parseDbUtc(c.started_at), nowMs)}`)
   }
   L.push('Look at one with: fl-supervise look <short id>')
@@ -927,36 +1018,82 @@ registerSupervisorOp('close', {
 registerSupervisorOp('bundle', {
   async handler({ caller, target, body, nowMs }) {
     const bundle = await caseBundle(target, { nowMs, tail: body.tail, chars: body.chars, events: body.events, entries: body.entries })
+    // A closed or parked case that is due again is reopened / un-parked for
+    // real before the look is recorded (SPEC 7.14), or the next look would read
+    // it as closed or parked again.
+    const moved = applyVerdict(target.id, bundle.due, nowMs)
     const look = recordLook(target.id, caller.id, bundle.due, nowMs)
-    return { ...targetIds(target), look_entry: look.entry, looks_unchanged: look.looks_unchanged, ...bundle }
+    // The loop fence: the sixth look at the same state parks the case.
+    const park = look.looks_unchanged >= PARK_AFTER && !caseState(target.id)?.parked_at
+      ? await parkCase(target.id, { why: 'looks', count: look.looks_unchanged, fp: bundle.due.fp, nowMs }) : { parked: false }
+    const notes = [
+      moved.reopened ? 'The hub reopened this closed case because of what is said under "Why it is due".' : null,
+      moved.unparked ? 'The hub un-parked this case because of what is said under "Why it is due".' : null,
+      park.parked ? `This was look ${look.looks_unchanged} at the same state: the hub parked the case and told the operator. `
+        + 'It comes back by itself when something about the run changes or somebody answers.' : null,
+    ].filter(Boolean)
+    return { ...targetIds(target), look_entry: look.entry, looks_unchanged: look.looks_unchanged, parked: park.parked,
+      reopened: moved.reopened, unparked: moved.unparked, ...bundle,
+      ...(notes.length ? { text: `${bundle.text}\n\n## What the hub did with this look\n${notes.join('\n')}`, message: notes.join(' ') } : {}) }
   },
 })
 
+/** The event that marks a run as a supervisor round and holds its case list (server/supervision-clock.mjs writes it). */
+export const ROUND_EVENT = 'supervision_round'
+
+/** What a round's start recorded about its cases: `{ at, source, cases:[{run, reason, …}], total, capped }`, or null. */
+export function roundOf(runId) {
+  const ev = db.prepare('SELECT ts, payload FROM events WHERE run_id=? AND kind=? ORDER BY id DESC LIMIT 1').get(runId, ROUND_EVENT)
+  if (!ev) return null
+  try { return { at: ev.ts, ...JSON.parse(ev.payload ?? '{}') } } catch { return null }
+}
+
+/** One case as `cases` answers it: the run, where it stands now, and why it is (or was) due. */
+function caseItem(run, verdict, nowMs, cfg, repos) {
+  if (!repos.has(run.repo_id)) repos.set(run.repo_id, getRepo(run.repo_id)?.name ?? null)
+  const agent = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
+  return {
+    run: run.id, short_id: shortId(run.id), title: run.title ?? null, repo: repos.get(run.repo_id), agent,
+    harness: run.harness, status: run.status, display_status: displayStatus(run), started_at: run.started_at,
+    reason: verdict.reason, reasons: verdict.reasons, urgency: verdict.urgency, reopen: !!verdict.reopen,
+    since: isoOf(verdict.sinceMs), for_s: Number.isFinite(verdict.sinceMs) ? Math.round((nowMs - verdict.sinceMs) / 1000) : null,
+    why: dueSentence(verdict, nowMs, cfg),
+  }
+}
+
 /**
- * `cases {limit?}`: what is due now, most urgent first (SPEC 4.7), each with
- * its reason and ages phrased by the hub, plus `text`. Stage C narrows this to
- * the round's own list.
+ * `cases {limit?, due?}`: in a round, exactly the cases the hub handed THIS
+ * round at its start, most urgent first, each with the reason it was handed out
+ * for (ages phrased now) and whether this round has looked at it yet. With
+ * `due` — or in a supervisor run the clock did not start — what is due right
+ * now, most urgent first (SPEC 4.7). Both with `text`.
  */
 registerSupervisorOp('cases', {
   target: false,
-  handler({ body, nowMs }) {
+  handler({ caller, body, nowMs }) {
+    const cfg = supervisionConfig()
+    const repos = new Map()
+    const round = body.due ? null : roundOf(caller.id)
+    if (round) {
+      const cases = []
+      for (const c of round.cases ?? []) {
+        const run = getRun(c.run)
+        if (!run) continue
+        const verdict = { due: true, reason: c.reason, reasons: c.reasons ?? [c.reason], urgency: c.urgency ?? DUE_REASONS[c.reason] ?? 0,
+          sinceMs: Number.isFinite(c.since_ms) ? c.since_ms : NaN, details: c.details ?? {}, reopen: !!c.reopen }
+        const looked = !!db.prepare(`SELECT 1 FROM case_entries WHERE run_id=? AND kind='look' AND author=? AND ts >= ? LIMIT 1`)
+          .get(run.id, caller.id, round.at)
+        cases.push({ ...caseItem(run, verdict, nowMs, cfg, repos), looked })
+      }
+      return { round: true, cases, total: round.total ?? cases.length, considered: null, capped: !!round.capped,
+        supervision_since: getSetting('supervision_since') ?? null,
+        text: casesText(cases, { total: round.total ?? cases.length, considered: null, capped: false, nowMs, round: true }) }
+    }
     const lim = Number(String(body.limit ?? '').trim())
     const limit = /^\d+$/.test(String(body.limit ?? '').trim()) && lim >= 1 ? Math.min(lim, 50) : 20
     const r = dueCases({ nowMs, limit, begin: true })
-    const cfg = supervisionConfig()
-    const repos = new Map()
-    const cases = r.cases.map(({ run, verdict }) => {
-      if (!repos.has(run.repo_id)) repos.set(run.repo_id, getRepo(run.repo_id)?.name ?? null)
-      const agent = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name ?? null : null
-      return {
-        run: run.id, short_id: shortId(run.id), title: run.title ?? null, repo: repos.get(run.repo_id), agent,
-        harness: run.harness, status: run.status, display_status: displayStatus(run), started_at: run.started_at,
-        reason: verdict.reason, reasons: verdict.reasons, urgency: verdict.urgency, reopen: !!verdict.reopen,
-        since: isoOf(verdict.sinceMs), for_s: Number.isFinite(verdict.sinceMs) ? Math.round((nowMs - verdict.sinceMs) / 1000) : null,
-        why: dueSentence(verdict, nowMs, cfg),
-      }
-    })
-    return { cases, total: r.total, considered: r.considered, capped: r.capped, supervision_since: r.since,
+    const cases = r.cases.map(({ run, verdict }) => caseItem(run, verdict, nowMs, cfg, repos))
+    return { round: false, cases, total: r.total, considered: r.considered, capped: r.capped, supervision_since: r.since,
       text: casesText(cases, { total: r.total, considered: r.considered, capped: r.capped, nowMs }) }
   },
 })

@@ -2,12 +2,13 @@
 // pipeline AND gate, budget gate with deferral instead of discarding.
 import db, { addEvent, announceRun, getSetting, setSetting, allSettings, getRepo } from './db.mjs'
 import { planSandbox } from './sandbox/index.mjs'
-import { scheduleDue, parseDbUtc, lastMissedSlot, catchupHours } from './util.mjs'
+import { scheduleDue, parseDbUtc, lastMissedSlot, catchupHours, fmtDurationEn } from './util.mjs'
 import { createRun, launchRun, failRun } from './runner.mjs'
 import { getPlugin } from './plugins/registry.mjs'
 import { pluginCtx } from './plugins/context.mjs'
 import { pluginFields, pluginSettingKey } from './plugins/settings.mjs'
-import { notifyRun } from './reports.mjs'
+import { notifyRun, reportHeader, notifiedFlag } from './reports.mjs'
+import { displayStatus } from './run-state.mjs'
 import { defFromAgent } from './run-def.mjs'
 import { fallbackTitle, applyGeneratedTitle } from './title.mjs'
 import { t } from './i18n.mjs'
@@ -128,6 +129,81 @@ function logStart(agent, slot, r) {
   }
 }
 
+/**
+ * The fixed rule of SPEC 4.9, independent of any supervisor: a run that keeps
+ * its agent's schedule blocked while it has been waiting (for input or for
+ * help) or silent for this long is announced to the operator — at most once in
+ * this long, until it ends. Before, the skipped slots were only events.
+ */
+export const SCHEDULE_BLOCKED_MS = 24 * 60 * 60_000
+
+/**
+ * Since when `run` has been stuck in a way that matters for 4.9, or null when
+ * it has not been for `SCHEDULE_BLOCKED_MS`. Pure. "Waiting" is the newest
+ * `agent_waiting` event (the column is renewed on every assertion), "waiting
+ * for help" the newest `help` event, "silent" `last_activity_at`; the earliest
+ * that is over the line is the answer. A deferred run has not started and is
+ * none of these.
+ */
+export function scheduleBlockedSince(run, { waitingSince = null, helpSince = null } = {}, nowMs = Date.now()) {
+  if (!run || !['running', 'waiting_help'].includes(run.status)) return null
+  const over = []
+  if (displayStatus(run) === 'waiting_input') {
+    let w = parseDbUtc(waitingSince)
+    if (!Number.isFinite(w)) w = parseDbUtc(run.agent_state_at)
+    over.push({ how: 'waiting', ms: w })
+  }
+  if (run.status === 'waiting_help') {
+    let h = parseDbUtc(helpSince)
+    if (!Number.isFinite(h)) h = parseDbUtc(run.last_activity_at)
+    over.push({ how: 'waiting_help', ms: h })
+  }
+  over.push({ how: 'silent', ms: parseDbUtc(run.last_activity_at) })
+  const hits = over.filter(x => Number.isFinite(x.ms) && nowMs - x.ms > SCHEDULE_BLOCKED_MS).sort((a, b) => a.ms - b.ms)
+  return hits[0] ?? null
+}
+
+/** May the next 4.9 notice go out? Pure: none before, or the last one is `SCHEDULE_BLOCKED_MS` old. */
+export function scheduleBlockedNoticeDue(lastNoticeMs, nowMs = Date.now()) {
+  return !Number.isFinite(lastNoticeMs) || nowMs - lastNoticeMs >= SCHEDULE_BLOCKED_MS
+}
+
+/**
+ * A slot of `agent` was skipped because its run `busyId` is still open: the
+ * event and the protocol row as always, then the 4.9 check. Shared by the tick
+ * and the catch-up, so the rule sits at the exact moment a slot is lost.
+ * The throttle reads the last notice of this type — sent, or held back because
+ * the run is muted — so a muted run is not asked again every minute.
+ */
+export async function scheduleSkippedBusy(busyId, agent, slot, { catchUp = false, nowMs = Date.now() } = {}) {
+  addEvent(busyId, 'schedule_skipped', catchUp
+    ? { agent: agent.name, slot, reason: 'busy', catch_up: true }
+    : { agent: agent.name, slot })
+  logSlot(agent.id, slot, 'skipped', 'busy')
+  try { return await announceBlockedSchedule(busyId, agent, slot, nowMs) } catch (e) {
+    console.error('[scheduler] schedule_blocked:', e.message)
+    return false
+  }
+}
+
+async function announceBlockedSchedule(runId, agent, slot, nowMs) {
+  const run = db.prepare('SELECT * FROM runs WHERE id=?').get(runId)
+  const ev = (kind) => db.prepare('SELECT ts FROM events WHERE run_id=? AND kind=? ORDER BY id DESC LIMIT 1').get(runId, kind)?.ts ?? null
+  const since = scheduleBlockedSince(run, { waitingSince: ev('agent_waiting'), helpSince: ev('help') }, nowMs)
+  if (!since) return false
+  const last = db.prepare(`SELECT max(ts) ts FROM events WHERE run_id=? AND (kind=?
+      OR (kind='notify_muted' AND json_extract(payload, '$.type')='schedule_blocked'))`).get(runId, notifiedFlag('schedule_blocked'))?.ts
+  if (!scheduleBlockedNoticeDue(parseDbUtc(last), nowMs)) return false
+  const skipped = db.prepare(`SELECT count(*) c FROM events WHERE run_id=? AND kind='schedule_skipped'`).get(runId).c
+  const how = { waiting: 'its agent has been waiting for input', waiting_help: 'it has been waiting for help',
+    silent: 'it has shown no activity' }[since.how]
+  await notifyRun(runId, 'schedule_blocked', `${reportHeader(run, 'BLOCKS ITS SCHEDULE')}\n\n`
+    + `⛔ ${how[0].toUpperCase()}${how.slice(1)} for ${fmtDurationEn(Math.max(0, (nowMs - since.ms) / 1000))}, and while it stays open `
+    + `the schedule of agent ${agent.name} is skipped (${skipped} slot(s) so far, the latest ${slot}). `
+    + 'Answer it or end it. This notice repeats at most once a day until the run ends.', { dedupe: false })
+  return true
+}
+
 async function catchUpMissed(now) {
   if (caughtUp) return
   caughtUp = true
@@ -144,6 +220,10 @@ async function catchUpMissed(now) {
     const slot = missed.toISOString().slice(0, 16)
     fired.set(`${agent.id}@${slot}`, true)
     const why = startBlocked(agent)
+    if (why?.reason === 'busy') {
+      await scheduleSkippedBusy(why.runId, agent, slot, { catchUp: true, nowMs: now.getTime() })
+      continue
+    }
     if (why) {
       if (why.runId) addEvent(why.runId, 'schedule_skipped', { agent: agent.name, slot, reason: why.reason, catch_up: true })
       logSlot(agent.id, slot, 'skipped', why.reason)
@@ -207,8 +287,7 @@ export async function tick() {
     const busy = db.prepare(`SELECT id FROM runs WHERE agent_id=?
       AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agent.id)
     if (busy) {
-      addEvent(busy.id, 'schedule_skipped', { agent: agent.name, slot })
-      logSlot(agent.id, slot, 'skipped', 'busy')
+      await scheduleSkippedBusy(busy.id, agent, slot, { nowMs: now.getTime() })
       continue
     }
     // The repo is switched off. Same shape as the ceiling below: the slot is
@@ -414,7 +493,7 @@ export async function budgetGate(harness, model = null, provider = null) {
  */
 export async function startRun(def, {
   repoId, agentId = null, promptExtra = null,
-  title = null, startMode = 'now', startAt = null, detached = false, supervisionOff = 0,
+  title = null, startMode = 'now', startAt = null, detached = false, supervisionOff = 0, events = [],
 } = {}) {
   // What the run is called: the operator's input first, then the agent's name —
   // an agent run needs no title of its own, one knows the agent. Only a single
@@ -479,6 +558,11 @@ export async function startRun(def, {
   // run, so it is part of its history from the first moment, like every later
   // switch on the run page.
   if (supervisionOff === 1) addEvent(runId, 'supervision_off', { by: 'operator', at_start: true })
+  // What the caller has to say about the run before it can do anything — a
+  // supervisor round's case list (server/supervision-clock.mjs) must be there
+  // before the agent's first `fl-supervise cases`, and a deferred round must
+  // already count as in flight.
+  for (const [kind, payload] of events) addEvent(runId, kind, payload)
 
   // The row exists — say so, before the launch takes its seconds. Without this
   // the overview's first news of a run was its `started` event, which lands
@@ -528,8 +612,8 @@ export async function startRun(def, {
  * only the stored definition.
  * Returns {ok, runId?, deferred?, error?}.
  */
-export async function startForAgent(agent, promptExtra = null) {
-  return startRun(defFromAgent(agent), { repoId: agent.repo_id, agentId: agent.id, promptExtra })
+export async function startForAgent(agent, promptExtra = null, { events = [] } = {}) {
+  return startRun(defFromAgent(agent), { repoId: agent.repo_id, agentId: agent.id, promptExtra, events })
 }
 
 /**

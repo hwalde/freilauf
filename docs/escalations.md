@@ -89,8 +89,9 @@ another machine goes through the TLS proxy and sees HTTP status codes only.
 ## When the operator is told
 
 With `supervision_escalation_grace_minutes` at 0 (the default) the operator is
-told on the urgent route when an escalation is raised. The timed announcements
-— an escalation unclaimed past a grace above 0, a claimed one not resolved
-within 24 hours, each once — come with the hub's supervision clock, which this
-version does not run yet. A run whose notifications are muted is announced on
-no channel.
+told on the urgent route when an escalation is raised. With a grace above 0,
+the hub's supervision clock announces an escalation still unclaimed once the
+grace has passed; a claimed one not resolved within 24 hours is announced too —
+each once, and whether or not a supervisor agent is still active. The clock
+checks on every watcher pass, so a notice can come up to one pass late. A run
+whose notifications are muted is announced on no channel.

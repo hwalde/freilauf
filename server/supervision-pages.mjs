@@ -5,10 +5,12 @@
 // importable without rendering anything.
 import { escapeHtml as e, fmtDuration, fmtDbUtc, parseDbUtc, shortId } from './util.mjs'
 import { t } from './i18n.mjs'
-import { caseEntries, caseState, activeSupervisorAgent, supervisorAgents, DUE_REASONS } from './supervision.mjs'
-import { questionForPage } from './supervision-acts.mjs'
+import db from './db.mjs'
+import { caseEntries, caseState, activeSupervisorAgent, supervisorAgents, DUE_REASONS, SUPERVISION_SETTINGS,
+  supervisionSetting, ROUND_EVENT } from './supervision.mjs'
+import { questionForPage, NUDGE_LIMIT_KEY, NUDGE_LIMIT_DEFAULT, nudgeLimit } from './supervision-acts.mjs'
 import { listEscalations, escalationItem, pendingEscalationCount, anyEscalation,
-  ESCALATION_STATE_FILTERS, ESCALATIONS_LIMIT_MAX } from './escalations.mjs'
+  ESCALATION_STATE_FILTERS, ESCALATIONS_LIMIT_MAX, ESCALATION_GRACE_KEY, escalationGraceMs } from './escalations.mjs'
 
 /** How many entries the run page shows; the read API reaches further back. */
 const PAGE_ENTRIES = 50
@@ -39,8 +41,11 @@ function dataLine(entry) {
       return t(d.outcome === 'aborted' ? 'case.action_end_aborted' : 'case.action_end_closed')
         + (d.followup_abandoned ? ` ${t('case.action_end_followup')}` : '')
     }
+    if (d.op === 'park') return t(d.why === 'handouts' ? 'case.action_park_handouts' : 'case.action_park_looks', { count: d.count ?? '?' })
+    if (d.op === 'unpark') return t(entry.author === 'operator' ? 'case.action_unpark_operator' : 'case.action_unpark_hub')
     return t('case.action_other', { op: String(d.op ?? '?') })
   }
+  if (entry.kind === 'reopened') return t(d.why === 'changed' ? 'case.reopened_changed' : 'case.reopened_news')
   if (entry.kind === 'message' && ['help', 'followup', 'running'].includes(d.into)) return t(`case.message_into_${d.into}`)
   if (entry.kind === 'question' && Array.isArray(d.choices) && d.choices.length) {
     return t('case.question_choices', { choices: d.choices.join(' · ') })
@@ -62,6 +67,7 @@ function dataLine(entry) {
 /** Where the case stands, in one line; '' when nothing is set. */
 function stateLine(state, nowMs) {
   if (!state) return ''
+  if (state.parked_at) return e(t('case.state_parked', { at: fmtDbUtc(state.parked_at) }))
   if (state.closed_at) {
     return e(t('case.state_closed', { at: fmtDbUtc(state.closed_at), reason: state.closed_reason ?? '' }))
   }
@@ -102,9 +108,13 @@ export function caseSection(run, nowMs = Date.now(), { error = false } = {}) {
   // 400. The choice buttons carry `formnovalidate`, so a click needs no text.
   const choices = (question?.choices ?? []).map(c =>
     `<button name="choice" value="${e(c)}" formnovalidate class="case-choice">${e(c)}</button>`).join('')
+  // A parked case is un-parked by the operator here: a plain POST, like the answer.
+  const unpark = state?.parked_at ? `<form method="post" action="/api/runs/${e(run.id)}/case/unpark" class="inline" id="case-unpark">
+      <input type="hidden" name="back" value="/runs/${e(run.id)}#run-case">
+      <button>${e(t('case.unpark'))}</button></form>` : ''
   return `<section class="card case-file" id="run-case"${show ? '' : ' hidden'}>
     <h3>${e(t('case.title'))}</h3>
-    ${st ? `<p class="dim">${st}</p>` : ''}
+    ${st ? `<p class="dim">${st}</p>` : ''}${unpark}
     ${items ? `<ol class="case-entries">${items}</ol>` : `<p class="dim">${e(t('case.empty'))}</p>`}
     ${error ? `<p class="warn" id="case-error">${e(t('case.err_answer_empty'))}</p>` : ''}
     <form method="post" action="/api/runs/${e(run.id)}/case/answer" class="case-answer">
@@ -205,4 +215,104 @@ export function supervisorNotice() {
   return `<p class="warn" id="supervisor-notice">${e(t('supervisor.several', {
     name: all[0].name, others: all.slice(1).map(a => a.name).join(', '),
   }))}</p>`
+}
+
+// ------------------------------------------------------------------ settings
+
+/**
+ * The fields of Settings → Supervision, in the order the page shows them:
+ * name, settings key, default, accepted range. `''` stored means the default;
+ * 0 is a valid value only for the grace ("tell the operator at once").
+ */
+export function supervisionSettingFields() {
+  const S = SUPERVISION_SETTINGS
+  return [
+    { name: 'interval', key: S.interval.key, dflt: S.interval.dflt, min: S.interval.min, max: S.interval.max },
+    { name: 'cases', key: S.cases.key, dflt: S.cases.dflt, min: S.cases.min, max: S.cases.max },
+    { name: 'wait', key: S.wait.key, dflt: S.wait.dflt, min: S.wait.min, max: S.wait.max },
+    { name: 'nudges', key: NUDGE_LIMIT_KEY, dflt: NUDGE_LIMIT_DEFAULT, min: 1, max: 20 },
+    { name: 'grace', key: ESCALATION_GRACE_KEY, dflt: 0, min: 0, max: 7 * 24 * 60 },
+  ]
+}
+
+/**
+ * A posted Settings → Supervision form → `{ values: {key: string}, problems }`.
+ * Pure. Each field is `''` (the default) or a whole number in its range,
+ * compared as a string before it is converted (`Number('')` is 0). A field the
+ * body did not carry is left out, so nothing is overwritten by omission.
+ */
+export function supervisionSettingsFromForm(b = {}) {
+  const values = {}
+  const problems = []
+  for (const f of supervisionSettingFields()) {
+    if (!Object.hasOwn(b, f.key)) continue
+    const raw = String(b[f.key] ?? '').trim()
+    if (raw === '') { values[f.key] = ''; continue }
+    if (!/^\d+$/.test(raw) || Number(raw) < f.min || Number(raw) > f.max) {
+      problems.push(t('supervision.err_number', { field: t(`supervision.set_${f.name}`), min: f.min, max: f.max, dflt: f.dflt }))
+      continue
+    }
+    values[f.key] = String(Number(raw))
+  }
+  return { values, problems }
+}
+
+/** What a field is in effect, as the page shows it under an empty input. */
+function effective(name) {
+  if (name === 'nudges') return nudgeLimit()
+  if (name === 'grace') return escalationGraceMs() / 60_000
+  return supervisionSetting(name)
+}
+
+/** The newest supervisor round, for the page: `{ id, status, started_at, display_status }` or null. */
+function lastRound() {
+  return db.prepare(`SELECT r.* FROM runs r WHERE EXISTS (SELECT 1 FROM events e WHERE e.run_id = r.id AND e.kind = ?)
+    ORDER BY r.started_at DESC LIMIT 1`).get(ROUND_EVENT) ?? null
+}
+
+/** The parked cases, newest first, at most 20 — parking is told once, so the page keeps the list. */
+function parkedCases() {
+  return db.prepare(`SELECT r.id, r.title, c.parked_at FROM case_state c JOIN runs r ON r.id = c.run_id
+    WHERE c.parked_at IS NOT NULL AND r.archived_at IS NULL ORDER BY c.parked_at DESC LIMIT 20`).all()
+}
+
+/**
+ * The body of Settings → Supervision: which agent supervises (and that the
+ * lowest id wins when several are flagged), the five numbers, the last round
+ * and the parked cases. `stored` is the settings map, so an empty field stays
+ * empty and says what it falls back to.
+ */
+export function supervisionSettingsBody(stored = {}, nowMs = Date.now()) {
+  const active = activeSupervisorAgent()
+  const who = active
+    ? `<p id="supervision-active">${e(t('supervision.active_is'))} <a href="/agents/edit?id=${active.id}&repo=${active.repo_id}">${e(active.name)}</a></p>`
+    : `<p class="warn" id="supervision-none">${e(t('supervision.none_active'))}</p>`
+  const fields = supervisionSettingFields().map(f => `
+    <label>${e(t(`supervision.set_${f.name}`))}
+      <input name="${f.key}" type="number" min="${f.min}" max="${f.max}" step="1" value="${e(String(stored[f.key] ?? ''))}"
+        placeholder="${e(String(f.dflt))}">
+      <span class="dim">${e(t(`supervision.set_${f.name}_hint`, { dflt: f.dflt, now: effective(f.name) }))}</span></label>`).join('')
+  const round = lastRound()
+  const roundLine = round ? `<p class="dim" id="supervision-last-round">${e(t('supervision.last_round'))}
+      <a href="/runs/${e(round.id)}">${e(shortId(round.id))}</a> · ${e(t('case.ago', { age: fmtDuration(Math.max(0, (nowMs - parseDbUtc(round.started_at)) / 1000)) }))}
+      · ${e(t(`status.${round.status}`))}</p>` : ''
+  const parked = parkedCases()
+  const parkedList = parked.length ? `<h3>${e(t('supervision.parked_title'))}</h3>
+    <ul id="supervision-parked">${parked.map(p => `<li><a href="/runs/${e(p.id)}#run-case">${e(p.title ?? shortId(p.id))}</a>
+      <span class="dim">${e(fmtDbUtc(p.parked_at))}</span></li>`).join('')}</ul>` : ''
+  return `<h2>${e(t('supervision.settings_title'))}</h2>
+  <p class="dim">${e(t('supervision.settings_intro'))}</p>
+  ${who}${supervisorNotice()}
+  <form method="post" action="/settings/supervision" class="settings form-grid">${fields}
+    <div class="btn-row"><button>${e(t('settings.save'))}</button>
+      <a class="btn" href="/settings">${e(t('nav.settings'))}</a></div>
+  </form>
+  ${roundLine}${parkedList}`
+}
+
+/** One line for the settings page: who supervises and how often, or that nobody does. */
+export function supervisionSettingsSummary() {
+  const active = activeSupervisorAgent()
+  if (!active) return t('supervision.summary_none')
+  return t('supervision.summary', { name: active.name, interval: supervisionSetting('interval'), cases: supervisionSetting('cases') })
 }

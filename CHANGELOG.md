@@ -20,7 +20,7 @@ a day on which nothing was released.
 
 ### Added
 
-- **Supervision, first part: the supervisor flag and the case file.** An agent can be marked as supervisor in its form. Its runs may write the case files of other runs through `fl-supervise` (`note`, `again`, `close`); every other run is refused with a sentence that says why. Neither the scheduler nor a flow starts a supervisor agent — the hub will start it when something is due (a later part); "Start now" starts it by hand.
+- **Supervision, first part: the supervisor flag and the case file.** An agent can be marked as supervisor in its form. Its runs may write the case files of other runs through `fl-supervise` (`note`, `again`, `close`); every other run is refused with a sentence that says why. Neither the scheduler nor a flow starts a supervisor agent — the hub starts it when something is due (below); "Start now" starts a round by hand.
 - Every run has a case file: a section on its page, oldest entry first with author and age, and `GET /api/runs/<id>/case`. The operator answers there, or through `POST /api/runs/<id>/case/answer` (`text`, optional `choice`).
 - A single run can be taken out of supervision: a checkbox in the single-run form and a switch on the run's page (both shown while a supervisor agent is active), and `POST /api/runs/<id>/supervision` with `off=1|0`. Each change is an event of the run.
 - `POST /api/runs/<own id>/supervise` on the loopback listener and on the report socket, bearer required on both. An unsandboxed supervisor run gets `FL_RUN_TOKEN` in its session for it; every other run's environment is unchanged.
@@ -34,8 +34,18 @@ a day on which nothing was released.
 - `fl-supervise question <run> "<text>" [--choice "<label>"]…` puts one prepared question in front of the operator: a message on the urgent route and the choices as one-click buttons in the run's case file. A muted run gets the question on its page only.
 - **Escalations.** `fl-supervise escalate <run> <class> "<summary>"` hands a problem to somebody outside the hub. An external resolver lists, claims, releases and resolves them through `GET /api/escalations` and `POST /api/escalations/<id>/claim|release|resolve|dismiss` (contract: `docs/escalations.md`); the result goes into the run's case file and makes the case due again. A new page, Escalations, shows them with resolve and dismiss buttons while a supervisor is active or any escalation exists. The operator is told on the urgent route when one is raised.
 
+- **Supervision, fourth part: the hub starts the supervisor by itself.** Flagging one agent as supervisor switches supervision on, unflagging it switches it off. Every 60 minutes (`supervision_interval_minutes`) the hub checks — without asking any model — whether a run is due for a look; when something is, and no round is running, it starts one run of the supervisor agent whose prompt lists this round's cases (at most 8, `supervision_cases_per_round`), most urgent first, with the reason and the ages. Nothing due means nothing started and nothing written. Rounds pass the budget gate like any start and respect the pipeline switch and the agent's on/off switch.
+- A case that goes nowhere is **parked**: after six looks at an unchanged run (or six rounds that never looked at it) the hub stops handing it out and tells the operator once. It comes back by itself when the run changes or somebody answers, or with the "Un-park" button in the run's case file.
+- A supervisor round still open after twice the interval (or three times its expected duration, if longer) is ended by the hub and announced once, so a round that hangs never stops supervision.
+- **Settings → Supervision**: the interval, cases per round, the waiting threshold, the nudge limit and the escalation grace; which agent supervises (the lowest id when several are flagged), the last round and the parked cases.
+- With an escalation grace above 0, an escalation nobody claimed within the grace is announced once; a claimed one not resolved within 24 hours too.
+- **A run that blocks its agent's schedule for a day is announced**, with or without a supervisor: when a scheduled slot is skipped because the agent's previous run is still open, and that run has been waiting or silent for more than 24 hours, the operator is told on the urgent route — at most once a day, until the run ends.
+
 ### Changed
 
+- `fl-supervise cases` inside a round lists exactly the cases the hub handed that round; `fl-supervise cases --due` lists what is due right now.
+- "Start now" on the supervisor agent runs the due check by hand and starts a round with whatever is due (an empty list is told to the agent, which then ends). It is refused, with the reason, for a flagged agent that is not the active supervisor and while a round is still open.
+- A supervisor round's own done and follow-up reports are no longer announced and get no deputy note; what it did is in the case files. Its failures are announced as before.
 - Ending a run from its page and a supervisor's `end` are now the same code path; the page's button behaves as before.
 - An answer of only spaces in a run's case file now comes back with a visible reason instead of nothing happening.
 - A flow's `extract` step with the `transcript` source now reads cursor's and opencode's own records too, not only claude's. For claude it is bounded differently: at most the newest 200 messages and 48 KB of text, tool calls and results one line of 200 characters each (they were up to 400); a message itself is kept whole within that budget.

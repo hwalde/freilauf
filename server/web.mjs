@@ -24,7 +24,7 @@ import {
   codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
   pageMergeSettings, mergeSettingsSave, pageReviews, pageReviewSettings, reviewSettingsSave, pageEscalations, escalationPageAction,
-  pageCleanupSettings, cleanupSettingsSave,
+  pageCleanupSettings, cleanupSettingsSave, pageSupervisionSettings, supervisionSettingsSave,
   pageSkillSettings, skillSettingsSave, skillSettingsSync,
   repoToggle, repoDelete,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents,
@@ -63,7 +63,7 @@ import { resolveIncident, resolveIncidentsOf, incidentById } from './incidents.m
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
 import * as reportPages from './report-pages.mjs'
-import { handleSupervise, setSupervisionOff, answerCase } from './supervision.mjs'
+import { handleSupervise, setSupervisionOff, answerCase, unparkCase } from './supervision.mjs'
 import { caseSection } from './supervision-pages.mjs'
 import { bearerToken } from './hub-socket.mjs'
 import { claimEscalation, releaseEscalation, resolveEscalation, dismissEscalation, escalationItem } from './escalations.mjs'
@@ -334,6 +334,8 @@ async function dispatch(req, res, url, path, formBody) {
   // tmux cleanup (Settings → tmux cleanup) — the memory-freeing agent's setup.
   if (req.method === 'GET' && path === '/settings/cleanup') return pageCleanupSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/cleanup') return cleanupSettingsSave(req, res, url, formBody)
+  if (req.method === 'GET' && path === '/settings/supervision') return pageSupervisionSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/supervision') return supervisionSettingsSave(req, res, url, formBody)
   // Freilauf's own agent skills (server/skills.mjs) — the two switches, and the
   // sync they trigger. Its own page because saving here DELETES FILES, and a
   // handler that owns the whole request is what can act on that transition.
@@ -544,6 +546,15 @@ async function api(req, res, url) {
     // answer of only spaces passes the browser's `required` and must not vanish.
     if (!r.ok) return answer(req, res, 400, { ok: false, error: t(r.error) }, `/runs/${run.id}?case_error=empty#run-case`)
     return answer(req, res, 200, { ok: true, entry: r.id }, b.back || `/runs/${run.id}#run-case`)
+  }
+  // Un-park a parked case (the button in the run's case file): due at the next
+  // round. A case that is not parked answers `changed: false` and nothing is written.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/case\/unpark$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const changed = unparkCase(run.id, { by: 'operator' })
+    return answer(req, res, 200, { ok: true, changed }, b.back || `/runs/${run.id}#run-case`)
   }
   // Escalations (server/escalations.mjs): the four transitions of the FIXED
   // contract (docs/escalations.md), JSON with its status code for a resolver.

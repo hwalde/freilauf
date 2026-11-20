@@ -8932,7 +8932,7 @@ export default {
       const OUT = (await laufStarten({ repo_id: repoId, prompt: 'waits too, but alone', supervision_off: '1' })).runId
       await sessionMerken(OUT)
       makeWaiting(OUT, 45)
-      const c = await supervise(SUP, ['cases', '--limit', '50'])
+      const c = await supervise(SUP, ['cases', '--due', '--limit', '50'])
       equal(c.code, 0, `cases answers (${c.stderr.trim()})`)
       const mine = c.json?.cases?.find(x => x.run === WAIT)
       isTrue(!!mine, 'the waiting run is a case')
@@ -8946,7 +8946,7 @@ export default {
       equal(reopened?.reason, 'answer', 'the closed case the operator answered after is due again')
       equal(reopened?.reopen, true, 'and says it reopens')
       isFalse(c.json.cases.some(x => x.run === SUP), 'nor the supervisor itself')
-      const t = await supervise(SUP, ['cases', '--text', '--limit', '50'])
+      const t = await supervise(SUP, ['cases', '--due', '--text', '--limit', '50'])
       contains(t.stdout, shortIdOf(WAIT), 'the readable form names it')
       contains(t.stdout, 'case(s) due', 'as a list')
       equal(t.json, null, '--text prints text, not JSON')
@@ -8980,7 +8980,7 @@ export default {
       equal((await caseOf(WAIT)).state.looks_unchanged, 2, 'a second look at the same state counts')
       const page = await (await fetchPath(`/runs/${WAIT}`)).text()
       contains(page, 'Due because: its agent waits for input', 'the operator reads the look on the run page')
-      const c = await supervise(SUP, ['cases', '--limit', '50'])
+      const c = await supervise(SUP, ['cases', '--due', '--limit', '50'])
       isFalse(c.json.cases.some(x => x.run === WAIT), 'once looked at, it is not due again within the interval')
     })
 
@@ -9331,7 +9331,7 @@ export default {
       const entry = (await caseOf(X2)).entries.at(-1)
       equal(`${entry.kind}|${entry.author}|${entry.text}|${entry.data?.outcome}`, 'resolved|resolver:collector-1|Token rotated.|solved',
         'the case file hears it from the resolver who claimed it')
-      const due = await supervise(SUP, ['cases', '--limit', '50'])
+      const due = await supervise(SUP, ['cases', '--due', '--limit', '50'])
       equal(due.json?.cases?.find(c => c.run === X2)?.reason, 'resolved', 'and the case is due again with the result')
       contains((await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/resolve`, 'outcome=solved'])).stderr, 'HTTP 409', 'resolving twice is a 409')
       contains((await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/dismiss`])).stderr, 'HTTP 409', 'dismissing a resolved one too')
@@ -9371,6 +9371,218 @@ export default {
       const down = await api(['--raw', '/api/escalations'], 'http://127.0.0.1:1')
       equal(down.code, 3, 'a hub that is down exits 3, not "nothing to do"')
     })
+
+    // ---- stage C: the clock ----
+    // The suite owns the clock (FREILAUF_SUPERVISION_OFF is set in the hub and in
+    // this process): every pass below is driven here, in this process, against
+    // the sandbox database, with the fence lifted for exactly that call.
+    await prepareWatcher()
+    const clock = await import('../server/supervision-clock.mjs')
+    const sched = await import('../server/scheduler.mjs')
+    const tickAt = async (nowMs, { reset = true } = {}) => {
+      if (reset) clock.resetSupervisionClock()
+      const keep = process.env.FREILAUF_SUPERVISION_OFF
+      delete process.env.FREILAUF_SUPERVISION_OFF
+      try { return await clock.supervisionTick(nowMs) } finally { process.env.FREILAUF_SUPERVISION_OFF = keep }
+    }
+    const HOUR = 3600_000
+    const count = (table) => db.prepare(`SELECT count(*) c FROM ${table}`).get().c
+    const typesOf = (runId, kind) => evPayloads(runId, kind).map(p => p?.type)
+    // The pipeline must be on for the clock — and then the hub's own scheduler
+    // would start every scheduled agent the earlier groups left behind. They are
+    // switched off for these checks and switched back on at the end.
+    const parked = db.prepare('SELECT id FROM agents WHERE active = 1 AND supervisor = 0').all().map(a => a.id)
+    db.prepare(`UPDATE agents SET active = 0 WHERE id IN (${parked.map(() => '?').join(',') || 'NULL'})`).run(...parked)
+    let ROUND1 = null
+    let ROUND3 = null
+    let D1 = null
+
+    await check('the clock: a quiet hub starts nothing and writes nothing', async () => {
+      // The round "Start now" began at the top of this group is over.
+      equal((await postForm(`/api/runs/${SUP}/kill`, {})).status, 200, 'the first round is ended')
+      // Whatever the earlier checks left due is not these checks' business.
+      db.prepare('UPDATE runs SET supervision_off = 1 WHERE supervisor = 0').run()
+      sk.setSetting('pipeline_on', '0')
+      equal((await tickAt(Date.now())).quiet, 'pipeline_off', 'pipeline off: quiet')
+      sk.setSetting('pipeline_on', '1')
+      const runs = count('runs')
+      const events = count('events')
+      const r = await tickAt(Date.now() + 2 * HOUR)
+      equal(r.quiet, 'nothing_due', 'nothing is due')
+      equal(count('runs'), runs, 'no run was started')
+      equal(count('events'), events, 'and no event written')
+      const fenced = await clock.supervisionTick(Date.now() + 2 * HOUR)
+      equal(fenced.off, true, 'with the fence set, the clock does nothing at all')
+    })
+
+    await check('one case due: one round, with the case in its prompt and in fl-supervise cases; a second pass starts nothing', async () => {
+      D1 = await freshRun('waits in the clock test')
+      makeWaiting(D1, 45)
+      const r = await tickAt(Date.now() + 2 * HOUR)
+      ROUND1 = r.started
+      isTrue(!!ROUND1, `a round was started (${JSON.stringify(r)})`)
+      await sessionMerken(ROUND1)
+      equal(lauf(ROUND1).agent_id, supAgentId, 'a run of the supervisor agent')
+      equal(lauf(ROUND1).supervisor, 1, 'carrying the flag')
+      const prompt = promptOf(ROUND1)
+      contains(prompt, 'This supervision round (written by the hub)', 'the hub wrote the case block')
+      contains(prompt, shortIdOf(D1), 'naming the case')
+      contains(prompt, 'its agent waits for input', 'with the reason')
+      contains(prompt, '<data>waits in the clock test', 'the title fenced as data')
+      contains(prompt, 'Never call `fl-report help`', 'and the standing lines')
+      const marker = evPayloads(ROUND1, 'supervision_round')[0]
+      equal(marker?.cases?.map(c => c.run).join(','), D1, 'the round marker holds exactly its case')
+      const c = await supervise(ROUND1, ['cases'])
+      equal(c.code, 0, `cases answers (${c.stderr.trim()})`)
+      equal(c.json?.round, true, 'this round\'s list')
+      equal(c.json?.cases?.map(x => x.run).join(','), D1, 'exactly this round\'s case')
+      equal(c.json?.cases?.[0]?.reason, 'waiting_input', 'with the reason it was handed out for')
+      contains((await supervise(ROUND1, ['cases', '--text'])).stdout, "This round's 1 case(s)", 'and readable')
+      isTrue(!!(await caseOf(D1)).state.last_round_at, 'the case knows a round took it')
+      // At the real time: two hours on, the round would be past its own bound.
+      const second = await tickAt(Date.now())
+      equal(second.quiet, 'in_flight', 'a second pass while the round runs')
+      isFalse(!!second.started, 'starts nothing')
+    })
+
+    await check('a reply after the look makes the case due inside the interval; the round\'s done is not announced', async () => {
+      const short = shortIdOf(D1)
+      const look = await supervise(ROUND1, ['look', short])
+      equal(look.code, 0, `the round looks (${look.stderr.trim()})`)
+      contains(look.stdout, 'Due: its agent waits for input', 'and sees why it was handed out, not "looked at recently"')
+      isFalse((await supervise(ROUND1, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === D1), 'looked at: not due now')
+      equal((await supervise(ROUND1, ['cases'])).json.cases[0].looked, true, 'the round\'s own list says it was looked at')
+      isTrue((await flReport(D1, ['reply', 'I am waiting for the API key'])).ok, 'the run replies')
+      equal((await supervise(ROUND1, ['cases', '--due', '--limit', '50'])).json.cases.find(x => x.run === D1)?.reason, 'reply',
+        'due again at once, with the reply as the reason')
+      isTrue((await flReport(ROUND1, ['done', 'looked at one case'])).ok, 'the round reports done')
+      await waitFor(() => lauf(ROUND1).status === 'done', { what: 'round done', timeoutMs: 15_000 })
+      isFalse(typesOf(ROUND1, 'notified').includes('done'), 'its done is not announced')
+      equal(typesOf(ROUND1, 'notify_routed').join(','), 'done', 'it is routed away, and said so')
+      equal(evPayloads(ROUND1, 'notify_routed')[0]?.route, 'round', 'as a round\'s own end')
+      equal(db.prepare('SELECT count(*) c FROM report_notes WHERE run_id=?').get(ROUND1).c, 0, 'and the deputy gets no note')
+      equal((await tickAt(Date.now() + 10 * 60_000)).quiet, 'interval', 'the next round waits for the interval')
+    })
+
+    await check('a stuck round is ended by the hub and announced once, and supervision goes on', async () => {
+      const r2 = await tickAt(Date.now() + 2 * HOUR)
+      const ROUND2 = r2.started
+      isTrue(!!ROUND2, 'after the interval the reply starts the next round')
+      await sessionMerken(ROUND2)
+      equal(evPayloads(ROUND2, 'supervision_round')[0]?.cases?.[0]?.reason, 'reply', 'with the reply as its reason')
+      const late = Date.now() + 2 * HOUR + 2 * HOUR + 60_000
+      const r = await tickAt(late)
+      equal(r.ended.join(','), ROUND2, 'the round open past max(2 x interval, 3 x expected) is ended')
+      equal(lauf(ROUND2).status, 'aborted', 'aborted')
+      equal(evPayloads(ROUND2, 'aborted')[0]?.by, 'hub', 'by the hub, not the operator')
+      equal(typesOf(ROUND2, 'notified').filter(x => x === 'supervision_round_stuck').length, 1, 'and announced')
+      ROUND3 = r.started
+      isTrue(!!ROUND3, 'the same pass starts the next round: the case nobody looked at is still due')
+      await sessionMerken(ROUND3)
+      const again = await tickAt(Date.now() + 60_000)
+      equal(again.ended.length, 0, 'a new round inside its bound is left alone')
+      equal(again.quiet, 'in_flight', 'and holds the clock')
+      equal(typesOf(ROUND2, 'notified').filter(x => x === 'supervision_round_stuck').length, 1, 'the notice is not repeated')
+    })
+
+    await check('a round\'s failure takes the normal route', async () => {
+      isTrue((await flReport(ROUND3, ['failed', 'the round could not finish'])).ok, 'the round fails')
+      await waitFor(() => lauf(ROUND3).status === 'failed', { what: 'round failed', timeoutMs: 15_000 })
+      isTrue(db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='notified:failed'`).get(ROUND3) !== undefined, 'its failure is dealt with')
+      isFalse(evPayloads(ROUND3, 'notify_routed').some(p => p?.route === 'round'), 'and not routed away as a round\'s own end')
+    })
+
+    let ROUND4 = null
+    let ESC = null
+    await check('six looks at the same state park the case; the run page un-parks it', async () => {
+      const P = await freshRun('goes nowhere')
+      makeWaiting(P, 45)
+      const start = await postForm('/agents/start', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(start.status, 303, '"Start now" runs the due check by hand')
+      ROUND4 = (start.headers.get('location') ?? '').replace('/runs/', '')
+      equal(lauf(ROUND4)?.agent_id, supAgentId, 'a round of the supervisor agent')
+      await sessionMerken(ROUND4)
+      isTrue(evPayloads(ROUND4, 'supervision_round')[0]?.cases?.some(c => c.run === P), 'and its round takes the case')
+      equal(evPayloads(ROUND4, 'supervision_round')[0]?.source, 'operator', 'started by the operator')
+      const busy = await postForm('/agents/start', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(busy.status, 400, 'a second "Start now" while it runs is refused')
+      contains(await busy.text(), 'still open', 'saying why')
+      let last = null
+      for (let i = 1; i <= 6; i++) last = await supervise(ROUND4, ['look', shortIdOf(P), '--json'])
+      equal(last.json?.looks_unchanged, 6, 'six looks at the same state')
+      equal(last.json?.parked, true, 'the sixth parks it')
+      contains(last.json?.message ?? '', 'parked the case', 'and the supervisor is told')
+      const k = await caseOf(P)
+      isTrue(!!k.state.parked_at, 'parked')
+      equal(k.entries.at(-1).data?.op, 'park', 'a park entry by the hub')
+      equal(typesOf(P, 'notified').filter(x => x === 'supervision_parked').length, 1, 'the operator is told once')
+      isFalse((await supervise(ROUND4, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === P), 'a parked case is not due')
+      const page = await (await fetchPath(`/runs/${P}`)).text()
+      contains(page, 'id="case-unpark"', 'the run page offers to un-park it')
+      equal((await postForm(`/api/runs/${P}/case/unpark`, { back: `/runs/${P}#run-case` }, { asBrowser: true })).status, 303, 'un-parked')
+      equal((await caseOf(P)).state.parked_at, null, 'no longer parked')
+      isTrue((await supervise(ROUND4, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === P), 'and due again')
+      // An escalation for the timed notices below, with a grace above 0: not announced at once.
+      sk.setSetting('supervision_escalation_grace_minutes', '30')
+      const esc = await supervise(ROUND4, ['escalate', shortIdOf(P), 'credentials', 'The token of the clock test expired.'])
+      ESC = esc.json?.escalation
+      equal(esc.json?.announced, false, 'with a grace, an escalation is not announced when it is raised')
+      isTrue((await flReport(ROUND4, ['done', 'parked one'])).ok, 'the round ends')
+    })
+
+    await check('unflagging the agent silences the clock and the platform rules', async () => {
+      const a = agent('e2e-supervisor')
+      const r = await postForm(`/agents/edit?id=${a.id}`, {
+        repo_id: String(repoId), name: 'e2e-supervisor', harness: 'claude', prompt: 'look after the runs',
+        branch_mode: 'keiner', expected_minutes: '20', schedule_kind: 'manuell', active: '1',
+      }, { asBrowser: true })
+      equal(r.status, 303, 'saved without the flag')
+      equal(agent('e2e-supervisor').supervisor, 0, 'unflagged')
+      const W = await freshRun('waits after supervision ended')
+      makeWaiting(W, 45)
+      const runs = count('runs')
+      // Inside the escalation's grace, so the timed notices below start from nothing.
+      equal((await tickAt(Date.now() + 5 * 60_000)).quiet, 'no_supervisor', 'the clock is quiet')
+      equal(count('runs'), runs, 'and starts nothing although a run waits')
+      isFalse(promptOf(W).includes('fl-report reply'), 'a new run is told nothing about supervision')
+      const page = await (await fetchPath('/settings/supervision')).text()
+      contains(page, 'id="supervision-none"', 'the settings page says nobody supervises')
+    })
+
+    await check('timed escalation notices: unclaimed past the grace, claimed and unresolved for 24 hours — each once', async () => {
+      const now = Date.now()
+      equal((await tickAt(now + 10 * 60_000)).escalations, 0, 'inside the grace: nothing')
+      const P = db.prepare('SELECT run_id FROM escalations WHERE id=?').get(ESC).run_id
+      equal((await tickAt(now + 31 * 60_000)).escalations, 1, 'past it: announced, with no supervisor left')
+      equal(typesOf(P, 'notified').filter(x => x === 'escalation').length, 1, 'one message')
+      equal((await tickAt(now + 40 * 60_000)).escalations, 0, 'and not again')
+      equal((await postForm(`/api/escalations/${ESC}/claim`, { by: 'collector-c' })).status, 200, 'claimed')
+      equal((await tickAt(now + 23 * HOUR)).escalations, 0, 'claimed for less than a day: nothing')
+      equal((await tickAt(now + 25 * HOUR)).escalations, 1, 'unresolved after a day: announced')
+      equal((await tickAt(now + 26 * HOUR)).escalations, 0, 'once')
+      equal(typesOf(P, 'notified').filter(x => x === 'escalation').length, 2, 'two messages in all')
+      sk.setSetting('supervision_escalation_grace_minutes', '')
+    })
+
+    await check('the 24-hour rule: a run that blocks its schedule for a day is announced, with no supervisor at all', async () => {
+      const ag = db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode, expected_minutes, schedule_kind, schedule, active)
+        VALUES(?, 'e2e-blocked', 'claude', 'p', 'keiner', 45, 'cron', '0 3 * * *', 0) RETURNING *`).get(repoId)
+      const B = await freshRun('stuck for a day')
+      db.prepare('UPDATE runs SET agent_id=? WHERE id=?').run(ag.id, B)
+      makeWaiting(B, 25 * 60)
+      const now = Date.now()
+      isTrue(await sched.scheduleSkippedBusy(B, ag, '2026-01-01T03:00', { nowMs: now }), 'the skipped slot announces it')
+      equal(typesOf(B, 'notified').filter(x => x === 'schedule_blocked').length, 1, 'one message of its own type')
+      isFalse(await sched.scheduleSkippedBusy(B, ag, '2026-01-02T03:00', { nowMs: now + 12 * HOUR }), 'half a day later: not again')
+      isTrue(await sched.scheduleSkippedBusy(B, ag, '2026-01-03T03:00', { nowMs: now + 25 * HOUR }), 'a day later: again')
+      equal(evPayloads(B, 'schedule_skipped').length, 3, 'every skipped slot is still recorded')
+      equal(db.prepare(`SELECT count(*) c FROM schedule_log WHERE agent_id=? AND outcome='skipped' AND reason='busy'`).get(ag.id).c, 3,
+        'and logged')
+    })
+
+    // Back as the earlier groups left it: their agents on, the pipeline off.
+    db.prepare(`UPDATE agents SET active = 1 WHERE id IN (${parked.map(() => '?').join(',') || 'NULL'})`).run(...parked)
+    sk.setSetting('pipeline_on', '0')
   }
 
   // ------------------------------------------------------------------
