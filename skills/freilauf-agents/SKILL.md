@@ -26,7 +26,10 @@ skills, attached flows — is the same run definition, owned by
 **per repo**.
 
 For anything about one individual run (its terminal, report, incidents,
-merge state, retry) read `../freilauf-runs/SKILL.md`. For the
+merge state, retry) read `../freilauf-runs/SKILL.md`. An agent that looks after
+the other runs — the hub's **supervisor**, which the hub starts by itself when
+runs are stuck — is set up with `../freilauf-supervision/SKILL.md`; its flag is
+a checkbox, so a full-replace save without `supervisor=1` unflags it. For the
 harness/provider/model/effort decision read `../freilauf-models/SKILL.md`
 **before** you fill those fields in — and the operator's favorites
 (`fl-api /api/favorites`) come before any recommendation in it.

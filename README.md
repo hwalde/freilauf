@@ -93,6 +93,18 @@ Freilauf does, and it only goes forward.
   **daily digest** tells what happened — what waits for you first, a routine
   day in one sentence. Questions and blocked merges still arrive at once. Off
   by default (Settings → Reports).
+- **A supervisor for the runs that get stuck, if you want one.** Flag one
+  agent as supervisor and the hub starts it whenever a run needs a look — an
+  agent waiting for input nobody gives, a run that failed, ended without a
+  report or cannot merge — and never when nothing does. It reads everything the
+  hub knows about the run in one go, nudges the run in its own session on your
+  behalf, ends what is no longer worth finishing, asks you one prepared
+  question with one-click answers, or hands what cannot be solved inside the
+  hub (credentials, credit, a broken service) to an external resolver. What it
+  learns stays in each run's case file, not in its head. Off until you flag an
+  agent ([docs/supervision.md](docs/supervision.md); the shipped
+  `freilauf-supervision` skill sets one up). With or without it, a run that has
+  blocked its agent's schedule for a day is announced.
 - **A boundary around the agent, if you want one.** A run can work inside a
   container: its own clone instead of your checkout, its own home, and a
   network whose only way out is a proxy that answers a readable 403 for a host
@@ -266,6 +278,13 @@ The hub can control tmux. **That is shell access.** So:
   what a compromised hub can do, and it inspects no traffic content, so an
   allowed host is a way out. [SANDBOX.md](SANDBOX.md) — its "What this sandbox
   does not do" section is the part that matters.
+
+- **A supervisor's nudge carries your authority, so its limit is stated:**
+  outside a sandbox any local process of your user can type into an agent's
+  tmux session, and `tmux show-environment` shows a supervisor run's token, so
+  the `<freilauf-supervisor>` header is authenticated only as far as that token
+  reaches. Inside the sandbox the narrow report socket makes it a boundary
+  ([docs/supervision.md](docs/supervision.md)).
 
 **Never run the hub in a reachable network without these layers.**
 

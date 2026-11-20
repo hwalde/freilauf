@@ -468,11 +468,13 @@ async function paneNotTheAgent(runId, run, cause, exit) {
  * empty). Either way the run is `running` again and the finish gate's clock,
  * which does not run while a run waits for a HUMAN, starts again from now.
  */
-export function answerHelpCall(runId, text, via = 'web') {
+export function answerHelpCall(runId, text, via = 'web', extra = {}) {
   db.prepare(`UPDATE runs SET status='running', help_answer=COALESCE(?, help_answer),
               finish_started_at=CASE WHEN finish_state IS NULL THEN finish_started_at
                                      ELSE datetime('now') END WHERE id=? AND status='waiting_help'`).run(text, runId)
-  addEvent(runId, 'help_answered', { text: text ? String(text).slice(0, 500) : null, via })
+  // `via` says who answered — 'web' the send route, 'session' the hook, 'flow' a
+  // flow, 'supervisor' a nudge — because the row's `help_answer` cannot.
+  addEvent(runId, 'help_answered', { text: text ? String(text).slice(0, 500) : null, via, ...extra })
 }
 
 /**
@@ -538,9 +540,59 @@ export function injectedSubmission(head) {
  * The state stays `working`, which is honest: claude does take a turn to read
  * such a notification. Only the inference "therefore a person is here" was wrong.
  */
-export function attentionSource(body) {
+export function attentionSource(body, run = null, nowMs = Date.now()) {
   const source = body?.source ?? 'hook'
-  return source === 'prompt' && injectedSubmission(body?.prompt_head) ? 'injected' : source
+  if (source !== 'prompt') return source
+  const kind = submissionKind(body?.prompt_head, { nudgeTypedAt: run?.nudge_typed_at ?? null, nowMs })
+  return kind === 'injected' ? 'injected' : kind === 'nudge' ? 'supervisor' : source
+}
+
+/**
+ * A supervisor's nudge (server/supervision-acts.mjs) is a THIRD kind of
+ * submitted line: neither a person's (it must not open a second commission or
+ * read as the operator in the history) nor the harness's own (it is real work
+ * for the agent). The hub types the line itself, and it has already done what
+ * the line means — opened the follow-up commission, answered the help call —
+ * marked as the supervisor's. The agent's own `_working prompt` hook that
+ * follows a beat later is its ECHO and must change nothing further.
+ *
+ * Recognised two ways, because only one CLI sends a head:
+ *   - by the tag the hub TYPES as the first keystrokes of every nudge (typed,
+ *     not pasted, so the head starts with it even when claude collapses a long
+ *     paste into a `[Pasted text #n]` placeholder);
+ *   - where the hook carries no head at all (cursor, hermes), by
+ *     `runs.nudge_typed_at` within `NUDGE_ECHO_MS` — once: the reader that
+ *     spends it clears it, so a person's line after the echo is a person's.
+ */
+export const NUDGE_TAG = 'freilauf-supervisor'
+
+/** How long after typing a nudge a head-less `_working prompt` is read as its echo. */
+export const NUDGE_ECHO_MS = 30_000
+
+export function nudgeSubmission(head) {
+  if (typeof head !== 'string' || !head) return false
+  const s = head.trimStart()
+  return s.startsWith(`<${NUDGE_TAG} `) || s.startsWith(`<${NUDGE_TAG}>`)
+}
+
+/**
+ * Who submitted this line: `'injected'` (the harness wrote it to itself),
+ * `'nudge'` (the echo of a supervisor's nudge) or `'human'`. Pure — the head as
+ * the hook sent it, the run's `nudge_typed_at`, and now. An ABSENT head is a
+ * human's, as it always was, unless a nudge was typed within `NUDGE_ECHO_MS`.
+ */
+export function submissionKind(head, { nudgeTypedAt = null, nowMs = Date.now() } = {}) {
+  if (injectedSubmission(head)) return 'injected'
+  if (nudgeSubmission(head)) return 'nudge'
+  const absent = typeof head !== 'string' || !head.trim()
+  const typedMs = parseDbUtc(nudgeTypedAt)
+  if (absent && Number.isFinite(typedMs) && nowMs - typedMs >= -5_000 && nowMs - typedMs <= NUDGE_ECHO_MS) return 'nudge'
+  return 'human'
+}
+
+/** The echo of a nudge was read: the window is spent, the next head-less line is a person's again. */
+function spendNudgeEcho(runId) {
+  db.prepare('UPDATE runs SET nudge_typed_at=NULL WHERE id=? AND nudge_typed_at IS NOT NULL').run(runId)
 }
 
 /**
@@ -563,7 +615,8 @@ export function attentionSource(body) {
  *                     it, it is the reporting turn finishing.
  */
 export function commissionOnWorking(source, sinceReportMs, graceMs = attentionGraceMs()) {
-  if (source === 'injected') return false
+  // 'supervisor': the echo of a nudge, whose commission the nudge itself opened.
+  if (source === 'injected' || source === 'supervisor') return false
   if (source === 'prompt') return true
   return !(Number.isFinite(sinceReportMs) && sinceReportMs < graceMs)
 }
@@ -620,9 +673,11 @@ export function lastReportMs(run) {
  * it to its expected duration (watchFollowUps) — every new instruction restarts
  * that clock and retracts the previous commission's "longer than expected".
  */
-export function startFollowUpCommission(runId, text, via = 'web') {
+export function startFollowUpCommission(runId, text, via = 'web', extra = {}) {
   db.prepare(`UPDATE runs SET followup_since=datetime('now') WHERE id=?`).run(runId)
-  addEvent(runId, 'followup_started', { text: text ? String(text).slice(0, 500) : null, via })
+  // `via` 'supervisor' marks a commission a nudge opened: not the operator's,
+  // which is what the handover history and the deputy read it for.
+  addEvent(runId, 'followup_started', { text: text ? String(text).slice(0, 500) : null, via, ...extra })
   clearAnomalies(runId, ['anomaly:followup_soft_overrun', 'anomaly:followup_overrun',
     ...notifiedFlags('followup_overrun')])
 }
@@ -770,7 +825,8 @@ export async function handleReport(runId, body, via = 'http') {
       noteAgentState(run, 'waiting', body.source ?? 'hook')
       break
     case '_working': {
-      const source = attentionSource(body)
+      const source = attentionSource(body, run)
+      if (source === 'supervisor') spendNudgeEcho(runId)
       noteAgentState(run, 'working', source)
       // The agent was waiting on a help call and now processes input: somebody
       // answered — by hand, into the terminal, past the send route. The run is
@@ -778,10 +834,13 @@ export async function handleReport(runId, body, via = 'http') {
       // HARNESS wrote to itself is the one exclusion, and it is the sharper half
       // of the same fault: a `<task-notification>` landing here would close the
       // question with no answer, take the run out of "needs you", and leave the
-      // human who was asked with nothing to see.
-      if (run.status === 'waiting_help' && source !== 'injected') answerHelpCall(runId, null, 'session')
+      // human who was asked with nothing to see. The echo of a nudge is the
+      // other: the nudge answered the call itself, marked as the supervisor's.
+      if (run.status === 'waiting_help' && source !== 'injected' && source !== 'supervisor') answerHelpCall(runId, null, 'session')
       break
     }
+    case 'reply':
+      return handleReply(run, text)
     case '_exit': {
       addEvent(runId, 'exit')
       clearAgentState(runId)
@@ -863,6 +922,29 @@ export async function handleReport(runId, body, via = 'http') {
     import('./flows/triggers.mjs').then(m => m.flowsTick()).catch(e => console.error('[flows]', e.message))
   }
   return { ok: true }
+}
+
+/**
+ * `fl-report reply "<text>"` — the run answers a supervisor's nudge (or tells
+ * its supervisor something unasked). The one report kind that is not about the
+ * work: it becomes a `reply` entry in the run's OWN case file and changes
+ * nothing else — not progress, not help, not done, not the status — whether the
+ * run is working or long finished. It is never pushed into a supervisor's
+ * session: the case is due again, and the next round pulls it.
+ *
+ * Its answer travels back as fl-report's output, like every report's; a refusal
+ * is `ok:false`, which fl-report files in the inbox — the empty reply is
+ * stopped by fl-report itself before it gets that far.
+ */
+async function handleReply(run, text) {
+  if (!String(text ?? '').trim()) return { ok: false, error: 'a reply needs a text: fl-report reply "<your answer>"' }
+  // Lazily, like every hub module a report reaches into: supervision imports this module.
+  const { recordReply } = await import('./supervision-acts.mjs')
+  const r = recordReply(run.id, text)
+  return { ok: true, message: r.duplicate
+    ? 'Freilauf: this reply is already in the case file; it was not written twice.'
+    : 'Freilauf: your reply is in this run\'s case file. The supervisor reads it on its next round; '
+      + 'nobody is waiting in this session for more. Carry on with your work.' }
 }
 
 /**
@@ -995,7 +1077,7 @@ export async function finishByTurnEnd(runId, source) {
  * Refusing the request there would leave the agent with a wall and no way to
  * say so.
  */
-const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr', 'access']
+const FOLLOWUP_KINDS = ['done', 'failed', 'help', 'progress', 'branch', 'pr', 'access', 'reply']
 
 /**
  * Should a turn end on a FINISHED run count as its follow-up report?
@@ -1039,7 +1121,8 @@ async function handleFollowUp(run, body, via) {
   // only one who noticed. With one open, or a follow-up in the gate (the agent
   // committing what the gate asked for), the state is all that changes.
   if (kind === '_working') {
-    const source = attentionSource(body)
+    const source = attentionSource(body, run)
+    if (source === 'supervisor') spendNudgeEcho(runId)
     noteAgentState(run, 'working', source)
     // With a commission already open the same call is the SECOND instruction,
     // and it restarts the clock exactly as the send route's does — one
@@ -1075,6 +1158,9 @@ async function handleFollowUp(run, body, via) {
   }
   const detail = typeof body.detail === 'string' ? body.detail : ''
   if (detail.length > MAX_REPORT) return { ok: false, error: 'payload too large' }
+  // A reply is not a report about the work, so the follow-up's replay rule —
+  // "the same text as the report the run already carries" — is not its rule.
+  if (kind === 'reply') return handleReply(run, text)
   // A replayed inbox line (fl-report wrote it because the hub's answer got
   // lost — a slow finish gate, a dropped connection) is the SAME report the
   // run already carried. The run is over, so the replay arrives here as a
@@ -1380,7 +1466,7 @@ function harnessLabel(run) {
  * a single run is reporting. A single run is named by its title, an agent run
  * by "AGENT <name>" — so the message is attributable without a click.
  */
-function reportHeader(run, word = 'REPORT') {
+export function reportHeader(run, word = 'REPORT') {
   const p = db.prepare('SELECT name FROM repos WHERE id=?').get(run.repo_id)?.name ?? '?'
   const a = run.agent_id ? db.prepare('SELECT name FROM agents WHERE id=?').get(run.agent_id)?.name : null
   const name = a ? `AGENT ${a}` : (run.title ?? 'run')

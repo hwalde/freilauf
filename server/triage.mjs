@@ -33,6 +33,7 @@ import { chainUsable, jobFallbacks, jobRouting, jobSource, jobRetry, jobReasonin
 import {
   escapeData, clip, cutSentence, stamp, runFactLines, projectName, displayName,
 } from './report-context.mjs'
+import { abortedByFrom } from './run-state.mjs'
 
 // ---------------------------------------------------------------------------
 // settings
@@ -105,7 +106,8 @@ export function generalRules() {
  */
 export const ROUTES = Object.freeze({
   urgent: ['help', 'access', 'merge_blocked', 'review_changes', 'review_resolver', 'aborted_unmerged',
-    'followup_unmerged', 'unpushed', 'start_failed', 'max_runtime'],
+    'followup_unmerged', 'unpushed', 'start_failed', 'max_runtime', 'supervisor_question', 'escalation',
+    'supervision_parked', 'supervision_round_stuck', 'schedule_blocked'],
   deputy: ['done', 'failed', 'followup', 'followup_failed', 'exit_without_report', 'pane_died'],
   interim: ['overrun', 'followup_overrun'],
   digest: ['deferred', 'resolving', 'review_merged', 'review_closed'],
@@ -123,7 +125,21 @@ export function routeFor(type) {
  * "urgent" mode). Records what the deputy needs: the type on the run's note,
  * or an interim note.
  */
+/**
+ * A supervisor round's own end of work: its `done` and its
+ * follow-up reports are neither announced nor noted for the deputy — a round
+ * every interval would otherwise be a message every interval, and what it did
+ * is read in the case files. Its failures go the normal way. THE one place
+ * this is decided: `routeMessage()` (every `notifyRun()`) and `noteReport()`
+ * (every deputy note) both ask it.
+ */
+export const ROUND_QUIET_TYPES = Object.freeze(['done', 'followup'])
+export function roundQuiet(run, type) {
+  return run?.supervisor === 1 && ROUND_QUIET_TYPES.includes(type)
+}
+
 export function routeMessage(runId, type, text = '') {
+  if (roundQuiet(getRun(runId), type)) return { send: false, route: 'round' }
   const route = routeFor(type)
   if (route === 'deputy') noteType(runId, type)
   const mode = notifyMode()
@@ -150,7 +166,7 @@ export function noteReport(runId, { seq = 0, type, short = null, detail = null }
   try {
     if (!triageWanted()) return null
     const run = getRun(runId)
-    if (!run || run.resolves_run_id) return null
+    if (!run || run.resolves_run_id || roundQuiet(run, type)) return null
     const have = db.prepare(`SELECT id, hub_types FROM report_notes WHERE kind='report' AND run_id=? AND seq=? AND launch_no=?`)
       .get(runId, seq, run.launch_no ?? 0)
     if (have) {
@@ -215,7 +231,9 @@ function noteInterim(runId, type, text) {
  * Ends without a report have no caller to hang on — there are many ways there
  * (killed, session closed, died, a start that failed). So the worker looks for
  * itself: every run that ended after `triage_since`, for its current launch,
- * without a note; and every abandoned follow-up without one.
+ * without a note; and every abandoned follow-up without one. A supervisor
+ * round that ended `done` gets none (`roundQuiet()`), and is not asked about
+ * again on every pass.
  */
 export function sweep() {
   const since = getSetting('triage_since')
@@ -223,6 +241,7 @@ export function sweep() {
   let n = 0
   const runs = db.prepare(`SELECT r.* FROM runs r WHERE r.status IN ('done','failed','aborted')
       AND r.resolves_run_id IS NULL AND r.ended_at IS NOT NULL AND r.ended_at >= ?
+      AND NOT (r.supervisor = 1 AND r.status = 'done')
       AND r.ended_at >= COALESCE(r.launched_at, r.started_at)
       AND NOT EXISTS (SELECT 1 FROM report_notes n WHERE n.run_id = r.id AND n.kind = 'report'
                       AND n.seq = 0 AND n.launch_no = r.launch_no)
@@ -559,8 +578,7 @@ export function endedByOperator(note, run) {
   if (run.status !== 'aborted') return false
   const ev = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='aborted' ORDER BY id DESC LIMIT 1`).get(run.id)
   try {
-    const p = JSON.parse(ev?.payload ?? '{}') ?? {}
-    return p.by === 'user' || p.source === 'web'
+    return abortedByFrom(JSON.parse(ev?.payload ?? '{}') ?? {}) === 'operator'
   } catch { return false }
 }
 

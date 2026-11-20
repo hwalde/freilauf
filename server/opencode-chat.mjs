@@ -170,6 +170,40 @@ export function renderChat(d, ids, { title = '', maxBytes = CHAT_MAX_BYTES } = {
   return [...head, ...marker, ...kept].join('\n') + '\n'
 }
 
+/**
+ * The same rows as `{ role, at, text }` messages, oldest first, for the
+ * transcript capability (docs/plugins.md): text as said, a tool call with its
+ * outcome as one `tool` line, a provider error as a `result` line. Only the
+ * newest `tail` are kept while iterating, so a tree of 100 000 rows costs no
+ * memory. Subagents' rows are included and say so. Separate from the file
+ * access, like `renderChat()`, so the suite hands it a fixture store.
+ */
+export function chatMessages(d, ids, { tail = 40 } = {}) {
+  const keep = Math.max(1, tail)
+  const out = []
+  const parentOf = d.prepare(`SELECT parent_id FROM ${isV2Store(d) ? 'session_v2' : 'session'} WHERE id = ?`)
+  const sub = new Map()
+  const isSub = (s) => { if (!sub.has(s)) sub.set(s, !!parentOf.get(s)?.parent_id); return sub.get(s) }
+  const line = (s) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length <= 200 ? x : x.slice(0, 199) + '…' }
+  for (const r of queryRows(d, ids)) {
+    const at = Number.isFinite(Number(r.at)) && r.at !== null ? new Date(Number(r.at)).toISOString() : null
+    const who = isSub(r.session) ? '(subagent) ' : ''
+    let m = null
+    if (r.type === 'text') {
+      if (!String(r.text ?? '').trim()) continue
+      m = { role: r.role === 'user' ? 'user' : 'assistant', at, text: who + String(r.text).trim() }
+    } else if (r.type === 'tool') {
+      const outcome = r.status === 'error' ? ` → error: ${r.error ?? ''}` : r.status === 'completed' ? '' : ` (${r.status ?? 'pending'})`
+      m = { role: 'tool', at, text: line(`${who}${r.tool ?? 'tool'} ${r.input ?? ''}${outcome}`) }
+    } else {
+      m = { role: 'result', at, text: line(`${who}error: ${r.error ?? ''}`) }
+    }
+    out.push(m)
+    if (out.length > keep * 2) out.splice(0, out.length - keep)
+  }
+  return out.slice(-keep)
+}
+
 /** Changes whenever the store's rows for these sessions do. */
 function storeStamp(d, ids) {
   const v2 = isV2Store(d)

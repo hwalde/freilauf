@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # freilauf — controls the Freilauf hub. Planung 4.8 + 9.
-#   freilauf on|off|status|url|logs|restart|stop|start
+#   freilauf on|off|status|url|logs [--no-follow] [-n N]|restart|stop|start
 #   freilauf deploy [ref]
 #   freilauf pipeline on|off|status
 #   freilauf drain [minutes] | undrain
@@ -32,7 +32,10 @@ Usage: freilauf <command>
   off           stop the VPN proxy   → website local-only again (fail-closed)
   status        state of all three switches + processes
   url           print the VPN URL
-  logs          journalctl --user of the hub unit
+  logs [--no-follow] [-n <lines>]
+                journalctl --user of the hub unit: the last 100 lines, then
+                follows; --no-follow prints the last lines and returns (for a
+                caller that is not a person at a terminal)
   start|stop|restart   control the hub process (scheduler/watcher/UI)
 
   deploy [ref]  bring a commit live: fetch, check out in the hub's own deploy
@@ -196,7 +199,21 @@ case "${1:-}" in
         echo "https://${VPN_BIND}:${VPN_PORT}"
         ;;
     logs)
-        exec journalctl --user -u "$(fl_unit_short)" -f -n 100
+        shift
+        follow=1 lines=100
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --no-follow) follow=0; shift ;;
+                -n|--lines)
+                    [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "usage: freilauf logs [--no-follow] [-n <lines>]" >&2; exit 2; }
+                    lines="$2"; shift 2 ;;
+                *) echo "usage: freilauf logs [--no-follow] [-n <lines>]" >&2; exit 2 ;;
+            esac
+        done
+        if [[ $follow == 1 ]]; then
+            exec journalctl --user -u "$(fl_unit_short)" -f -n "$lines"
+        fi
+        exec journalctl --user -u "$(fl_unit_short)" --no-pager -n "$lines"
         ;;
     start)
         systemctl --user start "$(fl_unit)" ;;

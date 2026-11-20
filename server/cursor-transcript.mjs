@@ -110,6 +110,32 @@ export function stateFromJsonl(text) {
   return { turnEnded, lastAnswer }
 }
 
+/**
+ * The JSONL as `{ role, at, text }` messages, oldest first, for the transcript
+ * capability (docs/plugins.md). Measured shape: `{role, message:{content:[…]}}`
+ * per record with `text` and `tool_use` parts, no timestamps (so `at` is null)
+ * and no tool results, plus `{type:"turn_ended"}`, which is not a message.
+ * `truncated`: the first line of a tail starts mid-record and is skipped.
+ */
+export function messagesFromJsonl(text, { truncated = false } = {}) {
+  const out = []
+  const line1 = (s) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length <= 200 ? x : x.slice(0, 199) + '…' }
+  for (const line of String(text ?? '').split('\n').slice(truncated ? 1 : 0)) {
+    let j
+    try { j = JSON.parse(line) } catch { continue }
+    if (!['user', 'assistant'].includes(j?.role)) continue
+    const content = j?.message?.content
+    const said = []
+    const flush = () => { if (said.length) out.push({ role: j.role, at: null, text: said.join('\n') }); said.length = 0 }
+    for (const c of Array.isArray(content) ? content : [content]) {
+      if (typeof c === 'string') { if (c.trim()) said.push(c.trim()) } else if (c?.type === 'text' && String(c.text ?? '').trim()) said.push(String(c.text).trim())
+      else if (c?.type === 'tool_use') { flush(); out.push({ role: 'tool', at: null, text: line1(`${c.name ?? 'tool'} ${JSON.stringify(c.input ?? {})}`) }) }
+    }
+    flush()
+  }
+  return out
+}
+
 /** File version of stateFromJsonl, plus the mtime as the activity timestamp. */
 export function transcriptState(run) {
   const path = transcriptPath(run)

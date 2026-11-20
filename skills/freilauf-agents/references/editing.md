@@ -14,6 +14,7 @@ the submitted body. A field you leave out is written as its parsed default:
 | omitted | becomes |
 |---|---|
 | `active` | **0** — the agent is switched off. Only `1`, `on` or `true` switch it on; every other value, and an absent field, mean off |
+| `supervisor` | **0** — a supervisor agent loses its flag and the hub's supervision goes quiet (`../freilauf-supervision/SKILL.md`). The same checkbox rule as `active` |
 | `prompt` | empty → refused (`Prompt is empty.`) |
 | `model`, `provider`, `effort`, `goal`, `branch_pattern` | NULL — and a NULL `provider` is a working agent that fails at its first API call, see the end of this file |
 | `keep_on_branch` | 0 |
@@ -34,6 +35,7 @@ converting. (This mirrors `setupToFormBody()` / `scheduleFields()` in the hub.)
 |---|---|
 | `active` (0/1) | `active=1`, or the field omitted entirely for off |
 | `keep_on_branch` (0/1) | `keep_on_branch=1`, or omitted |
+| `supervisor` (0/1) | `supervisor=1`, or omitted |
 | `or_provider` non-empty | `or_mode=pin`, `or_provider=<tag>` |
 | `or_routing` JSON with `"mode":"auto"` | `or_mode=auto`, `or_quant=<quant_min>`, `or_region=<location or "all">`, `or_max_in=<max_in>`, `or_max_out=<max_out>` — omit a key the JSON does not carry |
 | neither | `or_mode=offen` |

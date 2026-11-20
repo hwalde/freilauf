@@ -2141,6 +2141,9 @@
       // progress is typing that lives only in the DOM — swapping it would throw
       // the half-written prompt away. Wait for the next event instead.
       if (document.querySelector('#run-edit :focus')) return
+      // Same for the case file's answer form: an answer half typed to the
+      // supervisor's question must survive the entry that just arrived.
+      if (document.querySelector('#run-case :focus')) return
       tauscheNachId(html)
       // Unlike the other blocks the card is CONDITIONAL: a finished run is not
       // editable, and tauscheNachId only replaces by id — an element absent

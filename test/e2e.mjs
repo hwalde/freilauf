@@ -3385,6 +3385,13 @@ try {
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'einmalig', run_at: gestern, active: '1',
     }, { asBrowser: true })
     equal(b.status, 303, 'agent B created')
+    // C: a supervisor agent with a schedule that fires every minute — the tick
+    // must never start it: the hub starts it when cases are due.
+    const c = await postForm('/agents/edit', {
+      repo_id: repoId, name: 'e2e-supervisor-cron', harness: 'claude', prompt: 'E2E-Supervisor',
+      branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'cron', schedule: '* * * * *', active: '1', supervisor: '1',
+    }, { asBrowser: true })
+    equal(c.status, 303, 'agent C created')
     equal((await (await postForm('/api/settings/pipeline', { value: '1' })).json()).ok, true, 'pipeline on')
   })
   await check('one-off date fires exactly once and switches itself to manual', async () => {
@@ -3402,6 +3409,15 @@ try {
     await waitFor(() => ereignisse(belegt.id).includes('schedule_skipped'),
       { what: 'schedule_skipped', timeoutMs: 75_000, taktMs: 1000 })
     equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idA).c, 1, 'only one run')
+  })
+  await check('a supervisor agent is never started by its schedule', async () => {
+    // The skip above proves a tick has passed since the three agents were saved.
+    const idC = agent('e2e-supervisor-cron').id
+    equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idC).c, 0, 'no run of the flagged agent')
+    // Not even considered: a skipped or failed slot would be a schedule_log row.
+    equal(db.prepare('SELECT count(*) c FROM schedule_log WHERE agent_id=?').get(idC).c, 0, 'and no slot of it was logged')
+    // Switched off again, so later groups do not see an active supervisor.
+    db.prepare('UPDATE agents SET active=0 WHERE id=?').run(idC)
   })
   await check('pipeline can be switched off again', async () => {
     equal((await (await postForm('/api/settings/pipeline', { value: '0' })).json()).ok, true, 'ok')
@@ -7893,6 +7909,10 @@ export default {
     db.prepare(`UPDATE runs SET agent_id=? WHERE id='e2e-del-run'`).run(agentId)
     db.prepare(`INSERT INTO events(run_id,kind) VALUES('e2e-del-run','started')`).run()
     db.prepare(`INSERT INTO incidents(run_id,typ,quelle) VALUES('e2e-del-run','rate_limit','log')`).run()
+    // A case file and an escalation too (server/supervision.mjs, server/escalations.mjs): children of the run.
+    db.prepare(`INSERT INTO case_entries(run_id,kind,author,text) VALUES('e2e-del-run','note','hub','x')`).run()
+    db.prepare(`INSERT INTO case_state(run_id) VALUES('e2e-del-run')`).run()
+    db.prepare(`INSERT INTO escalations(run_id, class, summary) VALUES('e2e-del-run', 'other', 'x')`).run()
 
     // The dialog states the facts, and they are the real counts.
     const seite = await (await fetchPath('/repos')).text()
@@ -7906,6 +7926,9 @@ export default {
     equal(db.prepare(`SELECT count(*) c FROM runs WHERE id='e2e-del-run'`).get().c, 0, 'its runs')
     equal(db.prepare(`SELECT count(*) c FROM events WHERE run_id='e2e-del-run'`).get().c, 0, 'their events')
     equal(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id='e2e-del-run'`).get().c, 0, 'and their incidents')
+    equal(db.prepare(`SELECT count(*) c FROM case_entries WHERE run_id='e2e-del-run'`).get().c, 0, 'their case entries')
+    equal(db.prepare(`SELECT count(*) c FROM case_state WHERE run_id='e2e-del-run'`).get().c, 0, 'their case state')
+    equal(db.prepare(`SELECT count(*) c FROM escalations WHERE run_id='e2e-del-run'`).get().c, 0, 'and their escalations')
     // The one thing it must never do.
     isTrue(existsSync(join(REPO, '.git')), 'the git checkout is untouched')
   })
@@ -8469,7 +8492,7 @@ export default {
   group('The report socket')
   {
     // The narrow channel of SANDBOX.md: a second listener carrying
-    // exactly two routes and a per-run bearer, so an agent can report without
+    // an allowlist of routes and a per-run bearer, so an agent can report without
     // being handed the whole API on 127.0.0.1 — and so a container, which cannot
     // reach the host's loopback at all, has a way home.
     //
@@ -8545,7 +8568,7 @@ export default {
       equal(lauf(fremd).branch_reported, null, 'nowhere')
     })
 
-    await check('the socket carries nothing but its two routes', async () => {
+    await check('the socket carries nothing but its allowlisted routes', async () => {
       const id = await laufFuerSocket('socket route allowlist')
       const token = lauf(id).report_token
       // Every one of these is a real route of the hub on 127.0.0.1, and none of
@@ -8632,6 +8655,1048 @@ export default {
       await watcherTick()
       isTrue(ereignisse(id).includes('progress'), 'the watcher collected it')
     })
+  }
+
+  // ------------------------------------------------------------------
+  group('Supervision: the flag, the case file and the supervisor channel')
+  {
+    // Runs on the hub the report-socket group started, so the socket is in the
+    // sandbox and both listeners can be asked. Every write a supervisor makes goes
+    // through bin/fl-supervise of THIS checkout, the way an agent would call it.
+    const SOCK = join(SB, 'hub.sock')
+    const FL_SUPERVISE = join(PROJECT, 'bin', 'fl-supervise')
+    const shortIdOf = (id) => id.split('-')[0]
+    const http_ = await import('node:http')
+    const viaSocket = (urlPath, { token = null, body = {} } = {}) =>
+      new Promise((resolve, reject) => {
+        const headers = { 'content-type': 'application/json' }
+        if (token) headers.authorization = `Bearer ${token}`
+        const req = http_.request({ socketPath: SOCK, path: urlPath, method: 'POST', headers }, (res) => {
+          let d = ''
+          res.setEncoding('utf8')
+          res.on('data', (c) => { d += c })
+          res.on('end', () => { let j = null; try { j = JSON.parse(d) } catch {} resolve({ status: res.statusCode, json: j }) })
+        })
+        req.on('error', reject)
+        req.write(JSON.stringify(body))
+        req.end()
+      })
+    const viaLoopback = async (urlPath, { token = null, body = {} } = {}) => {
+      const r = await fetchPath(urlPath, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(body),
+      })
+      let j = null
+      try { j = await r.json() } catch {}
+      return { status: r.status, json: j }
+    }
+    /** fl-supervise as the run `asRun` would call it; `channel` 'http' or 'socket'. */
+    const supervise = (asRun, args, { channel = 'http', token } = {}) => new Promise((resolve) => {
+      const env = { ...process.env, FL_RUN_ID: asRun, HOME: SB }
+      delete env.FL_HUB_URL; delete env.CC_HUB_URL; delete env.FL_HUB_SOCKET; delete env.FL_RUN_TOKEN
+      const tok = token === undefined ? lauf(asRun)?.report_token : token
+      if (tok) env.FL_RUN_TOKEN = tok
+      if (channel === 'socket') { env.FL_HUB_SOCKET = SOCK; env.FL_HUB_URL = 'http://127.0.0.1:1' } else env.FL_HUB_URL = BASE
+      execFile(FL_SUPERVISE, args, { env, encoding: 'utf8', timeout: 30_000 }, (err, stdout, stderr) => {
+        let json = null
+        try { json = JSON.parse(stdout) } catch {}
+        resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr), json })
+      })
+    })
+    /** The variables a run's tmux session carries, as a { name: value } map. */
+    const sessionEnv = async (runId) => {
+      const s = await sessionMerken(runId)
+      const r = await sh('tmux', ['show-environment', '-t', `=${s}`])
+      const out = {}
+      for (const line of r.stdout.split('\n')) {
+        const eq = line.indexOf('=')
+        if (eq > 0 && !line.startsWith('-')) out[line.slice(0, eq)] = line.slice(eq + 1)
+      }
+      return out
+    }
+    const caseOf = async (runId, q = '') => (await fetchPath(`/api/runs/${runId}/case${q}`)).json()
+    const evPayloads = (runId, kind) => db.prepare('SELECT payload FROM events WHERE run_id=? AND kind=? ORDER BY id')
+      .all(runId, kind).map(r => JSON.parse(r.payload ?? 'null'))
+
+    let SUP = null      // the supervisor agent's run
+    let PLAIN = null    // an ordinary run, the case under supervision
+    let supAgentId = null
+
+    await check('an agent marked as supervisor starts a supervisor run, and only that run gets a token', async () => {
+      const r = await postForm('/agents/edit', {
+        repo_id: String(repoId), name: 'e2e-supervisor', harness: 'claude', prompt: 'look after the runs',
+        branch_mode: 'keiner', expected_minutes: '20', schedule_kind: 'manuell', active: '1', supervisor: '1',
+      }, { asBrowser: true })
+      equal(r.status, 303, 'saved')
+      const a = agent('e2e-supervisor')
+      supAgentId = a.id
+      equal(a.supervisor, 1, 'the flag is stored on the agent')
+      const form = await (await fetchPath(`/agents/edit?id=${a.id}&repo=${repoId}`)).text()
+      isTrue(/name="supervisor" value="1" checked/.test(form), 'and the form shows it ticked')
+      contains(form, 'The hub starts it by itself', 'with the sentence that says who starts it')
+      const start = await postForm('/agents/start', { id: String(a.id), repo: String(repoId) }, { asBrowser: true })
+      equal(start.status, 303, '"start now" goes through')
+      SUP = db.prepare('SELECT id FROM runs WHERE agent_id=? ORDER BY started_at DESC LIMIT 1').get(a.id).id
+      equal(lauf(SUP).supervisor, 1, 'the run carries the flag')
+      const env_ = await sessionEnv(SUP)
+      equal(env_.FL_RUN_TOKEN, lauf(SUP).report_token, 'the unsandboxed supervisor run has its bearer in the session')
+
+      PLAIN = (await laufStarten({ repo_id: repoId, prompt: 'an ordinary run under supervision' })).runId
+      equal(lauf(PLAIN).supervisor, 0, 'an ordinary run is no supervisor')
+      const plainEnv = await sessionEnv(PLAIN)
+      isFalse('FL_RUN_TOKEN' in plainEnv, 'an ordinary run gets no token')
+      // The whole set of hub variables, so a second addition cannot slip in either.
+      equal(Object.keys(plainEnv).filter(k => /^(FL|CC)_/.test(k) && k !== 'FL_PROMPTFILE').sort().join(','),
+        'CC_HUB_URL,CC_RUN_ID,FL_HUB_URL,FL_RUN_ID', 'its environment is exactly what it was before supervision existed')
+    })
+
+    await check('a request cannot make itself a supervisor outside the agent form', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'pretends to supervise', supervisor: '1' })
+      equal(lauf(j.runId).supervisor, 0, 'POST /api/runs ignores the field')
+      isFalse('FL_RUN_TOKEN' in await sessionEnv(j.runId), 'and hands out no token')
+    })
+
+    await check('a run that is not a supervisor is refused, with the sentence, on both listeners', async () => {
+      const token = lauf(PLAIN).report_token
+      const body = { op: 'note', run: SUP, text: 'nope' }
+      const http = await viaLoopback(`/api/runs/${PLAIN}/supervise`, { token, body })
+      equal(http.status, 403, 'loopback: 403')
+      contains(http.json?.error ?? '', 'not a supervisor run', 'with the sentence')
+      const sock = await viaSocket(`/api/runs/${PLAIN}/supervise`, { token, body })
+      equal(sock.status, 403, 'socket: 403')
+      contains(sock.json?.error ?? '', 'not a supervisor run', 'with the same sentence')
+      const cli = await supervise(PLAIN, ['note', shortIdOf(SUP), 'nope'])
+      equal(cli.code, 1, 'fl-supervise exits 1')
+      contains(cli.stderr, 'not a supervisor run', 'and prints the hub\'s sentence on stderr')
+      equal((await caseOf(SUP)).total, 0, 'nothing was written')
+    })
+
+    await check('a missing or wrong bearer is refused on both listeners', async () => {
+      const body = { op: 'note', run: PLAIN, text: 'nope' }
+      for (const [what, token] of [['no token', null], ['a wrong token', 'f'.repeat(64)], ['another run\'s token', lauf(PLAIN).report_token]]) {
+        const l = await viaLoopback(`/api/runs/${SUP}/supervise`, { token, body })
+        const s = await viaSocket(`/api/runs/${SUP}/supervise`, { token, body })
+        equal(l.status, 401, `loopback, ${what}`)
+        equal(s.status, 401, `socket, ${what}`)
+        contains(l.json?.error ?? '', 'bearer token', `loopback, ${what}: the agent's sentence`)
+        equal(s.json?.error, l.json?.error, `socket, ${what}: the same English sentence on both listeners`)
+      }
+      const cli = await supervise(SUP, ['note', PLAIN, 'nope'], { token: null })
+      equal(cli.code, 1, 'fl-supervise without FL_RUN_TOKEN is refused')
+      contains(cli.stderr, 'bearer token', 'and says why')
+      equal((await caseOf(PLAIN)).total, 0, 'nothing was written')
+    })
+
+    await check('a supervisor writes note, again and close, and the case file and the page show them', async () => {
+      const short = shortIdOf(PLAIN)
+      const n = await supervise(SUP, ['note', short, 'waits for input since the morning', '--again', '30'])
+      equal(n.code, 0, `note over loopback (${n.stderr.trim()})`)
+      equal(n.json?.run, PLAIN, 'the short id named the right run')
+      isTrue(!!n.json?.look_again_at, 'and --again set the time to look again')
+      const s = await supervise(SUP, ['note', PLAIN, 'second note, over the socket'], { channel: 'socket' })
+      equal(s.code, 0, `note over the socket (${s.stderr.trim()})`)
+      const a = await supervise(SUP, ['again', short, '45'])
+      equal(a.code, 0, 'again')
+      const bad = await supervise(SUP, ['again', short, '0'])
+      equal(bad.code, 1, 'zero minutes are refused')
+      contains(bad.stderr, 'whole minutes', 'with the range')
+      const c = await supervise(SUP, ['close', short, 'nothing left to do'])
+      equal(c.code, 0, 'close')
+      const c2 = await supervise(SUP, ['close', short, 'again'])
+      equal(c2.json?.already_closed, true, 'closing twice says it already is')
+
+      const k = await caseOf(PLAIN)
+      isTrue(k.ok, 'GET /api/runs/<id>/case answers')
+      equal(k.entries.map(e => e.kind).join(','), 'note,note,action,closed', 'four entries, oldest first')
+      isTrue(k.entries.every(e => e.author === SUP), 'all written by the supervisor run')
+      equal(k.entries[0].data?.again_minutes, 30, 'the note carries its look-again minutes')
+      equal(k.entries[2].data?.op, 'again', 'the action says what it was')
+      isTrue(!!k.state.closed_at, 'the case is closed')
+      equal(k.state.closed_reason, 'nothing left to do', 'with its reason')
+      isTrue(!!k.state.look_again_at, 'and the time to look again is kept')
+      equal((await caseOf(PLAIN, '?limit=2')).entries.map(e => e.kind).join(','), 'action,closed', 'limit keeps the newest')
+
+      const page = await (await fetchPath(`/runs/${PLAIN}`)).text()
+      const section = page.slice(page.indexOf('id="run-case"'), page.indexOf('</section>', page.indexOf('id="run-case"')))
+      isFalse(section.startsWith('id="run-case" hidden'), 'the section is visible')
+      contains(section, 'Case file', 'under its title')
+      contains(section, 'waits for input since the morning', 'with the note')
+      contains(section, `supervisor ${shortIdOf(SUP)}`, 'its author')
+      contains(section, 'ago', 'and its age')
+      contains(section, 'Look again in 45 min', 'the action in words')
+      contains(section, 'Closed since', 'and where the case stands')
+      const frag = await (await fetchPath(`/api/fragments/run-detail?id=${PLAIN}`)).text()
+      contains(frag, 'id="run-case"', 'the section is part of the run-detail fragment')
+    })
+
+    await check('the supervisor is refused for itself, another supervisor, an unknown, an ambiguous and an archived run', async () => {
+      contains((await supervise(SUP, ['note', SUP, 'x'])).stderr, 'your own run', 'its own run')
+      // A second supervisor run, written straight into the table.
+      const other = randomUUID()
+      db.prepare(`INSERT INTO runs(id, repo_id, harness, prompt, branch_mode, expected_minutes, status, supervisor)
+        VALUES(?, ?, 'claude', 'x', 'keiner', 10, 'running', 1)`).run(other, repoId)
+      contains((await supervise(SUP, ['note', other, 'x'])).stderr, 'is a supervisor run itself', 'another supervisor')
+      // Done, not left running without a session: a later watcher pass would try to resume it.
+      db.prepare(`UPDATE runs SET status='done' WHERE id=?`).run(other)
+      contains((await supervise(SUP, ['note', 'deadbeef', 'x'])).stderr, 'no run matches', 'an unknown run')
+      for (const id of ['abcd1111-0000-4000-8000-000000000001', 'abcd2222-0000-4000-8000-000000000002']) {
+        db.prepare(`INSERT INTO runs(id, repo_id, harness, prompt, branch_mode, expected_minutes, status)
+          VALUES(?, ?, 'claude', 'x', 'keiner', 10, 'done')`).run(id, repoId)
+      }
+      const amb = await viaLoopback(`/api/runs/${SUP}/supervise`, { token: lauf(SUP).report_token, body: { op: 'note', run: 'abcd', text: 'x' } })
+      equal(amb.status, 409, 'an ambiguous short id is a 409')
+      equal(amb.json?.candidates?.sort().join(','), 'abcd1111,abcd2222', 'naming the candidates')
+      db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id='abcd1111-0000-4000-8000-000000000001'`).run()
+      contains((await supervise(SUP, ['note', 'abcd1111', 'x'])).stderr, 'is archived', 'an archived run')
+      const unknownOp = await viaLoopback(`/api/runs/${SUP}/supervise`, { token: lauf(SUP).report_token, body: { op: 'explode', run: PLAIN } })
+      equal(unknownOp.status, 400, 'an unknown op is a 400')
+      contains(unknownOp.json?.error ?? '', 'note, again, close, bundle, cases', 'naming the ops there are')
+    })
+
+    await check('the operator answers in the case file, on the page and through the API', async () => {
+      const page = await (await fetchPath(`/runs/${PLAIN}`)).text()
+      contains(page, `action="/api/runs/${PLAIN}/case/answer"`, 'the page carries the answer form')
+      const j = await (await postForm(`/api/runs/${PLAIN}/case/answer`, { text: 'tell it to go ahead' })).json()
+      isTrue(j.ok, 'the API takes an answer')
+      const viaForm = await postForm(`/api/runs/${PLAIN}/case/answer`, { text: 'and merge', back: `/runs/${PLAIN}#run-case` }, { asBrowser: true })
+      equal(viaForm.status, 303, 'the page form redirects back')
+      equal((await postForm(`/api/runs/${PLAIN}/case/answer`, { choice: 'yes' })).status, 200, 'a choice alone is an answer')
+      equal((await postForm(`/api/runs/${PLAIN}/case/answer`, { text: '   ' })).status, 400, 'an empty one is refused')
+      equal((await postForm(`/api/runs/${randomUUID()}/case/answer`, { text: 'x' })).status, 404, 'an unknown run is a 404')
+      const last = (await caseOf(PLAIN)).entries.slice(-3)
+      equal(last.map(e => `${e.kind}:${e.author}`).join(','), 'answer:operator,answer:operator,answer:operator', 'three answers by the operator')
+      equal(last[0].text, 'tell it to go ahead', 'with the text')
+      equal(last[2].data?.choice, 'yes', 'and the chosen label')
+    })
+
+    await check('a run taken out of supervision: at the start, on the page, and the supervisor is refused', async () => {
+      const form = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
+      contains(form, 'name="supervision_off"', 'the single-run form offers it while a supervisor is active')
+      const j = await laufStarten({ repo_id: repoId, prompt: 'leave me alone', supervision_off: '1' })
+      const id = j.runId
+      equal(lauf(id).supervision_off, 1, 'set at the start')
+      equal(JSON.stringify(evPayloads(id, 'supervision_off')), JSON.stringify([{ by: 'operator', at_start: true }]), 'and recorded as an event')
+      const refused = await supervise(SUP, ['note', id, 'x'])
+      equal(refused.code, 1, 'the supervisor is refused')
+      contains(refused.stderr, 'took run', 'with the sentence that the operator took it out')
+
+      const page = await (await fetchPath(`/runs/${id}`)).text()
+      contains(page, `action="/api/runs/${id}/supervision"`, 'the run page carries the switch')
+      contains(page, 'Put back under supervision', 'saying which way it goes')
+      equal((await postForm(`/api/runs/${id}/supervision`, { off: '0', back: `/runs/${id}` }, { asBrowser: true })).status, 303, 'put back from the page')
+      equal(lauf(id).supervision_off, 0, 'back under supervision')
+      equal(evPayloads(id, 'supervision_on').length, 1, 'one event')
+      equal((await (await postForm(`/api/runs/${id}/supervision`, { off: '0' })).json()).changed, false, 'the same value twice changes nothing')
+      equal(evPayloads(id, 'supervision_on').length, 1, 'and writes no second event')
+      equal((await supervise(SUP, ['note', id, 'now I may'])).code, 0, 'the supervisor may write again')
+      equal((await postForm(`/api/runs/${id}/supervision`, { off: '1' })).status, 200, 'taken out through the API')
+      equal(evPayloads(id, 'supervision_off').length, 2, 'a second off event')
+      equal((await postForm(`/api/runs/${id}/supervision`, { off: 'yes' })).status, 400, 'anything but 1 or 0 is refused')
+      equal((await caseOf(id)).total, 1, 'the existing case file stays readable')
+      const supPage = await (await fetchPath(`/runs/${SUP}`)).text()
+      contains(supPage, 'id="run-supervision" hidden', 'a supervisor run has no switch: it is never a case')
+    })
+
+    // ---- stage A2: what the supervisor sees ----
+    /** Make a run's agent wait for input since `min` minutes, the way the hooks leave it. */
+    const makeWaiting = (runId, min) => {
+      db.prepare(`INSERT INTO events(run_id, kind, ts, payload) VALUES(?, 'agent_waiting', datetime('now', ?), '{"source":"e2e"}')`)
+        .run(runId, `-${min} minutes`)
+      db.prepare(`UPDATE runs SET agent_state='waiting', agent_state_at=datetime('now'), last_activity_at=datetime('now', ?) WHERE id=?`)
+        .run(`-${min} minutes`, runId)
+    }
+    let WAIT = null
+
+    await check('the transcript route answers for a stub run, naming its source, bounded', async () => {
+      const j = await (await fetchPath(`/api/runs/${PLAIN}/transcript`)).json()
+      isTrue(j.ok, 'answers')
+      equal(j.source, 'pane', 'no claude record in the fence, a live pane: its screen')
+      equal(j.messages[0]?.role, 'screen', 'one screen message')
+      // The stub's LAST line: the first one scrolls off the 50-line screen once
+      // the prompt it prints grows (a supervised run's rules are longer).
+      contains(j.messages[0]?.text ?? '', 'ready for input:', 'with what the pane shows')
+      const big = await (await fetchPath(`/api/runs/${PLAIN}/transcript?tail=99999&chars=99999999`)).json()
+      equal(big.tail, 200, 'tail held to its ceiling')
+      equal(big.chars, 60000, 'chars too')
+      const small = await (await fetchPath(`/api/runs/${PLAIN}/transcript?chars=30`)).json()
+      isTrue(small.messages[0].text.length <= 30 && small.cut.chars, 'a small budget cuts, and says so')
+      equal((await fetchPath(`/api/runs/${randomUUID()}/transcript`)).status, 404, 'an unknown run is a 404')
+      equal((await caseOf(PLAIN)).entries.filter(e => e.kind === 'look').length, 0, 'reading it records no look')
+    })
+
+    await check('cases lists a run made due and omits one taken out of supervision', async () => {
+      WAIT = (await laufStarten({ repo_id: repoId, prompt: 'waits for somebody' })).runId
+      await sessionMerken(WAIT)
+      makeWaiting(WAIT, 45)
+      const OUT = (await laufStarten({ repo_id: repoId, prompt: 'waits too, but alone', supervision_off: '1' })).runId
+      await sessionMerken(OUT)
+      makeWaiting(OUT, 45)
+      const c = await supervise(SUP, ['cases', '--due', '--limit', '50'])
+      equal(c.code, 0, `cases answers (${c.stderr.trim()})`)
+      const mine = c.json?.cases?.find(x => x.run === WAIT)
+      isTrue(!!mine, 'the waiting run is a case')
+      equal(mine?.reason, 'waiting_input', 'because its agent waits')
+      equal(Math.round((mine?.for_s ?? 0) / 60), 45, 'for 45 minutes, computed by the hub')
+      contains(mine?.why ?? '', 'for 45 min', 'and phrased')
+      isFalse(c.json.cases.some(x => x.run === OUT), 'the run taken out is not')
+      // PLAIN's case was closed, and the operator answered three times after that:
+      // news after the closing reopens it, and an answer is the most urgent reason.
+      const reopened = c.json.cases.find(x => x.run === PLAIN)
+      equal(reopened?.reason, 'answer', 'the closed case the operator answered after is due again')
+      equal(reopened?.reopen, true, 'and says it reopens')
+      isFalse(c.json.cases.some(x => x.run === SUP), 'nor the supervisor itself')
+      const t = await supervise(SUP, ['cases', '--due', '--text', '--limit', '50'])
+      contains(t.stdout, shortIdOf(WAIT), 'the readable form names it')
+      contains(t.stdout, 'case(s) due', 'as a list')
+      equal(t.json, null, '--text prints text, not JSON')
+      const off = await supervise(PLAIN, ['cases'])
+      equal(off.code, 1, 'outside a supervisor run, cases is refused too')
+    })
+
+    await check('look on a waiting run prints the bundle with phrased ages and records the look', async () => {
+      const short = shortIdOf(WAIT)
+      const l = await supervise(SUP, ['look', short])
+      equal(l.code, 0, `look answers (${l.stderr.trim()})`)
+      const text = l.stdout
+      for (const part of ['## What it was asked to do', '## State', '## Why it is due', '## Last events', '## Git',
+        '## Transcript', '## Case file', '## How a human would attach']) contains(text, part, part)
+      isTrue(text.indexOf('## State') < text.indexOf('## Git') && text.indexOf('## Git') < text.indexOf('## Transcript')
+        && text.indexOf('## Transcript') < text.indexOf('## Case file'), 'in the order a supervisor reasons')
+      contains(text, 'waiting for input for 45 min', 'the waiting time, computed and phrased')
+      contains(text, 'Due: its agent waits for input, for 45 min', 'why it is due')
+      contains(text, '<data>\nwaits for somebody', 'the prompt fenced as data')
+      contains(text, 'live screen', 'the transcript says where it came from')
+      contains(text, `tmux attach -t '=${lauf(WAIT).tmux_session}'`, 'how to attach')
+      contains(text, 'Uncommitted files of the agent: none', 'the git state of a clean worktree')
+      const k = await caseOf(WAIT)
+      equal(k.entries.map(e => `${e.kind}:${e.author}`).join(','), `look:${SUP}`, 'one look entry, by the supervisor')
+      equal(k.entries[0].data?.due, 'waiting_input', 'with what it saw')
+      isTrue(!!k.state.last_look_at && !!k.state.state_fp, 'the case state knows when and what')
+      equal(k.state.looks_unchanged, 1, 'the first look')
+      const j = await supervise(SUP, ['look', short, '--json'])
+      equal(j.json?.state?.display_status, 'waiting_input', '--json gives the object')
+      equal(j.json?.due?.exclusion, 'looked_recently', 'looked at a moment ago: not due again within the interval')
+      equal((await caseOf(WAIT)).state.looks_unchanged, 1, 'a second look by the same round does not count again (rounds, not looks)')
+      const page = await (await fetchPath(`/runs/${WAIT}`)).text()
+      contains(page, 'Due because: its agent waits for input', 'the operator reads the look on the run page')
+      const c = await supervise(SUP, ['cases', '--due', '--limit', '50'])
+      isFalse(c.json.cases.some(x => x.run === WAIT), 'once looked at, it is not due again within the interval')
+    })
+
+    await check('the bundle of a run whose session and worktree are gone still comes back and says so', async () => {
+      const id = (await laufStarten({ repo_id: repoId, prompt: 'about to vanish' })).runId
+      const s = await sessionMerken(id)
+      const wt = lauf(id).workdir_effective
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
+      db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(id)
+      // Only a worktree under the suite's own worktrees directory — never the repo checkout.
+      const removable = !!wt && wt.startsWith(join(SB, 'worktrees') + '/')
+      isTrue(removable, 'the run has a worktree of its own to remove')
+      if (removable) rmSync(wt, { recursive: true, force: true })
+      const l = await supervise(SUP, ['look', shortIdOf(id)])
+      equal(l.code, 0, `look answers (${l.stderr.trim()})`)
+      contains(l.stdout, 'is gone; there is nothing to attach to', 'the session is gone, said plainly')
+      contains(l.stdout, 'is gone.', 'the worktree too')
+      contains(l.stdout, 'terminal recording', 'the transcript falls back to the recording')
+      contains(l.stdout, 'Due: it failed', 'and the run is due because it failed')
+      const j = await supervise(SUP, ['look', shortIdOf(id), '--json'])
+      equal(j.json?.attach?.session_gone, true, 'the object says gone')
+      equal(j.json?.git?.dirty, null, 'and the dirt of a missing worktree is unknown, not clean')
+    })
+
+    await check('without an active supervisor agent the switch and the checkbox are gone, the route still works', async () => {
+      await postForm('/agents/toggle', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(agent('e2e-supervisor').active, 0, 'the supervisor agent is switched off')
+      isFalse((await (await fetchPath(`/runs/new?repo=${repoId}`)).text()).includes('name="supervision_off"'), 'no checkbox in the form')
+      const page = await (await fetchPath(`/runs/${PLAIN}`)).text()
+      contains(page, 'id="run-supervision" hidden', 'the switch is hidden')
+      contains(page, 'Case file', 'but a case file with entries still shows')
+      equal((await postForm(`/api/runs/${PLAIN}/supervision`, { off: '1' })).status, 200, 'and the route works regardless')
+      equal(lauf(PLAIN).supervision_off, 1, 'it changed the run')
+    })
+
+    // ---- stage B: the supervisor acts ----
+    const reportTo = (runId, body) => fetch(`${BASE}/api/runs/${runId}/report`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const paneText = async (runId) => (await sh('tmux', ['capture-pane', '-p', '-J', '-S', '-400', '-t', `=${lauf(runId).tmux_session}:`])).stdout
+    const kinds = (runId, kind) => ereignisse(runId).filter(k => k === kind).length
+    const promptOf = (id) => readFileSync(join(SB, 'runs', id, 'prompt.md'), 'utf8')
+    /** A fresh run of the stub whose session is up. */
+    const freshRun = async (prompt, extra = {}) => {
+      const id = (await laufStarten({ repo_id: repoId, prompt, ...extra })).runId
+      await sessionMerken(id)
+      return id
+    }
+    /** End a run's first attempt with a report, the way its agent would. */
+    const reportDone = async (id) => {
+      isTrue((await flReport(id, ['done', 'finished the task'])).ok, 'done reported')
+      await waitFor(() => lauf(id).status === 'done', { what: `run ${id} done`, timeoutMs: 15_000 })
+    }
+
+    await check('platform rules: a supervised run learns the tag and the reply; taken out or without a supervisor, nothing', async () => {
+      await postForm('/agents/toggle', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(agent('e2e-supervisor').active, 1, 'the supervisor agent is on again')
+      const on = await freshRun('ordinary work, watched')
+      contains(promptOf(on), 'fl-report reply', 'a supervised run is told how to reply')
+      contains(promptOf(on), '<freilauf-supervisor', 'and what the tag looks like')
+      const out = await freshRun('ordinary work, left alone', { supervision_off: '1' })
+      isFalse(promptOf(out).includes('fl-report reply') || promptOf(out).includes('freilauf-supervisor'), 'a run taken out at the start learns nothing')
+      contains(promptOf(SUP), 'fl-supervise --help', 'the supervisor run is told where its commands are')
+      isFalse(promptOf(SUP).includes('fl-report help "<question/problem>"'), 'and not to call for help')
+      await postForm('/agents/toggle', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      const none = await freshRun('ordinary work, no supervisor on the hub')
+      isFalse(promptOf(none).includes('fl-report reply') || promptOf(none).includes('freilauf-supervisor'), 'a hub without an active supervisor says nothing')
+      await postForm('/agents/toggle', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(agent('e2e-supervisor').active, 1, 'and on again for what follows')
+    })
+
+    await check('a nudge into a waiting run: typed under the hub\'s header, recorded as the supervisor, the agent working again', async () => {
+      const W2 = await freshRun('waits after its turn')
+      isTrue((await flReport(W2, ['_turn_end'])).ok, 'the agent ends its turn')
+      equal(lauf(W2).agent_state, 'waiting', 'waiting for input')
+      const n = await supervise(SUP, ['nudge', shortIdOf(W2), 'Please commit your work and report done.'])
+      equal(n.code, 0, `nudged (${n.stderr.trim()})`)
+      equal(n.json?.into, 'running', 'into a working run')
+      equal(lauf(W2).agent_state, 'working', 'the agent reads as working from that moment')
+      const working = evPayloads(W2, 'agent_working').at(-1)
+      equal(working?.source, 'supervisor', 'and the event names the supervisor, not the send route')
+      const msg = evPayloads(W2, 'supervisor_message')
+      equal(msg.length, 1, 'its own event')
+      equal(msg[0].by, SUP, 'by the supervisor run')
+      equal(kinds(W2, 'message_sent'), 0, 'and no operator message')
+      const k = await caseOf(W2)
+      equal(k.entries.map(e => `${e.kind}:${e.author}`).join(','), `message:${SUP}`, 'a message entry by the supervisor')
+      equal(k.state.nudges, 1, 'counted on the case')
+      const pane = await waitFor(async () => { const p = await paneText(W2); return p.includes('Please commit your work') ? p : null },
+        { what: 'the nudge in the pane', timeoutMs: 10_000 })
+      contains(pane, '[agent saw] <freilauf-supervisor>', 'the tag arrives first, typed')
+      contains(pane, `(run ${shortIdOf(SUP)})`, 'the header names the supervisor run')
+      contains(pane, "on behalf of the operator and with the operator's authority", 'the header the hub wrote')
+      contains(pane, 'fl-report reply', 'with the way to answer')
+      // The agent's own prompt hook a beat later — the head starts with the tag.
+      const before = kinds(W2, 'agent_working')
+      await reportTo(W2, { kind: '_working', source: 'prompt', prompt_head: '<freilauf-supervisor> From the supervisor' })
+      equal(kinds(W2, 'agent_working'), before, 'the echo changes nothing')
+    })
+
+    await check('a long nudge arrives readable, end to end', async () => {
+      const L2 = await freshRun('gets a long message')
+      const long = `${'Read the integration log and fix what it names. '.repeat(30)}END-OF-LONG-NUDGE`
+      isTrue(long.length > 800, 'longer than the paste claude collapses')
+      const n = await supervise(SUP, ['nudge', shortIdOf(L2), long])
+      equal(n.code, 0, `nudged (${n.stderr.trim()})`)
+      const pane = await waitFor(async () => { const p = await paneText(L2); return p.includes('END-OF-LONG-NUDGE') ? p : null },
+        { what: 'the end of the long nudge in the pane', timeoutMs: 10_000 })
+      contains(pane, '<freilauf-supervisor>', 'the tag still leads')
+      equal((await caseOf(L2)).entries[0].text, long, 'and the case file keeps it verbatim')
+      const tooLong = await supervise(SUP, ['nudge', shortIdOf(L2), 'x'.repeat(4001)])
+      equal(tooLong.code, 1, 'over 4000 characters is refused')
+      contains(tooLong.stderr, 'at most 4000', 'with the bound')
+    })
+
+    await check('a nudge into a finished run opens a follow-up marked as the supervisor\'s; its echo, with a head or without, changes nothing', async () => {
+      const F2 = await freshRun('finishes, then gets more work')
+      await reportDone(F2)
+      const n = await supervise(SUP, ['nudge', shortIdOf(F2), 'Also update the changelog, then report again.'])
+      equal(n.code, 0, `nudged (${n.stderr.trim()})`)
+      equal(n.json?.into, 'followup', 'into a finished run')
+      isTrue(!!lauf(F2).followup_since, 'a follow-up commission is open')
+      const started = evPayloads(F2, 'followup_started')
+      equal(started.length, 1, 'one commission')
+      equal(started[0].via, 'supervisor', 'marked as the supervisor\'s, not the operator\'s')
+      equal(started[0].by, SUP, 'naming the supervisor run')
+      isTrue(!!lauf(F2).nudge_typed_at, 'the moment of typing is kept for the echo')
+      // claude: the prompt hook's head starts with the typed tag. On a finished
+      // run with a commission open, a person's line would restart it.
+      await reportTo(F2, { kind: '_working', source: 'prompt', prompt_head: '<freilauf-supervisor> From the supervisor of this Freilauf hub' })
+      equal(kinds(F2, 'followup_started'), 1, 'the echo with a head opens no second commission')
+      equal(lauf(F2).nudge_typed_at, null, 'and spends the window')
+      // cursor and hermes: the prompt hook carries no head.
+      equal((await supervise(SUP, ['nudge', shortIdOf(F2), 'And the changelog date, please.'])).code, 0, 'a second nudge')
+      equal(evPayloads(F2, 'followup_started').at(-1)?.via, 'supervisor', 'restarts the commission as the supervisor\'s')
+      await reportTo(F2, { kind: '_working', source: 'prompt' })
+      equal(kinds(F2, 'followup_started'), 2, 'the head-less echo changes nothing either')
+      equal(lauf(F2).nudge_typed_at, null, 'and spends the window')
+      // The control: a person typing after the echo is a person again.
+      await reportTo(F2, { kind: '_working', source: 'prompt' })
+      equal(evPayloads(F2, 'followup_started').at(-1)?.via, 'session', 'the next head-less line is the operator\'s')
+      await reportTo(F2, { kind: '_working', source: 'prompt', prompt_head: 'please also fix the tests' })
+      equal(kinds(F2, 'followup_started'), 4, 'and so is a line with a human head')
+      const page = await (await fetchPath(`/runs/${F2}`)).text()
+      contains(page, 'it opened a follow-up', 'the case file says what the nudge did')
+    })
+
+    await check('a nudge into a run waiting for help is the answer, marked as the supervisor\'s', async () => {
+      const H2 = await freshRun('asks a question')
+      isTrue((await flReport(H2, ['help', 'Which branch should I use?'])).ok, 'help')
+      equal(lauf(H2).status, 'waiting_help', 'waiting for help')
+      const n = await supervise(SUP, ['nudge', shortIdOf(H2), 'Use main.'])
+      equal(n.code, 0, `nudged (${n.stderr.trim()})`)
+      equal(n.json?.into, 'help', 'into a help call')
+      equal(lauf(H2).status, 'running', 'running again')
+      equal(lauf(H2).help_answer, 'Use main.', 'the answer is the nudge\'s text')
+      const ans = evPayloads(H2, 'help_answered')
+      equal(ans.length, 1, 'one answer')
+      equal(`${ans[0].via}:${ans[0].by}`, `supervisor:${SUP}`, 'by the supervisor')
+      await reportTo(H2, { kind: '_working', source: 'prompt', prompt_head: '<freilauf-supervisor>' })
+      equal(kinds(H2, 'help_answered'), 1, 'the echo answers nothing a second time')
+    })
+
+    await check('the nudge limit: three since the operator\'s last answer, then refused, and an answer resets it', async () => {
+      const N2 = await freshRun('gets nudged a lot')
+      for (let i = 1; i <= 3; i++) equal((await supervise(SUP, ['nudge', shortIdOf(N2), `nudge ${i}`])).code, 0, `nudge ${i}`)
+      const fourth = await supervise(SUP, ['nudge', shortIdOf(N2), 'nudge 4'])
+      equal(fourth.code, 1, 'the fourth is refused')
+      contains(fourth.stderr, 'ask the operator', 'with the way out')
+      contains(fourth.stderr, 'escalate', 'both of them')
+      equal((await caseOf(N2)).entries.filter(e => e.kind === 'message').length, 3, 'and not recorded')
+      equal((await postForm(`/api/runs/${N2}/case/answer`, { text: 'tell it to go ahead' })).status, 200, 'the operator answers')
+      equal((await supervise(SUP, ['nudge', shortIdOf(N2), 'go ahead'])).code, 0, 'the supervisor may nudge again')
+    })
+
+    await check('a nudge into a run whose agent is gone (dead pane) is refused and changes nothing', async () => {
+      const P2 = await freshRun('its agent exits')
+      const s = lauf(P2).tmux_session
+      await sh('tmux', ['set-option', '-t', `=${s}:`, 'remain-on-exit', 'on'])
+      await sh('tmux', ['send-keys', '-t', `=${s}:`, 'C-d'])
+      await waitFor(async () => (await sh('tmux', ['display', '-p', '-t', `=${s}:`, '#{pane_dead}'])).stdout.trim() === '1',
+        { what: 'the stub pane to die', timeoutMs: 10_000 })
+      const n = await supervise(SUP, ['nudge', shortIdOf(P2), 'still there?'])
+      equal(n.code, 1, 'refused')
+      contains(n.stderr, 'pane is dead', 'because the agent is gone')
+      equal((await caseOf(P2)).total, 0, 'nothing recorded')
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
+    })
+
+    await check('a nudge into a run without a session is refused and changes nothing', async () => {
+      const G2 = await freshRun('loses its session')
+      await sh('tmux', ['kill-session', '-t', `=${lauf(G2).tmux_session}`])
+      const n = await supervise(SUP, ['nudge', shortIdOf(G2), 'anyone there?'])
+      equal(n.code, 1, 'refused')
+      contains(n.stderr, 'no live session', 'because there is nobody to type into')
+      equal((await caseOf(G2)).total, 0, 'nothing recorded')
+      equal(kinds(G2, 'supervisor_message'), 0, 'no event either')
+    })
+
+    await check('fl-report reply from a running and a finished run: one entry each, nothing else changes, a replay is written once', async () => {
+      const R2 = await freshRun('replies while working')
+      const before = lauf(R2)
+      const r = await flReport(R2, ['reply', 'Committed; reporting in a minute.'])
+      isTrue(r.ok, 'reply accepted')
+      contains(r.stdout, 'case file', 'and fl-report prints the hub\'s answer into the agent\'s turn')
+      const after = lauf(R2)
+      equal(`${after.status}|${after.last_activity_at}|${after.help_text}`, `${before.status}|${before.last_activity_at}|${before.help_text}`,
+        'status, activity and help untouched')
+      equal(kinds(R2, 'progress'), 0, 'no progress event')
+      equal((await caseOf(R2)).entries.map(e => `${e.kind}:${e.author}:${e.text}`).join(','), 'reply:run:Committed; reporting in a minute.',
+        'a reply entry by the run')
+      const D2 = await freshRun('replies after it is done')
+      await reportDone(D2)
+      isTrue((await flReport(D2, ['reply', 'Nothing left to do.'])).ok, 'a finished run may reply')
+      equal(lauf(D2).status, 'done', 'still done')
+      equal(lauf(D2).followup_since, null, 'no follow-up opened')
+      equal((await caseOf(D2)).entries.filter(e => e.kind === 'reply').length, 1, 'one reply')
+      // The inbox replay: fl-report filed it because the hub's answer was lost.
+      writeFileSync(join(SB, 'runs', D2, 'inbox.jsonl'), JSON.stringify({ kind: 'reply', text: 'Nothing left to do.' }) + '\n')
+      await watcherTick()
+      equal((await caseOf(D2)).entries.filter(e => e.kind === 'reply').length, 1, 'the replay is not written twice')
+      const empty = await flReport(D2, ['reply'])
+      isFalse(empty.ok, 'an empty reply is refused by fl-report itself')
+      isFalse(existsSync(join(SB, 'runs', D2, 'inbox.jsonl')) && readFileSync(join(SB, 'runs', D2, 'inbox.jsonl'), 'utf8').includes('"reply"'),
+        'and not filed in the inbox')
+    })
+
+    await check('end with a reason: aborted and attributed to the supervisor, never to the operator', async () => {
+      const E2 = await freshRun('a daily job from long ago')
+      const e = await supervise(SUP, ['end', shortIdOf(E2), 'a daily job from two weeks ago; its slot matters more'])
+      equal(e.code, 0, `ended (${e.stderr.trim()})`)
+      equal(e.json?.outcome, 'aborted', 'the run was still open')
+      contains(e.json?.message ?? '', 'Unmerged work stays', 'the answer says what was left behind')
+      equal(lauf(E2).status, 'aborted', 'aborted')
+      const ab = evPayloads(E2, 'aborted')
+      equal(ab.length, 1, 'one abort')
+      equal(`${ab[0].by}|${ab[0].supervisor_run}`, `supervisor|${SUP}`, 'by the supervisor, naming its run')
+      contains(ab[0].reason ?? '', 'two weeks ago', 'with the reason')
+      isFalse(ab.some(p => p.by === 'user'), 'never "by user"')
+      const { abortedByFrom } = await import('../server/run-state.mjs')
+      equal(abortedByFrom(ab[0]), 'supervisor', 'the abort reads as the supervisor\'s')
+      const { endedByOperator } = await import('../server/triage.mjs')
+      equal(endedByOperator({ kind: 'report', hub_types: '[]' }, lauf(E2)), false, 'the deputy\'s operator-ended rule does not fire')
+      const act = (await caseOf(E2)).entries.at(-1)
+      equal(`${act.kind}:${act.data?.op}:${act.data?.outcome}`, 'action:end:aborted', 'an action entry')
+      const look = await supervise(SUP, ['look', shortIdOf(E2), '--json'])
+      equal(look.json?.due?.exclusion, 'ended_by_supervisor', 'and the run is no case any more')
+      const D3 = await freshRun('done, session still up')
+      await reportDone(D3)
+      equal((await supervise(SUP, ['nudge', shortIdOf(D3), 'one more thing'])).code, 0, 'a follow-up opened by a nudge')
+      const e2 = await supervise(SUP, ['end', shortIdOf(D3), 'nothing more to do here'])
+      equal(e2.json?.outcome, 'session_closed', 'a done run only loses its session')
+      equal(e2.json?.followup_abandoned, true, 'and its open follow-up is abandoned')
+      equal(lauf(D3).status, 'done', 'and stays done')
+      equal(evPayloads(D3, 'tmux_closed').at(-1)?.source, 'supervisor', 'closed by the supervisor')
+      const abandoned = db.prepare(`SELECT id, payload FROM events WHERE run_id=? AND kind='followup_abandoned' ORDER BY id DESC LIMIT 1`).get(D3)
+      equal(JSON.parse(abandoned.payload).source, 'supervisor', 'abandoned by the supervisor')
+      equal(endedByOperator({ kind: 'event', hub_types: '["followup_abandoned"]', event_id: abandoned.id }, lauf(D3)), false,
+        'which the deputy does not read as the operator either')
+      equal((await supervise(SUP, ['end', shortIdOf(D3), ' '])).code, 1, 'an end without a reason is refused')
+    })
+
+    await check('end on a failed run: it becomes aborted, attributed to the supervisor, and the case file says so', async () => {
+      const F2 = await freshRun('fails and keeps its session')
+      isTrue((await flReport(F2, ['failed', 'the build broke'])).ok, 'the run reports failed')
+      await waitFor(() => lauf(F2).status === 'failed', { what: `run ${F2} failed`, timeoutMs: 15_000 })
+      const e = await supervise(SUP, ['end', shortIdOf(F2), 'a failed attempt nobody will continue'])
+      equal(e.code, 0, `ended (${e.stderr.trim()})`)
+      equal(e.json?.outcome, 'aborted', 'a failed run is aborted, not merely closed')
+      contains(e.json?.message ?? '', 'is now aborted', 'and the supervisor is told so')
+      contains(e.json?.message ?? '', 'Unmerged work stays', 'with what was left behind')
+      equal(lauf(F2).status, 'aborted', 'its status is aborted')
+      const ab = evPayloads(F2, 'aborted').at(-1)
+      equal(`${ab?.by}|${ab?.supervisor_run}|${ab?.reason}`, `supervisor|${SUP}|a failed attempt nobody will continue`, 'attributed to the supervisor run, with its reason')
+      const entry = (await caseOf(F2)).entries.at(-1)
+      equal(`${entry.kind}|${entry.author}|${entry.data?.op}|${entry.data?.outcome}|${entry.data?.status_before}`,
+        `action|${SUP}|end|aborted|failed`, 'the case entry records the end, its outcome and the status it had')
+    })
+
+    await check('a question: one at a time, answered by a choice or a text, and a muted run is recorded but not announced', async () => {
+      const Q2 = await freshRun('needs a decision')
+      const q = await supervise(SUP, ['question', shortIdOf(Q2), 'Merge the branch or drop it?', '--choice', 'merge', '--choice', 'drop'])
+      equal(q.code, 0, `asked (${q.stderr.trim()})`)
+      equal(q.json?.announced, true, 'announced')
+      equal(evPayloads(Q2, 'notified').at(-1)?.type, 'supervisor_question', 'one message of its own type')
+      const second = await supervise(SUP, ['question', shortIdOf(Q2), 'And the docs?'])
+      equal(second.code, 1, 'a second question is refused')
+      contains(second.stderr, 'already open', 'while the first is open')
+      const page = await (await fetchPath(`/runs/${Q2}`)).text()
+      contains(page, '<button name="choice" value="merge" formnovalidate', 'the page offers the choices as buttons')
+      contains(page, 'waiting for your answer', 'and says a question waits')
+      equal((await postForm(`/api/runs/${Q2}/case/answer`, { choice: 'merge', back: `/runs/${Q2}#run-case` }, { asBrowser: true })).status, 303, 'one click answers')
+      equal((await caseOf(Q2)).entries.at(-1).data?.choice, 'merge', 'the choice is the answer')
+      equal((await supervise(SUP, ['question', shortIdOf(Q2), 'And the docs?'])).code, 0, 'after the answer a new question may come')
+      equal((await postForm(`/api/runs/${Q2}/case/answer`, { text: 'leave the docs' })).status, 200, 'answered by text')
+      const blank = await postForm(`/api/runs/${Q2}/case/answer`, { text: '   ', back: `/runs/${Q2}#run-case` }, { asBrowser: true })
+      contains(blank.headers.get('location') ?? '', 'case_error=empty', 'a blank answer from the page comes back with the reason')
+      contains(await (await fetchPath(`/runs/${Q2}?case_error=empty`)).text(), 'id="case-error"', 'shown in the case section')
+      const M2 = await freshRun('muted run')
+      await postForm(`/api/runs/${M2}/notify`, { on: '0' })
+      const m = await supervise(SUP, ['question', shortIdOf(M2), 'Is this still needed?'])
+      equal(m.code, 0, 'asked')
+      equal(m.json?.announced, false, 'not announced')
+      contains(m.json?.message ?? '', 'Recorded, not announced: the run is muted', 'and the supervisor is told so')
+      equal(evPayloads(M2, 'notify_muted').at(-1)?.type, 'supervisor_question', 'written down as muted')
+      equal((await caseOf(M2)).entries.at(-1).kind, 'question', 'the question stands in the case file')
+    })
+
+    /** bin/fl-api of THIS checkout, the way an external resolver on the hub's machine calls it. */
+    const api = (args, base = BASE) => new Promise((resolve) => {
+      const env = { ...process.env, FL_HUB_URL: base }
+      execFile(join(PROJECT, 'bin', 'fl-api'), args, { env, encoding: 'utf8', timeout: 30_000 }, (err, stdout, stderr) => {
+        let json = null
+        try { json = JSON.parse(stdout) } catch {}
+        resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr), json })
+      })
+    })
+
+    await check('escalations: the whole life cycle through fl-api, the way an external resolver drives it', async () => {
+      const X2 = await freshRun('its credentials expired')
+      const bad = await supervise(SUP, ['escalate', shortIdOf(X2), 'weather', 'cloudy'])
+      equal(bad.code, 1, 'an unknown class is refused')
+      contains(bad.stderr, 'hub_defect, server_service, credentials', 'naming the list')
+      const r = await supervise(SUP, ['escalate', shortIdOf(X2), 'credentials', 'The API token expired;\nthe run cannot pull.'])
+      equal(r.code, 0, `raised (${r.stderr.trim()})`)
+      const id = r.json?.escalation
+      isTrue(Number.isInteger(id), 'with an id')
+      equal(r.json?.announced, true, 'grace 0: the operator is told at once')
+      equal(evPayloads(X2, 'notified').at(-1)?.type, 'escalation', 'one message of its own type')
+      equal((await caseOf(X2)).entries.at(-1).kind, 'escalated', 'an escalated entry')
+      equal((await supervise(SUP, ['escalate', shortIdOf(X2), 'credentials', 'again'])).code, 1, 'the same class again while open is refused')
+
+      const list = await api(['--raw', '/api/escalations', 'state=open'])
+      equal(list.code, 0, 'GET exits 0')
+      isTrue(list.json?.ok && /Z$/.test(list.json.now), 'ok, and now in UTC')
+      const it = list.json.escalations.find(x => x.id === id)
+      equal(Object.keys(it).join(','), 'id,created_at,class,summary,state,run,claimed_by,claimed_at,resolved_at,outcome,note', 'the fields of the contract, in order')
+      equal(Object.keys(it.run).join(','), 'id,short_id,title,agent,repo,harness,status', 'and of its run')
+      const one = await api(['--raw', `/api/escalations/${id}`])
+      equal(one.code, 0, 'GET one escalation exits 0')
+      equal(JSON.stringify(one.json?.escalation), JSON.stringify(it), 'in exactly the shape of the list item')
+      isTrue(one.json?.ok && /Z$/.test(one.json?.now ?? ''), 'ok, and now in UTC')
+      for (const nope of ['999999', 'abc']) {
+        const r404 = await api(['--raw', '--status', `/api/escalations/${nope}`])
+        equal(r404.code, 1, `an unknown id (${nope}) exits 1`)
+        contains(r404.stderr, 'HTTP 404', 'with a 404')
+      }
+      isTrue(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(it.created_at), 'ISO 8601 with Z')
+      equal(`${it.class}|${it.summary}|${it.state}|${it.run.id}`, `credentials|The API token expired; the run cannot pull.|open|${X2}`, 'one line, about the run')
+      equal(`${it.claimed_by}|${it.claimed_at}|${it.resolved_at}|${it.outcome}|${it.note}`, 'null|null|null|null|null', 'nothing decided yet')
+      const unknownState = await api(['--raw', '/api/escalations', 'state=pending'])
+      equal(unknownState.code, 1, 'an unknown state word exits 1')
+      contains(unknownState.json?.error ?? '', 'open, claimed, resolved, dismissed, all', 'and names the valid ones')
+
+      const noBy = await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/claim`])
+      equal(noBy.code, 1, 'a claim without by exits 1')
+      contains(noBy.stderr, 'HTTP 400', 'with a 400')
+      const claim = await api(['--raw', '-X', 'POST', `/api/escalations/${id}/claim`, 'by=collector-1'])
+      equal(claim.code, 0, 'claim exits 0')
+      equal(`${claim.json?.escalation?.state}|${claim.json?.escalation?.claimed_by}`, 'claimed|collector-1', 'claimed by the resolver')
+      const again = await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/claim`, 'by=collector-2'])
+      equal(again.code, 1, 'a second claim exits 1')
+      contains(again.stderr, 'HTTP 409', 'with a 409')
+      equal((await api(['--raw', '/api/escalations', 'state=open'])).json.escalations.some(x => x.id === id), false, 'no longer in the open list')
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${id}/release`])).code, 0, 'release')
+      const rel2 = await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/release`])
+      contains(rel2.stderr, 'HTTP 409', 'releasing an open one is a 409')
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${id}/claim`, 'by=collector-1'])).code, 0, 'claimed again')
+      const noOutcome = await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/resolve`, 'outcome=fixed'])
+      contains(noOutcome.stderr, 'HTTP 400', 'an outcome outside the list is a 400')
+      const res = await api(['--raw', '-X', 'POST', `/api/escalations/${id}/resolve`, 'outcome=solved', 'note=Token rotated.'])
+      equal(res.code, 0, 'resolve exits 0')
+      equal(`${res.json?.escalation?.state}|${res.json?.escalation?.outcome}|${res.json?.escalation?.note}`, 'resolved|solved|Token rotated.', 'resolved')
+      isTrue(/Z$/.test(res.json?.escalation?.resolved_at ?? ''), 'with its time')
+      const entry = (await caseOf(X2)).entries.at(-1)
+      equal(`${entry.kind}|${entry.author}|${entry.text}|${entry.data?.outcome}`, 'resolved|resolver:collector-1|Token rotated.|solved',
+        'the case file hears it from the resolver who claimed it')
+      const due = await supervise(SUP, ['cases', '--due', '--limit', '50'])
+      equal(due.json?.cases?.find(c => c.run === X2)?.reason, 'resolved', 'and the case is due again with the result')
+      contains((await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/resolve`, 'outcome=solved'])).stderr, 'HTTP 409', 'resolving twice is a 409')
+      contains((await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/dismiss`])).stderr, 'HTTP 409', 'dismissing a resolved one too')
+      const nf = await api(['--raw', '--status', '-X', 'POST', '/api/escalations/999999/claim', 'by=x'])
+      equal(nf.code, 1, 'an unknown id exits 1')
+      contains(nf.stderr, 'HTTP 404', 'with a 404')
+      equal((await api(['--raw', '/api/escalations', 'state=resolved'])).json.escalations[0]?.id, id, 'it is in the resolved list')
+      const r3 = await supervise(SUP, ['escalate', shortIdOf(X2), 'quota_or_credit', 'The provider credit is used up.'])
+      const byRes = await api(['--raw', '-X', 'POST', `/api/escalations/${r3.json?.escalation}/resolve`, 'outcome=operator', 'by=collector-2'])
+      equal(byRes.code, 0, 'resolved without a claim')
+      equal((await caseOf(X2)).entries.at(-1).author, 'resolver:collector-2', 'by the resolver it named')
+      const r5 = await supervise(SUP, ['escalate', shortIdOf(X2), 'external_system', 'The upstream mirror answers 503.'])
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${r5.json?.escalation}/claim`, 'by=collector-3'])).code, 0, 'claimed')
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${r5.json?.escalation}/resolve`, 'outcome=unsolved', 'operator=1'])).code, 0, 'resolved')
+      equal((await caseOf(X2)).entries.at(-1).author, 'resolver:collector-3', 'the contract route takes no operator marker: the rule of 7.27 holds')
+
+      const r2 = await supervise(SUP, ['escalate', shortIdOf(X2), 'server_service', 'The database on the machine is down.'])
+      const id2 = r2.json?.escalation
+      const html = await (await fetchPath('/escalations')).text()
+      contains(html, `id="escalation-${id2}"`, 'the page lists the open one')
+      contains(html, `action="/escalations/${id2}/dismiss"`, 'with dismiss')
+      contains(html, `action="/escalations/${id2}/resolve"`, 'and resolve, on the page\'s own routes')
+      contains(html, 'href="/escalations" class="on">Escalations (1)', 'the nav entry carries the count')
+      equal((await postForm(`/escalations/${id2}/dismiss`, { state: 'open' }, { asBrowser: true })).status, 303, 'dismissed from the page')
+      equal((await caseOf(X2)).entries.at(-1).data?.outcome, 'dismissed', 'the case file hears that too')
+      const late = await postForm(`/escalations/${id2}/resolve`, { state: 'open', outcome: 'solved' }, { asBrowser: true })
+      contains(late.headers.get('location') ?? '', 'esc_error=changed', 'a button that comes too late comes back with the reason')
+      contains(await (await fetchPath('/escalations?state=open&esc_error=changed')).text(), 'id="escalation-error"', 'shown on the page')
+      const r4 = await supervise(SUP, ['escalate', shortIdOf(X2), 'needs_access', 'The run needs read access to the shared bucket.'])
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${r4.json?.escalation}/claim`, 'by=collector-1'])).code, 0, 'claimed by a resolver')
+      equal((await postForm(`/escalations/${r4.json?.escalation}/resolve`, { state: 'open', outcome: 'solved', note: 'granted' }, { asBrowser: true })).status, 303,
+        'the operator resolves it from the page')
+      equal((await caseOf(X2)).entries.at(-1).author, 'operator', 'and the case file names the operator, not the resolver')
+      const all = await api(['--raw', '/api/escalations', 'state=all', 'limit=1'])
+      equal(all.json?.escalations?.length, 1, 'limit bounds the list')
+
+      const down = await api(['--raw', '/api/escalations'], 'http://127.0.0.1:1')
+      equal(down.code, 3, 'a hub that is down exits 3, not "nothing to do"')
+    })
+
+    // The worked example of docs/escalations.md ("Repairing by commissioning a
+    // run"), driven exactly as written there: a resolver that cannot edit files
+    // on the hub's machine starts a run that does the repair, on a new branch.
+    await check('a resolver repairs by commissioning a run: POST /api/runs as the contract document shows it', async () => {
+      const r = await api(['--raw', '-X', 'POST', '/api/runs', `repo_id=${repoId}`, 'harness=claude',
+        'prompt=Escalation #12: the nightly import fails because the fixture file is missing. Restore it and make the import test pass.',
+        'branch_mode=neu', 'branch_pattern=fix/{kurz}', 'expected_minutes=30', 'title=Repair for escalation #12'])
+      equal(r.code, 0, `started (${r.stderr.trim()})`)
+      equal(Object.keys(r.json ?? {}).join(','), 'ok,runId', 'the answer is {ok, runId} and nothing else')
+      isTrue(/^[0-9a-f-]{36}$/.test(r.json?.runId ?? ''), 'runId is the full uuid')
+      const id = r.json.runId
+      await sessionMerken(id)
+      const row = lauf(id)
+      equal(`${row.status}|${row.title}|${row.branch_mode}`, 'running|Repair for escalation #12|neu', 'a running run with that title')
+      equal(row.branch_expected, `fix/${shortIdOf(id)}`, '{kurz} became its short id: a branch of its own')
+      isTrue(!!row.tmux_session, 'the answer came after the launch: the session already stands')
+      const missing = await api(['--raw', '--status', '-X', 'POST', '/api/runs', `repo_id=${repoId}`, 'harness=claude', 'branch_mode=neu', 'branch_pattern=fix/{kurz}'])
+      equal(missing.code, 1, 'a run without a prompt exits 1')
+      contains(missing.stderr, 'HTTP 400', 'with a 400')
+      equal(missing.json?.ok, false, 'and {ok:false, error}')
+      isTrue(typeof missing.json?.error === 'string' && missing.json.error.length > 0, 'naming the problem')
+      // Ended by the operator, so it is no case for the clock checks below.
+      equal((await postForm(`/api/runs/${id}/kill`, {})).status, 200, 'ended again')
+    })
+
+    // ---- stage C: the clock ----
+    // The suite owns the clock (FREILAUF_SUPERVISION_OFF is set in the hub and in
+    // this process): every pass below is driven here, in this process, against
+    // the sandbox database, with the fence lifted for exactly that call.
+    await prepareWatcher()
+    const clock = await import('../server/supervision-clock.mjs')
+    const sched = await import('../server/scheduler.mjs')
+    const tickAt = async (nowMs, { reset = true } = {}) => {
+      if (reset) clock.resetSupervisionClock()
+      const keep = process.env.FREILAUF_SUPERVISION_OFF
+      delete process.env.FREILAUF_SUPERVISION_OFF
+      try { return await clock.supervisionTick(nowMs) } finally { process.env.FREILAUF_SUPERVISION_OFF = keep }
+    }
+    const HOUR = 3600_000
+    const count = (table) => db.prepare(`SELECT count(*) c FROM ${table}`).get().c
+    const typesOf = (runId, kind) => evPayloads(runId, kind).map(p => p?.type)
+    // The pipeline must be on for the clock — and then the hub's own scheduler
+    // would start every scheduled agent the earlier groups left behind. They are
+    // switched off for these checks and switched back on at the end.
+    const parked = db.prepare('SELECT id FROM agents WHERE active = 1 AND supervisor = 0').all().map(a => a.id)
+    db.prepare(`UPDATE agents SET active = 0 WHERE id IN (${parked.map(() => '?').join(',') || 'NULL'})`).run(...parked)
+    let ROUND1 = null
+    let ROUND3 = null
+    let D1 = null
+
+    await check('the clock: a quiet hub starts nothing and writes nothing', async () => {
+      // The round "Start now" began at the top of this group is over.
+      equal((await postForm(`/api/runs/${SUP}/kill`, {})).status, 200, 'the first round is ended')
+      // Whatever the earlier checks left due is not these checks' business.
+      db.prepare('UPDATE runs SET supervision_off = 1 WHERE supervisor = 0').run()
+      sk.setSetting('pipeline_on', '0')
+      equal((await tickAt(Date.now())).quiet, 'pipeline_off', 'pipeline off: quiet')
+      sk.setSetting('pipeline_on', '1')
+      // An end assesses what the run left behind after it answers, so the kill
+      // above (and the ends of the checks before) may still write an event or
+      // two. Measure the clock pass against a settled count, not against those.
+      let settled = -1
+      for (let i = 0; i < 20 && settled !== count('events'); i++) {
+        settled = count('events')
+        await new Promise(r => setTimeout(r, 750))
+      }
+      const runs = count('runs')
+      const events = count('events')
+      const r = await tickAt(Date.now() + 2 * HOUR)
+      equal(r.quiet, 'nothing_due', 'nothing is due')
+      equal(count('runs'), runs, 'no run was started')
+      equal(count('events'), events, 'and no event written')
+      const fenced = await clock.supervisionTick(Date.now() + 2 * HOUR)
+      equal(fenced.off, true, 'with the fence set, the clock does nothing at all')
+    })
+
+    await check('one case due: one round, with the case in its prompt and in fl-supervise cases; a second pass starts nothing', async () => {
+      D1 = await freshRun('waits in the clock test')
+      makeWaiting(D1, 45)
+      const r = await tickAt(Date.now() + 2 * HOUR)
+      ROUND1 = r.started
+      isTrue(!!ROUND1, `a round was started (${JSON.stringify(r)})`)
+      await sessionMerken(ROUND1)
+      equal(lauf(ROUND1).agent_id, supAgentId, 'a run of the supervisor agent')
+      equal(lauf(ROUND1).supervisor, 1, 'carrying the flag')
+      const prompt = promptOf(ROUND1)
+      contains(prompt, 'This supervision round (written by the hub)', 'the hub wrote the case block')
+      contains(prompt, shortIdOf(D1), 'naming the case')
+      contains(prompt, 'its agent waits for input', 'with the reason')
+      contains(prompt, '<data>waits in the clock test', 'the title fenced as data')
+      contains(prompt, 'Never call `fl-report help`', 'and the standing lines')
+      const marker = evPayloads(ROUND1, 'supervision_round')[0]
+      equal(marker?.cases?.map(c => c.run).join(','), D1, 'the round marker holds exactly its case')
+      const c = await supervise(ROUND1, ['cases'])
+      equal(c.code, 0, `cases answers (${c.stderr.trim()})`)
+      equal(c.json?.round, true, 'this round\'s list')
+      equal(c.json?.cases?.map(x => x.run).join(','), D1, 'exactly this round\'s case')
+      equal(c.json?.cases?.[0]?.reason, 'waiting_input', 'with the reason it was handed out for')
+      contains((await supervise(ROUND1, ['cases', '--text'])).stdout, "This round's 1 case(s)", 'and readable')
+      isTrue(!!(await caseOf(D1)).state.last_round_at, 'the case knows a round took it')
+      // At the real time: two hours on, the round would be past its own bound.
+      const second = await tickAt(Date.now())
+      equal(second.quiet, 'in_flight', 'a second pass while the round runs')
+      isFalse(!!second.started, 'starts nothing')
+    })
+
+    await check('a reply after the look makes the case due inside the interval; the round\'s done is not announced', async () => {
+      const short = shortIdOf(D1)
+      const look = await supervise(ROUND1, ['look', short])
+      equal(look.code, 0, `the round looks (${look.stderr.trim()})`)
+      contains(look.stdout, 'Due: its agent waits for input', 'and sees why it was handed out, not "looked at recently"')
+      isFalse((await supervise(ROUND1, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === D1), 'looked at: not due now')
+      equal((await supervise(ROUND1, ['cases'])).json.cases[0].looked, true, 'the round\'s own list says it was looked at')
+      isTrue((await flReport(D1, ['reply', 'I am waiting for the API key'])).ok, 'the run replies')
+      equal((await supervise(ROUND1, ['cases', '--due', '--limit', '50'])).json.cases.find(x => x.run === D1)?.reason, 'reply',
+        'due again at once, with the reply as the reason')
+      isTrue((await flReport(ROUND1, ['done', 'looked at one case'])).ok, 'the round reports done')
+      await waitFor(() => lauf(ROUND1).status === 'done', { what: 'round done', timeoutMs: 15_000 })
+      isFalse(typesOf(ROUND1, 'notified').includes('done'), 'its done is not announced')
+      equal(typesOf(ROUND1, 'notify_routed').join(','), 'done', 'it is routed away, and said so')
+      equal(evPayloads(ROUND1, 'notify_routed')[0]?.route, 'round', 'as a round\'s own end')
+      equal(db.prepare('SELECT count(*) c FROM report_notes WHERE run_id=?').get(ROUND1).c, 0, 'and the deputy gets no note')
+      equal((await tickAt(Date.now() + 10 * 60_000)).quiet, 'interval', 'the next round waits for the interval')
+    })
+
+    await check('a stuck round is ended by the hub and announced once, and supervision goes on', async () => {
+      const r2 = await tickAt(Date.now() + 2 * HOUR)
+      const ROUND2 = r2.started
+      isTrue(!!ROUND2, 'after the interval the reply starts the next round')
+      await sessionMerken(ROUND2)
+      equal(evPayloads(ROUND2, 'supervision_round')[0]?.cases?.[0]?.reason, 'reply', 'with the reply as its reason')
+      const late = Date.now() + 2 * HOUR + 2 * HOUR + 60_000
+      const r = await tickAt(late)
+      equal(r.ended.join(','), ROUND2, 'the round open past max(2 x interval, 3 x expected) is ended')
+      equal(lauf(ROUND2).status, 'aborted', 'aborted')
+      equal(evPayloads(ROUND2, 'aborted')[0]?.by, 'hub', 'by the hub, not the operator')
+      equal(typesOf(ROUND2, 'notified').filter(x => x === 'supervision_round_stuck').length, 1, 'and announced')
+      ROUND3 = r.started
+      isTrue(!!ROUND3, 'the same pass starts the next round: the case nobody looked at is still due')
+      await sessionMerken(ROUND3)
+      const again = await tickAt(Date.now() + 60_000)
+      equal(again.ended.length, 0, 'a new round inside its bound is left alone')
+      equal(again.quiet, 'in_flight', 'and holds the clock')
+      equal(typesOf(ROUND2, 'notified').filter(x => x === 'supervision_round_stuck').length, 1, 'the notice is not repeated')
+    })
+
+    await check('a round\'s failure takes the normal route', async () => {
+      isTrue((await flReport(ROUND3, ['failed', 'the round could not finish'])).ok, 'the round fails')
+      await waitFor(() => lauf(ROUND3).status === 'failed', { what: 'round failed', timeoutMs: 15_000 })
+      isTrue(db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind='notified:failed'`).get(ROUND3) !== undefined, 'its failure is dealt with')
+      isFalse(evPayloads(ROUND3, 'notify_routed').some(p => p?.route === 'round'), 'and not routed away as a round\'s own end')
+    })
+
+    let ROUND4 = null
+    let ESC = null
+    await check('six rounds looking at the same state park the case; the run page un-parks it', async () => {
+      const P = await freshRun('goes nowhere')
+      makeWaiting(P, 45)
+      const start = await postForm('/agents/start', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(start.status, 303, '"Start now" runs the due check by hand')
+      ROUND4 = (start.headers.get('location') ?? '').replace('/runs/', '')
+      equal(lauf(ROUND4)?.agent_id, supAgentId, 'a round of the supervisor agent')
+      await sessionMerken(ROUND4)
+      isTrue(evPayloads(ROUND4, 'supervision_round')[0]?.cases?.some(c => c.run === P), 'and its round takes the case')
+      equal(evPayloads(ROUND4, 'supervision_round')[0]?.source, 'operator', 'started by the operator')
+      const busy = await postForm('/agents/start', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(busy.status, 400, 'a second "Start now" while it runs is refused')
+      contains(await busy.text(), 'still open', 'saying why')
+      let last = null
+      for (let i = 1; i <= 2; i++) last = await supervise(ROUND4, ['look', shortIdOf(P), '--json'])
+      equal(`${last.json?.looks_unchanged}|${last.json?.parked}`, '1|false', 'one round looking twice is one round, not two')
+      // Five more rounds look once each at the same state. Written as rows (a
+      // supervisor run and its round event), so no five sessions are started;
+      // each is ended after its look, so none holds the clock afterwards.
+      for (let i = 2; i <= 6; i++) {
+        const id = randomUUID()
+        db.prepare(`INSERT INTO runs(id, repo_id, harness, prompt, branch_mode, expected_minutes, status, supervisor)
+          VALUES(?, ?, 'claude', 'x', 'keiner', 10, 'running', 1)`).run(id, repoId)
+        db.prepare(`INSERT INTO events(run_id, kind, payload) VALUES(?, 'supervision_round', '{"source":"clock","cases":[]}')`).run(id)
+        last = await supervise(id, ['look', shortIdOf(P), '--json'])
+        db.prepare(`UPDATE runs SET status='done', ended_at=datetime('now') WHERE id=?`).run(id)
+      }
+      equal(last.json?.looks_unchanged, 6, 'six rounds looked at the same state')
+      equal(last.json?.parked, true, 'the sixth round parks it')
+      contains(last.json?.message ?? '', 'parked the case', 'and the supervisor is told')
+      const k = await caseOf(P)
+      isTrue(!!k.state.parked_at, 'parked')
+      equal(k.entries.at(-1).data?.op, 'park', 'a park entry by the hub')
+      equal(typesOf(P, 'notified').filter(x => x === 'supervision_parked').length, 1, 'the operator is told once')
+      isFalse((await supervise(ROUND4, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === P), 'a parked case is not due')
+      const page = await (await fetchPath(`/runs/${P}`)).text()
+      contains(page, 'id="case-unpark"', 'the run page offers to un-park it')
+      const settings = await (await fetchPath('/settings/supervision')).text()
+      contains(settings, 'id="supervision-active"', 'Settings → Supervision names the supervisor')
+      contains(settings, `/agents/edit?id=${supAgentId}`, 'linking its form')
+      contains(settings, 'id="supervision-parked"', 'and lists the parked cases')
+      contains(settings, `/runs/${P}#run-case`, 'this one among them')
+      contains(settings, 'id="supervision-last-round"', 'and the last round')
+      equal((await postForm(`/api/runs/${P}/case/unpark`, { back: `/runs/${P}#run-case` }, { asBrowser: true })).status, 303, 'un-parked')
+      equal((await caseOf(P)).state.parked_at, null, 'no longer parked')
+      isTrue((await supervise(ROUND4, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === P), 'and due again')
+      // An escalation for the timed notices below, with a grace above 0: not announced at once.
+      sk.setSetting('supervision_escalation_grace_minutes', '30')
+      const esc = await supervise(ROUND4, ['escalate', shortIdOf(P), 'credentials', 'The token of the clock test expired.'])
+      ESC = esc.json?.escalation
+      equal(esc.json?.announced, false, 'with a grace, an escalation is not announced when it is raised')
+      isTrue((await flReport(ROUND4, ['done', 'parked one'])).ok, 'the round ends')
+    })
+
+    await check('Settings → Supervision saves its numbers, empty as the default, and refuses one out of range', async () => {
+      const keys = ['supervision_interval_minutes', 'supervision_cases_per_round', 'supervision_wait_minutes',
+        'supervision_nudge_limit', 'supervision_escalation_grace_minutes']
+      const stored = (k) => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value ?? null
+      const ok = await postForm('/settings/supervision', { supervision_interval_minutes: '', supervision_cases_per_round: '5',
+        supervision_wait_minutes: '45', supervision_nudge_limit: '2', supervision_escalation_grace_minutes: '30' }, { asBrowser: true })
+      equal(ok.status, 303, 'saved')
+      equal(keys.map(stored).join('|'), '|5|45|2|30', 'what was posted, empty kept empty')
+      const html = await (await fetchPath('/settings/supervision')).text()
+      contains(html, 'name="supervision_cases_per_round" type="number" min="1" max="50" step="1" value="5"', 'the page shows the stored value')
+      contains(html, 'Empty: 60. In effect: 60.', 'and what an empty field means')
+      const bad = await postForm('/settings/supervision', { supervision_interval_minutes: '2', supervision_cases_per_round: '7' }, { asBrowser: true })
+      equal(bad.status, 400, 'an interval under five minutes is refused')
+      contains(await bad.text(), 'Nothing was saved', 'saying so')
+      equal(stored('supervision_cases_per_round'), '5', 'and the valid field next to it was not saved either')
+      contains(await (await fetchPath('/settings')).text(), 'href="/settings/supervision"', 'the settings page links it')
+      for (const [k, v] of [['supervision_cases_per_round', ''], ['supervision_wait_minutes', ''], ['supervision_nudge_limit', '']]) sk.setSetting(k, v)
+    })
+
+    await check('unflagging the agent silences the clock and the platform rules', async () => {
+      const a = agent('e2e-supervisor')
+      const r = await postForm(`/agents/edit?id=${a.id}`, {
+        repo_id: String(repoId), name: 'e2e-supervisor', harness: 'claude', prompt: 'look after the runs',
+        branch_mode: 'keiner', expected_minutes: '20', schedule_kind: 'manuell', active: '1',
+      }, { asBrowser: true })
+      equal(r.status, 303, 'saved without the flag')
+      equal(agent('e2e-supervisor').supervisor, 0, 'unflagged')
+      const W = await freshRun('waits after supervision ended')
+      makeWaiting(W, 45)
+      const runs = count('runs')
+      // Inside the escalation's grace, so the timed notices below start from nothing.
+      equal((await tickAt(Date.now() + 5 * 60_000)).quiet, 'no_supervisor', 'the clock is quiet')
+      equal(count('runs'), runs, 'and starts nothing although a run waits')
+      isFalse(promptOf(W).includes('fl-report reply'), 'a new run is told nothing about supervision')
+      const page = await (await fetchPath('/settings/supervision')).text()
+      contains(page, 'id="supervision-none"', 'the settings page says nobody supervises')
+    })
+
+    await check('timed escalation notices: unclaimed past the grace, claimed and unresolved for 24 hours — each once', async () => {
+      const now = Date.now()
+      equal((await tickAt(now + 10 * 60_000)).escalations, 0, 'inside the grace: nothing')
+      const P = db.prepare('SELECT run_id FROM escalations WHERE id=?').get(ESC).run_id
+      equal((await tickAt(now + 31 * 60_000)).escalations, 1, 'past it: announced, with no supervisor left')
+      equal(typesOf(P, 'notified').filter(x => x === 'escalation').length, 1, 'one message')
+      equal((await tickAt(now + 40 * 60_000)).escalations, 0, 'and not again')
+      equal((await postForm(`/api/escalations/${ESC}/claim`, { by: 'collector-c' })).status, 200, 'claimed')
+      equal((await tickAt(now + 23 * HOUR)).escalations, 0, 'claimed for less than a day: nothing')
+      equal((await tickAt(now + 25 * HOUR)).escalations, 1, 'unresolved after a day: announced')
+      equal((await tickAt(now + 26 * HOUR)).escalations, 0, 'once')
+      equal(typesOf(P, 'notified').filter(x => x === 'escalation').length, 2, 'two messages in all')
+      sk.setSetting('supervision_escalation_grace_minutes', '')
+    })
+
+    await check('the 24-hour rule: a run that blocks its schedule for a day is announced, with no supervisor at all', async () => {
+      const ag = db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode, expected_minutes, schedule_kind, schedule, active)
+        VALUES(?, 'e2e-blocked', 'claude', 'p', 'keiner', 45, 'cron', '0 3 * * *', 0) RETURNING *`).get(repoId)
+      const B = await freshRun('stuck for a day')
+      db.prepare('UPDATE runs SET agent_id=? WHERE id=?').run(ag.id, B)
+      makeWaiting(B, 25 * 60)
+      const now = Date.now()
+      isTrue(await sched.scheduleSkippedBusy(B, ag, '2026-01-01T03:00', { nowMs: now }), 'the skipped slot announces it')
+      equal(typesOf(B, 'notified').filter(x => x === 'schedule_blocked').length, 1, 'one message of its own type')
+      isFalse(await sched.scheduleSkippedBusy(B, ag, '2026-01-02T03:00', { nowMs: now + 12 * HOUR }), 'half a day later: not again')
+      isTrue(await sched.scheduleSkippedBusy(B, ag, '2026-01-03T03:00', { nowMs: now + 25 * HOUR }), 'a day later: again')
+      equal(evPayloads(B, 'schedule_skipped').length, 3, 'every skipped slot is still recorded')
+      equal(db.prepare(`SELECT count(*) c FROM schedule_log WHERE agent_id=? AND outcome='skipped' AND reason='busy'`).get(ag.id).c, 3,
+        'and logged')
+      // …and the way production gets there: the scheduler's own tick skips the
+      // slot of an agent due every minute whose run is stuck. The hub's tick may
+      // get there first; either way the slot is skipped and the run announced.
+      const ag2 = db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode, expected_minutes, schedule_kind, schedule, active)
+        VALUES(?, 'e2e-blocked-tick', 'claude', 'p', 'keiner', 45, 'cron', '* * * * *', 1) RETURNING *`).get(repoId)
+      const B2 = await freshRun('stuck for a day, met by the tick')
+      db.prepare('UPDATE runs SET agent_id=? WHERE id=?').run(ag2.id, B2)
+      makeWaiting(B2, 25 * 60)
+      await sched.tick()
+      try {
+        await waitFor(() => typesOf(B2, 'notified').includes('schedule_blocked'), { what: 'schedule_blocked from the tick', timeoutMs: 75_000, taktMs: 1000 })
+        isTrue(evPayloads(B2, 'schedule_skipped').length >= 1, 'the tick skipped the slot')
+        equal(lauf(B2).status, 'running', 'started nothing in its place')
+        equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(ag2.id).c, 1, 'no second run of the agent')
+      } finally {
+        db.prepare('UPDATE agents SET active = 0 WHERE id = ?').run(ag2.id)
+      }
+    })
+
+    // Back as the earlier groups left it: their agents on, the pipeline off.
+    db.prepare(`UPDATE agents SET active = 1 WHERE id IN (${parked.map(() => '?').join(',') || 'NULL'})`).run(...parked)
+    sk.setSetting('pipeline_on', '0')
   }
 
   // ------------------------------------------------------------------

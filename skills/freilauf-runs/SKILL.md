@@ -30,7 +30,15 @@ fl-api --url                                  # print the hub base URL
 ```
 
 Repeat a name to send a list (`skills=unlazy skills=other`). Exit code 0 = HTTP
-2xx, 1 = HTTP error (body still printed), 3 = the hub did not answer.
+2xx, 1 = HTTP error (body still printed), 3 = the hub did not answer, 4 = the
+request timed out (the hub is there but slow; a POST may have happened — look
+before repeating it).
+
+**Runs that get stuck, and somebody who looks after them for you:** a hub can
+have a supervisor agent that the hub starts whenever a run waits, fails or will
+not merge — `../freilauf-supervision/SKILL.md`. A run's case file
+(`fl-api /api/runs/<uuid>/case`) holds what that supervisor, the run and the
+operator said about it.
 
 **Before deciding a harness / provider / model / effort, read
 `../freilauf-models/SKILL.md`** — and the operator's saved setups
@@ -383,7 +391,7 @@ events and incidents stay.
 
 | action | call | what it does |
 |---|---|---|
-| stop / cancel / close | `-X POST /api/runs/<id>/kill` | kills the tmux session, and then depends on the status: `running`/`waiting_help` → `aborted` + leftover work assessed + flows fired; `scheduled`/`deferred` → `aborted` (this is how you cancel one); **`done`/`failed`/`aborted` → the session only**, event `tmux_closed`, the clean record is *not* rewritten |
+| stop / cancel / close | `-X POST /api/runs/<id>/kill` | kills the tmux session, and then depends on the status: `running`/`waiting_help` → `aborted` + leftover work assessed + flows fired; `scheduled`/`deferred` → `aborted` (this is how you cancel one); **`done`/`aborted` → the session only**, event `tmux_closed`, the clean record is *not* rewritten; **`failed` → `aborted`** (a click that lands after the watcher wrote `failed` is still a cancel) |
 | force a deferred start | `-X POST /api/runs/<id>/start` | only `deferred`; skips the budget gate, event `forced_start` |
 | run it again | `-X POST /api/runs/<id>/retry` | clears report, follow-ups, integration state and archive flag, then launches a **new session** |
 | archive | `-X POST /api/runs/<id>/archive` | only `done`/`failed`/`aborted`; also closes the tmux session (immediately by default) |
@@ -531,7 +539,7 @@ escalation ladder, what a conflict run is, or what `keep_on_branch` changes.
   scheduled and manual starts; its existing runs stay fully readable with an
   explicit `?repo=<id>`. If a start is refused with a problem naming the repo,
   that is why — see `../freilauf-repos/SKILL.md`.
-- **Killing a finished run does not un-finish it** — it only closes the session.
+- **Killing a done or aborted run does not un-finish it** — it only closes the session. A failed one becomes aborted.
   Killing a *live* one writes `aborted` over whatever it was.
 - **Branch mode `fest` with a branch another worktree holds is refused**, the
   classic case being the repo's base branch: git grants a branch to exactly one

@@ -821,6 +821,11 @@ table.runs tr.archiving { opacity: .5; }
    open paragraph at a <form>, so a link and a form-button inside one paragraph
    land on two lines no matter what the CSS says. */
 .btn-row { display: flex; align-items: center; gap: var(--sp-10); flex-wrap: wrap; margin: var(--sp-12) 0; }
+.btn-row[hidden] { display: none; }
+/* The case file on a run's page (server/supervision-pages.mjs). */
+.case-file .case-entries { list-style: none; padding: 0; margin: var(--sp-10) 0; }
+.case-file .case-entry { padding: var(--sp-6) 0; border-bottom: 1px solid var(--border-strong); }
+.case-file .case-text { white-space: pre-wrap; }
 /* The repo switcher is a header control, not a form field — the 100% width from
    the rule above stretched it across half the bar. */
 /* On the dark bar a default-painted <select> is the one element that still

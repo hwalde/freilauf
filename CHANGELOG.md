@@ -16,6 +16,36 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-11-20
+
+### Added
+
+- **Supervision: an agent that looks after the runs that get stuck.** Tick **Supervisor** on one agent and the hub starts it by itself whenever a run needs a look — an agent waiting for input longer than 30 minutes, a run waiting for help as long, a run that failed, died or ended without a report, an overrun or silent run, a blocked merge, finished work the hub has not merged, an answer, a reply or an escalation result that came in — and never by its schedule, a flow, or when nothing is due. Every 60 minutes the hub checks without asking any model; nothing due means nothing started and nothing written. One round runs at a time with at most 8 cases, most urgent first, and passes the budget gate like any start. Runs that ended before supervision was switched on, runs the operator ended and archived runs are never cases. "Start now" on the supervisor runs the check by hand. Contract: [docs/supervision.md](docs/supervision.md).
+- **A case file for every run**: what the supervisor, the run, the operator, the hub and an external resolver said about it, as a section on the run's page (oldest first, with author and age) and `GET /api/runs/<id>/case`. The operator answers a supervisor's question there with one click or a text, or through `POST /api/runs/<id>/case/answer`.
+- **`fl-supervise`**, the supervisor's command line: `cases` (this round's list; `--due` for what is due now), `look` (everything about one run in one text — task, state with every duration computed, why it is due, last events, git state, the tail of its transcript, the case file, how to attach), `note`, `again`, `close`, `nudge`, `question`, `end` and `escalate`. It works only inside a supervisor run and checks its own per-run token on the loopback listener and on the report socket; an unsandboxed supervisor run gets `FL_RUN_TOKEN` for that, every other run's environment is unchanged.
+- **Nudges**: the hub types the supervisor's message into another run's session under a header only the hub writes — from the supervisor, on the operator's behalf and with the operator's authority. It wakes a waiting agent, answers a help call or opens a follow-up in a finished run, each recorded as the supervisor's and never as the operator's; at most 3 per run until the operator answers. While a supervisor is active every supervised run is told in its platform rules what the header means; a hub without one sends exactly the prompts it sent before.
+- **`fl-report reply "<text>"`**: a run answers a nudge into its own case file; nothing else about the run changes.
+- **Escalations**: what a supervisor cannot solve inside the hub (credentials, credit, a service on the machine, a system elsewhere) goes on a list an external resolver collects — `GET /api/escalations`, `GET /api/escalations/<id>`, `POST /api/escalations/<id>/claim|release|resolve|dismiss` ([docs/escalations.md](docs/escalations.md), with a worked example of repairing by commissioning a run). The result lands in the run's case file and the next round continues from it. An **Escalations** page shows them with resolve and dismiss buttons.
+- **Settings → Supervision**: the interval, cases per round, the waiting threshold, the nudge limit and how long an escalation may stay unclaimed before the operator hears of it; which agent supervises (the lowest id when several are flagged), the last round and the parked cases. A value outside its range that reached the database by hand is held to the range when read, so a stored 0 cannot switch nudges off.
+- A case that goes nowhere — six rounds that looked at it without a change (a round counts once, however often it looks), or six rounds that never looked at it — is **parked** and announced once; it comes back by itself on news or a change, or with the Un-park button in its case file. A round still open after twice the interval (or three times its expected duration) is ended by the hub and announced.
+- A single run can be **taken out of supervision**: a checkbox in the single-run form, a switch on its page, `POST /api/runs/<id>/supervision off=1|0`.
+- `GET /api/runs/<id>/transcript`: the tail of what a run's agent said and did, in one shape for every coding agent, from the coding agent's own record (claude, cursor, opencode), else its live screen, else its terminal recording. Coding-agent plugins can supply a `transcript()` reader ([docs/plugins.md](docs/plugins.md)).
+- **A run that blocks its agent's schedule for a day is announced**, with or without a supervisor: when a slot is skipped because the agent's previous run is still open and that run has waited or been silent for more than 24 hours — at most once a day, until it ends.
+- The skill **`freilauf-supervision`**: setting a supervisor up, and a prompt template for it with places for the operator's own standing rules.
+- `fl-api --max-time <seconds>` (default 30), and **exit code 4** when a request timed out — the hub is there but slow — so a caller can tell it from exit 3, the hub could not be reached. `fl-supervise` answers the same way: 3 for not reached, 4 for no answer in time or a connection that broke off.
+- `freilauf logs --no-follow [-n <lines>]` prints the end of the hub's log and returns; plain `freilauf logs` still follows it.
+
+### Changed
+
+- A supervisor's questions, escalations, parked cases and the rounds the hub ended reach the operator on the urgent route, subject to the run's mute switch; a supervisor round's own done and follow-up reports are not announced and get no deputy note — what it did is in the case files.
+- Ending a run from its page and a supervisor's `end` are the same code path; the page's button behaves as before.
+- A flow's `extract` step with the `transcript` source reads cursor's and opencode's own records too, not only claude's: at most the newest 200 messages and 48 KB, tool calls and results one line of 200 characters each (they were up to 400), a message itself kept whole within that budget.
+- The agents skill's `agent-edit.py` keeps an agent's supervisor flag on a save; before, its full-replace round trip would have unflagged it.
+
+### Security
+
+- Stated limit: outside a sandbox any local process of the same user can type into an agent's tmux session, and `tmux show-environment` shows a supervisor run's token, so the supervisor's header is authenticated only as far as that token reaches; inside the sandbox it is a boundary (README, [SANDBOX.md](SANDBOX.md)).
+
 ## 2026-11-03
 
 ### Added

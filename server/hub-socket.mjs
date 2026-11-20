@@ -1,4 +1,4 @@
-// Freilauf — the hub's SECOND listener: a unix socket carrying exactly two routes
+// Freilauf — the hub's SECOND listener: a unix socket carrying exactly three routes
 // (SANDBOX.md).
 //
 // WHY this exists at all, and why it is worth having for a run that is not
@@ -17,7 +17,7 @@
 // 127.0.0.1"), so the channel is a unix socket the container gets bind-mounted.
 //
 // The socket is therefore NOT "the API on another transport". It is a narrow
-// channel with an allowlist of two routes and a per-run bearer token, and the
+// channel with an allowlist of three routes and a per-run bearer token, and the
 // full API stays where it is.
 import http from 'node:http'
 import net from 'node:net'
@@ -26,6 +26,7 @@ import { dirname, join } from 'node:path'
 import db from './db.mjs'
 import { body as readBody } from './web-helpers.mjs'
 import { handleReport, reportTokenOk } from './reports.mjs'
+import { handleSupervise } from './supervision.mjs'
 import { env } from './env.mjs'
 import { dataDir } from './paths.mjs'
 import { t } from './i18n.mjs'
@@ -56,10 +57,17 @@ export function hubSocketPath() {
 const ROUTES = [
   { name: 'report', method: 'POST', re: /^\/api\/runs\/([0-9a-f-]{36})\/report$/ },
   { name: 'sandbox', method: 'GET', re: /^\/api\/runs\/([0-9a-f-]{36})\/sandbox$/ },
+  // The supervisor's channel (server/supervision.mjs) — a deliberate third line:
+  // a sandboxed supervisor reaches the hub only here. The handler judges the
+  // caller's own row (supervisor flag) on top of the token checked below.
+  { name: 'supervise', method: 'POST', re: /^\/api\/runs\/([0-9a-f-]{36})\/supervise$/ },
 ]
 
+/** The names on the allowlist, in order — what a test pins, so a fourth line cannot slip in. */
+export const SOCKET_ROUTE_NAMES = ROUTES.map(r => r.name)
+
 /**
- * Which of the two routes a request is, or null. Exported because the allowlist
+ * Which of the allowed routes a request is, or null. Exported because the allowlist
  * is the security property worth a test of its own.
  */
 export function socketRoute(method, path) {
@@ -139,7 +147,10 @@ async function handle(req, res) {
   // The token is REQUIRED here, and it has to match the id in the path — which
   // is also what keeps a run from asking about another run: there is no way to
   // name a foreign id and still carry its token.
-  if (!reportTokenOk(route.runId, bearerToken(req))) {
+  // …except on the supervisor route, whose handler checks the same token
+  // itself and refuses with an English sentence an agent reads —
+  // one answer on both listeners.
+  if (route.name !== 'supervise' && !reportTokenOk(route.runId, bearerToken(req))) {
     return json(res, 401, { ok: false, error: t('sandbox.socket.unauthorized') })
   }
   if (route.name === 'report') {
@@ -154,6 +165,14 @@ async function handle(req, res) {
     // 2xx or fl-report files the report in inbox.jsonl and the watcher replays
     // it — the same contract the loopback route documents.
     return json(res, r.ok ? 200 : 400, r)
+  }
+  if (route.name === 'supervise') {
+    let b = {}
+    try { b = JSON.parse(await readBody(req) || '{}') } catch { /* an unreadable body is an empty one */ }
+    // The SAME handler the loopback route calls, which checks the token again —
+    // one set of rules for both listeners.
+    const r = await handleSupervise(route.runId, bearerToken(req), b)
+    return json(res, r.code, r.body)
   }
   const run = db.prepare(`SELECT id, sandbox, sandbox_spec, sandbox_container FROM runs WHERE id = ?`).get(route.runId)
   if (!run) return json(res, 404, { ok: false, error: t('sandbox.socket.unknown_run') })

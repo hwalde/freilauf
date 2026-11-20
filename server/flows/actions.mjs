@@ -1,7 +1,7 @@
 // Freilauf flows — the production `api` object the steps run against. This is the
 // ONLY file in the flow module that touches the rest of the hub for side effects
 // (tmux, notifications, run creation). Tests pass a stub with the same shape.
-import { existsSync, statSync, openSync, readSync, closeSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import db, { addEvent, getRun } from '../db.mjs'
@@ -16,9 +16,10 @@ import { extractStructured } from './llm.mjs'
 import { markStartedByFlow } from './db.mjs'
 import { syncChat, chatPath } from '../opencode-chat.mjs'
 import { readLogTail } from '../run-log.mjs'
+import { harnessTranscript, boundMessages, TRANSCRIPT_TAIL_MAX } from '../transcript.mjs'
 
 const LOG_TAIL_BYTES = 48 * 1024
-const TRANSCRIPT_TAIL_BYTES = 256 * 1024   // JSONL is verbose — more bytes than the log for the same amount of text
+const TRANSCRIPT_CHARS = 48 * 1024        // what the `transcript` source hands a flow at most, like the log tail
 const SHELL_OUTPUT_BYTES = 20 * 1024       // what a flow variable carries of a command's output
 const SHELL_MAX_BUFFER = 8 * 1024 * 1024   // what the command may print at all before it counts as broken
 
@@ -83,56 +84,23 @@ export function runInfo(runId) {
   }
 }
 
-/** Last `max` bytes of a file as UTF-8 (whole file when it is smaller). */
-function tailBytes(file, max) {
-  const size = statSync(file).size
-  const len = Math.min(size, max)
-  const fd = openSync(file, 'r')
-  try {
-    const buf = Buffer.alloc(len)
-    readSync(fd, buf, 0, len, size - len)
-    return { text: buf.toString('utf8'), truncated: size > len }
-  } finally { closeSync(fd) }
-}
-
 /**
- * Claude transcript (JSONL) as readable text: what the agent actually said and
- * did, not what the terminal drew. Only claude keeps one (path from --session-id,
- * see watcher.mjs); every other harness falls back to the log tail in runText().
- * Tool calls and results are flattened to one line each — the model needs the
- * gist, not the payloads.
+ * The coding agent's own record as readable text: what the agent actually said
+ * and did, not what the terminal drew — through the harness plugin's
+ * `transcript` capability (server/transcript.mjs; claude's JSONL, cursor's
+ * transcript, opencode's store). '' for a harness without one, or a run whose
+ * record cannot be found; runText() then falls back to the log tail. Tool calls
+ * and results are one line each — the model needs the gist, not the payloads —
+ * and a message is kept whole up to the budget, so a long closing answer is not
+ * cut to its end.
  */
 async function transcriptText(runId) {
-  const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId)
-  if (!run || run.harness !== 'claude' || !run.workdir_effective) return ''
-  // Dynamic import: watcher.mjs imports the flow module — a static import would close the cycle.
-  const { claudeTranscriptPath } = await import('../watcher.mjs')
-  const f = claudeTranscriptPath(run)
-  if (!existsSync(f)) return ''
-  const { text, truncated } = tailBytes(f, TRANSCRIPT_TAIL_BYTES)
-  const out = []
-  // A truncated tail starts mid-line — that first fragment is not valid JSON anyway.
-  for (const line of text.split('\n').slice(truncated ? 1 : 0)) {
-    let j
-    try { j = JSON.parse(line) } catch { continue }
-    const role = j.message?.role ?? j.type
-    if (!['user', 'assistant'].includes(role)) continue
-    const content = j.message?.content
-    const parts = []
-    for (const c of Array.isArray(content) ? content : [content]) {
-      if (typeof c === 'string') { parts.push(c); continue }
-      if (c?.type === 'text' && c.text) parts.push(c.text)
-      else if (c?.type === 'thinking' && c.thinking) parts.push(`(thinking) ${c.thinking}`)
-      else if (c?.type === 'tool_use') parts.push(`[tool ${c.name}] ${JSON.stringify(c.input ?? {}).slice(0, 400)}`)
-      else if (c?.type === 'tool_result') {
-        const t = typeof c.content === 'string' ? c.content : JSON.stringify(c.content ?? '')
-        parts.push(`[result] ${t.slice(0, 400)}`)
-      }
-    }
-    const body = parts.join('\n').trim()
-    if (body) out.push(`### ${role}\n${body}`)
-  }
-  return out.join('\n\n')
+  const run = getRun(runId)
+  if (!run) return ''
+  const tr = await harnessTranscript(run, { tail: TRANSCRIPT_TAIL_MAX })
+  if (!tr) return ''
+  const { messages } = boundMessages(tr.messages, { tail: TRANSCRIPT_TAIL_MAX, chars: TRANSCRIPT_CHARS, messageMax: TRANSCRIPT_CHARS })
+  return messages.map(m => `### ${m.role}\n${m.text}`).join('\n\n')
 }
 
 /**
@@ -238,6 +206,12 @@ export const actions = {
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId)
     if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
     if (agent.active === 0) return { ok: true, runId: null, inactive: true, name: agent.name }
+    // A supervisor agent is started by the hub when cases are due, never by an
+    // automatic start — the scheduler skips it, and so does a
+    // flow. Started without its flag it could only be refused at every
+    // `fl-supervise` call, so it is not started at all; same answer shape as
+    // a switched-off agent.
+    if (agent.supervisor === 1) return { ok: true, runId: null, supervisor: true, name: agent.name }
     const r = await startForAgent(agent, promptExtra)
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
@@ -292,6 +266,8 @@ export const actions = {
     const busy = db.prepare(`SELECT id FROM runs WHERE agent_id = ?
                              AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agentId)
     if (busy) return { ok: true, runId: null, busy: true }
+    // Not a flow's to start — see startAgent() above.
+    if (agent.supervisor === 1) return { ok: true, runId: null, supervisor: true, name: agent.name }
     const r = await startForAgent(agent)
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
@@ -337,7 +313,7 @@ export const actions = {
     if (source === 'transcript') {
       const tr = await transcriptText(runId)
       return tr ? head + '## Transcript (tail)\n' + tr
-        : head + '## Transcript\n(none — only claude runs keep one, terminal log instead)\n\n## Terminal log (tail)\n' + logTail(runId)
+        : head + '## Transcript\n(none — this coding agent keeps no record the hub can read, terminal log instead)\n\n## Terminal log (tail)\n' + logTail(runId)
     }
     if (source === 'log') return head + '## Terminal log (tail)\n' + logTail(runId)
     if (source === 'report_and_log') return head + '## Report\n' + (info.report || '(none)') + '\n\n## Terminal log (tail)\n' + logTail(runId)

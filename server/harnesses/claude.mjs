@@ -35,6 +35,51 @@ const levelsFrom = (t) => t.split(/,|\bor\b/).map(x => x.trim().toLowerCase())
  */
 const OAUTH_ENV = ['CLAUDE_CODE_OAUTH_TOKEN']
 
+/** A tool call or result on one line (the hub's `oneLine()`, restated: no static hub import here). */
+const toolLine = (s, max = 200) => {
+  const x = String(s ?? '').replace(/\s+/g, ' ').trim()
+  return x.length <= max ? x : x.slice(0, max - 1) + '…'
+}
+
+/**
+ * claude's JSONL as `{ role, at, text }` messages, oldest first — the reader
+ * behind `transcript()` and, through it, the flows' `transcript` source. Only
+ * `user` and `assistant` records count (summaries, system lines and hook
+ * records are claude talking to itself). A tool call becomes one `tool` line,
+ * a tool's answer one `result` line, thinking stays with the assistant under
+ * a `(thinking)` prefix. `truncated`: the text is a tail whose first line
+ * starts mid-record, so it is skipped. Pure, for a fixture.
+ */
+export function claudeTranscriptMessages(text, { truncated = false } = {}) {
+  const out = []
+  for (const line of String(text ?? '').split('\n').slice(truncated ? 1 : 0)) {
+    let j
+    try { j = JSON.parse(line) } catch { continue }
+    const role = j?.message?.role ?? j?.type
+    if (!['user', 'assistant'].includes(role)) continue
+    const at = typeof j.timestamp === 'string' ? j.timestamp : null
+    const content = j.message?.content
+    const said = []
+    const flush = () => { if (said.length) out.push({ role, at, text: said.join('\n') }); said.length = 0 }
+    for (const c of Array.isArray(content) ? content : [content]) {
+      if (typeof c === 'string') { if (c.trim()) said.push(c.trim()); continue }
+      if (c?.type === 'text' && String(c.text ?? '').trim()) said.push(String(c.text).trim())
+      else if (c?.type === 'thinking' && String(c.thinking ?? '').trim()) said.push(`(thinking) ${String(c.thinking).trim()}`)
+      else if (c?.type === 'tool_use') {
+        flush()
+        out.push({ role: 'tool', at, text: toolLine(`${c.name ?? 'tool'} ${JSON.stringify(c.input ?? {})}`) })
+      } else if (c?.type === 'tool_result') {
+        flush()
+        const body = typeof c.content === 'string' ? c.content
+          : Array.isArray(c.content) ? c.content.map(x => x?.text ?? '').join(' ') : JSON.stringify(c.content ?? '')
+        out.push({ role: 'result', at, text: toolLine(`${c.is_error ? 'error: ' : ''}${body}`) || '(empty)' })
+      }
+    }
+    flush()
+  }
+  return out
+}
+
 const plugin = {
   id: 'claude',
   label: 'Claude Code',
@@ -560,6 +605,24 @@ const plugin = {
     const to = path.replace(/\.jsonl$/, `.before-${Date.now()}.jsonl`)
     renameSync(path, to)
     return to
+  },
+
+  /**
+   * The transcript capability (docs/plugins.md): the tail of this run's own
+   * JSONL, read from the end of the file — the conversation the hub launched
+   * with `--session-id <run id>`. `null` when there is none (a run from before
+   * `--session-id`, a removed home); the hub then falls back to the screen.
+   * Lazy imports — the plugin rule.
+   */
+  async transcript(run, { tail = 40 } = {}) {
+    if (!run?.id || !run.workdir_effective) return null
+    const { claudeTranscriptPath } = await import('../watcher.mjs')
+    const { readTailBytes } = await import('../transcript.mjs')
+    const path = claudeTranscriptPath(run)
+    if (!existsSync(path)) return null
+    const { text, truncated } = readTailBytes(path)
+    const messages = claudeTranscriptMessages(text, { truncated })
+    return messages.length ? { source: 'transcript', messages: messages.slice(-Math.max(1, tail)) } : null
   },
 
   /**

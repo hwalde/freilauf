@@ -155,8 +155,11 @@ export const STEPS = [
       // `wait` the step promised the rest of the flow a finished run's outcome,
       // and there is none — carrying on would send a `switch_outcome` down its
       // "failed" branch for a run that never existed, so the step fails instead.
-      if (r.inactive) {
-        const why = `agent "${r.name}" is switched off`
+      // A supervisor agent is the hub's to start, never a flow's — the same
+      // answer, for the same reason: there is no run.
+      if (r.inactive || r.supervisor) {
+        const why = r.supervisor ? `agent "${r.name}" is a supervisor, which only the hub starts`
+          : `agent "${r.name}" is switched off`
         if (props.wait) throw new Error(`${why} — not started, so there is no run to wait for`)
         return { msg: `skipped (${why})`, output: { id: null, deferred: false, skipped: true } }
       }
@@ -246,7 +249,7 @@ export const STEPS = [
       // A run of this agent is still going, so no second one is started. That is
       // the requested behaviour and therefore a result, not a failure — the step
       // says "skipped" and the flow reads `started_run_id: null` to branch on.
-      if (!s.runId) return { msg: `${state} — skipped (agent is busy)`, output: out }
+      if (!s.runId) return { msg: `${state} — skipped (${s.supervisor ? 'a supervisor is started by the hub' : 'agent is busy'})`, output: out }
       out.started_run_id = s.runId
       return { msg: `${state} — started run ${s.runId}`, output: out }
     },

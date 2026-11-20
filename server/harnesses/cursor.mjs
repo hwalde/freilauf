@@ -552,6 +552,21 @@ const plugin = {
     return path ? path.split('/').pop().replace(/\.jsonl$/, '') : null
   },
 
+  /**
+   * The transcript capability (docs/plugins.md): the tail of this run's own
+   * transcript — the file `resumeId()` names. `null` without one; the hub then
+   * falls back to the screen. Lazy import — the plugin rule.
+   */
+  async transcript(run, { tail = 40 } = {}) {
+    const path = transcriptPath(run)
+    if (!path) return null
+    const { readTailBytes } = await import('../transcript.mjs')
+    const { messagesFromJsonl } = await import('../cursor-transcript.mjs')
+    const { text, truncated } = readTailBytes(path)
+    const messages = messagesFromJsonl(text, { truncated })
+    return messages.length ? { source: 'transcript', messages: messages.slice(-Math.max(1, tail)) } : null
+  },
+
   modelArgs(run, _ctx = null) {
     const args = []
     if (!run.model) return { args, fehlt: [] }

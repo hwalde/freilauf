@@ -41,7 +41,9 @@ code cannot say by itself:
    covers.
 2. **Contracts** third parties write against: `docs/plugins.md` (coding
    agents, model providers, notifiers), `docs/panels.md` (a project's own
-   sidebar numbers), `server/flows/AGENTS.md` (flow steps), `SANDBOX.md`
+   sidebar numbers), `docs/supervision.md` (a supervisor's commands and what a
+   supervised run sees), `docs/escalations.md` (an external resolver's routes),
+   `server/flows/AGENTS.md` (flow steps), `SANDBOX.md`
    (container profiles and the measurements behind them).
 3. **Measured traps** in the tools we drive (tmux, git, docker, the agent
    CLIs) that the code cannot show and that hurt when unknown:
@@ -78,8 +80,8 @@ incomplete, may be empty). License CC BY 4.0.
    `public/hub.js`, `test/proxy.mjs` for `vpn-proxy.mjs`,
    `test/proxy-egress.mjs` for the sandbox proxy, `test/deploy.mjs` for
    `bin/freilauf-deploy`, `test/log-cap.mjs` for `bin/fl-log-cap`. The suites own
-   the watcher, integrator and container clocks (`FREILAUF_WATCHER_OFF`, `FREILAUF_INTEGRATOR_OFF`,
-   `FREILAUF_SANDBOX_REAPER_OFF`) and point every path and credential into
+   the watcher, integrator, container and supervision clocks (`FREILAUF_WATCHER_OFF`, `FREILAUF_INTEGRATOR_OFF`,
+   `FREILAUF_SANDBOX_REAPER_OFF`, `FREILAUF_SUPERVISION_OFF`) and point every path and credential into
    their sandbox; a new external dependency of the hub gets its own
    `FREILAUF_*` fence there.
 4. **Evaluator until PASS** (below).
@@ -119,6 +121,7 @@ only `PASS` ends the task.
 | The hub's own LLM calls, titles, alerts | `server/llm/`, `server/title.mjs` | LLM layer |
 | Usage, balances, OpenRouter routing | `server/usage.mjs`, `server/claude-usage.mjs`, `server/balances.mjs`, `server/providers/openrouter-routing.mjs` | Quota and gates |
 | Repos, archive, panels, read API | `server/web.mjs`, `server/panels.mjs`, `server/read-api.mjs`, `bin/fl-api` | Repos and archive; Panels |
+| Supervision: the flag, case files, the due check, the bundle, the supervisor route, transcripts, nudges, questions, ends, escalations, the clock, rounds, parking | `server/supervision.mjs`, `server/supervision-acts.mjs`, `server/escalations.mjs`, `server/supervision-clock.mjs`, `server/supervision-pages.mjs`, `server/transcript.mjs`, `bin/fl-supervise` | Supervision (+ `docs/supervision.md`, `docs/escalations.md`) |
 | Shipped agent skills | `skills/`, `server/skills.mjs` | Skills |
 | Sandbox | `server/sandbox/`, `sandbox/` | `SANDBOX.md` |
 | No-code flows | `server/flows/` | `server/flows/AGENTS.md` |
@@ -151,6 +154,10 @@ only `PASS` ends the task.
 - A `<form>` closes an open `<p>` and cannot nest in another `<form>`; buttons
   that belong together go in `div.btn-row`, footer forms stand outside the
   save form.
+- Importing any server module (even `node -e "import('./server/x.mjs')"` to
+  check that it loads) opens and migrates the default data directory's
+  database — on a machine with a hub, the live one; set `FREILAUF_DATA_DIR`
+  to a scratch directory first, as the suites do.
 - A green test proves only the path it took: `curl` from the server over `lo`
   says nothing about the firewall, a stub daemon says nothing about an image,
   and a synthetic DOM event says nothing about a real drag.

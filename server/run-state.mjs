@@ -498,3 +498,19 @@ export function displayStatusSql(status) {
       return `(status = '${String(status).replace(/'/g, '')}' AND NOT ${FOLLOWUP_SQL})`
   }
 }
+
+/**
+ * Who ended an `aborted` run, from the payload of its newest `aborted` event:
+ * 'operator' (the kill button `{by:'user'}`, a session closed from the page
+ * `{source:'web'}`), 'flow' (`{by:'flow'}`), 'supervisor' (`{by:'supervisor'}`),
+ * or 'hub' for every other writer (the watcher, retention, max runtime, the
+ * archive). Pure over the parsed payload; null for no payload. One reading for
+ * the deputy's silence (`endedByOperator()`) and the supervisor's due check.
+ */
+export function abortedByFrom(payload) {
+  if (!payload || typeof payload !== 'object') return null
+  if (payload.by === 'user' || payload.source === 'web') return 'operator'
+  if (payload.by === 'flow') return 'flow'
+  if (payload.by === 'supervisor') return 'supervisor'
+  return 'hub'
+}

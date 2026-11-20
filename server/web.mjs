@@ -23,8 +23,8 @@ import {
   repoEdit, repoSave, settingsSave,
   codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
-  pageMergeSettings, mergeSettingsSave, pageReviews, pageReviewSettings, reviewSettingsSave,
-  pageCleanupSettings, cleanupSettingsSave,
+  pageMergeSettings, mergeSettingsSave, pageReviews, pageReviewSettings, reviewSettingsSave, pageEscalations, escalationPageAction,
+  pageCleanupSettings, cleanupSettingsSave, pageSupervisionSettings, supervisionSettingsSave,
   pageSkillSettings, skillSettingsSave, skillSettingsSync,
   repoToggle, repoDelete,
   headerStatus, usagePanel, statusSidebar, runRow, runsBody, overviewRuns, runDetailHead, runMetrics, runEvents,
@@ -62,8 +62,11 @@ import { redirect, body as readBody, parseForm, rememberRepo, requestRepo } from
 import { resolveIncident, resolveIncidentsOf, incidentById } from './incidents.mjs'
 import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
-import { flowsTick } from './flows/triggers.mjs'
 import * as reportPages from './report-pages.mjs'
+import { handleSupervise, setSupervisionOff, answerCase, unparkCase } from './supervision.mjs'
+import { caseSection } from './supervision-pages.mjs'
+import { bearerToken } from './hub-socket.mjs'
+import { claimEscalation, releaseEscalation, resolveEscalation, dismissEscalation, escalationItem } from './escalations.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -306,6 +309,13 @@ async function dispatch(req, res, url, path, formBody) {
   // the same reason the favorites have one: the provider/model/effort block is
   // driven through #prov, #model and #effort, and those ids exist once per page.
   if (req.method === 'GET' && path === '/reviews') return pageReviews(req, res, url)
+  if (req.method === 'GET' && path === '/escalations') return pageEscalations(req, res, url)
+  // The page's own buttons — not the resolver's contract routes, so the
+  // operator's authorship cannot be claimed through the API (escalations.mjs).
+  {
+    const em = req.method === 'POST' && path.match(/^\/escalations\/(\d{1,15})\/(resolve|dismiss)$/)
+    if (em) return escalationPageAction(req, res, url, formBody, em[1], em[2])
+  }
   // Settings → Reports: the deputy, the operator's rules and the daily digest
   // (server/report-pages.mjs), plus the digests themselves.
   if (req.method === 'GET' && path === '/settings/reports') return reportPages.pageReportSettings(req, res, url)
@@ -324,6 +334,8 @@ async function dispatch(req, res, url, path, formBody) {
   // tmux cleanup (Settings → tmux cleanup) — the memory-freeing agent's setup.
   if (req.method === 'GET' && path === '/settings/cleanup') return pageCleanupSettings(req, res, url)
   if (req.method === 'POST' && path === '/settings/cleanup') return cleanupSettingsSave(req, res, url, formBody)
+  if (req.method === 'GET' && path === '/settings/supervision') return pageSupervisionSettings(req, res, url)
+  if (req.method === 'POST' && path === '/settings/supervision') return supervisionSettingsSave(req, res, url, formBody)
   // Freilauf's own agent skills (server/skills.mjs) — the two switches, and the
   // sync they trigger. Its own page because saving here DELETES FILES, and a
   // handler that owns the whole request is what can act on that transition.
@@ -499,6 +511,65 @@ async function api(req, res, url) {
     try { b = JSON.parse(await readBody(req) || '{}') } catch {}
     const r = await handleReport(m[1], b, 'http')
     return json(res, r.ok ? 200 : 400, r)
+  }
+  // The supervisor's one channel (server/supervision.mjs). The SAME handler the
+  // unix socket calls; the bearer is required here too — this listener carries
+  // the hub's whole API, and the token is what says the caller is the run in
+  // the path. Not a report kind: a report is refused from a finished run and
+  // its follow-up path rejects unknown kinds.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/supervise$/))) {
+    let b = {}
+    try { b = JSON.parse(await readBody(req) || '{}') } catch { /* an unreadable body is an empty one */ }
+    const r = await handleSupervise(m[1], bearerToken(req), b)
+    return json(res, r.code, r.body)
+  }
+  // Take a run out of supervision, or put it back. Works whether or
+  // not a supervisor is active — the decision is about the run. Each change is
+  // an event; the same value twice changes nothing.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/supervision$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const v = String(b.off ?? '').trim()
+    if (!['1', '0'].includes(v)) return answer(req, res, 400, { ok: false, error: t('supervision.err_off') }, `/runs/${run.id}`)
+    const changed = setSupervisionOff(run.id, v === '1', 'operator')
+    return answer(req, res, 200, { ok: true, supervision_off: v === '1' ? 1 : 0, changed }, b.back || `/runs/${run.id}`)
+  }
+  // The operator's answer in a run's case file: the form on the run page and
+  // this API alike. An `answer` entry by `operator`; it needs a text or a choice.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/case\/answer$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const r = answerCase(run.id, { text: b.text, choice: b.choice })
+    // The page form lands back with the reason shown in the case section; an
+    // answer of only spaces passes the browser's `required` and must not vanish.
+    if (!r.ok) return answer(req, res, 400, { ok: false, error: t(r.error) }, `/runs/${run.id}?case_error=empty#run-case`)
+    return answer(req, res, 200, { ok: true, entry: r.id }, b.back || `/runs/${run.id}#run-case`)
+  }
+  // Un-park a parked case (the button in the run's case file): due at the next
+  // round. A case that is not parked answers `changed: false` and nothing is written.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/case\/unpark$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const changed = unparkCase(run.id, { by: 'operator' })
+    return answer(req, res, 200, { ok: true, changed }, b.back || `/runs/${run.id}#run-case`)
+  }
+  // Escalations (server/escalations.mjs): the four transitions of the FIXED
+  // contract (docs/escalations.md), JSON with its status code for a resolver.
+  // 404 unknown id, 409 a state the transition does not apply to (nothing
+  // changes), 400 a parameter it cannot take. The escalations page has its own
+  // routes (/escalations/<id>/…), so nothing here writes as the operator.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/escalations\/(\d{1,15})\/(claim|release|resolve|dismiss)$/))) {
+    const b = await form(req)
+    const [, id, act] = m
+    const r = act === 'claim' ? claimEscalation(id, b.by)
+      : act === 'release' ? releaseEscalation(id)
+        : act === 'resolve' ? resolveEscalation(id, { outcome: b.outcome, note: b.note, by: b.by })
+          : dismissEscalation(id)
+    if (!r.ok) return json(res, r.code, { ok: false, error: r.error, ...(r.state ? { state: r.state } : {}) })
+    return json(res, 200, { ok: true, escalation: escalationItem(r.row) })
   }
   // Same definition, same validation and same start path as the run form
   // (pages.mjs) — this endpoint used to be its own third copy and saved an
@@ -706,62 +777,11 @@ async function api(req, res, url) {
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/reassess$/))) {
     return reportPages.runReassess(req, res, url, () => form(req), m[1])
   }
+  // The operator's "end": one function with the supervisor's `end`
+  // (sessions.mjs, endRun), so the two cannot come to mean different ends.
   if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/kill$/))) {
-    const run = getRun(m[1])
-    const { sh } = await import('./util.mjs')
-    // The container goes FIRST, and the order is not tidiness (§7.11): the
-    // pane's process IS the container's client, so killing the session first
-    // leaves a container whose client has gone — the orphan case §8.18 is
-    // about, rather than a clean stop. An unsandboxed run answers `stopped:
-    // false` and nothing happens.
-    if (run) {
-      const { stopRunContainer } = await import('./sessions.mjs')
-      try { await stopRunContainer(run) } catch { /* fail-soft: the session still has to go */ }
-    }
-    if (run?.tmux_session) await sh('tmux', ['kill-session', '-t', `=${run.tmux_session}`])
-    // 'done' and 'aborted' are final answers, so a click can only close the
-    // session they left standing: 'done' came through cleanly and must not be
-    // rewritten (the coding agents keep their session after the work is done —
-    // that is the ordinary state of a finished run, not a corner case), and
-    // 'aborted' already IS what the button means. Same rule, and same event,
-    // as reconcileClosedSession().
-    // 'failed' is deliberately NOT in this list. The button was rendered while
-    // the run was still going, so a click that lands after the watcher has
-    // written 'failed' (pane died in between — measured: two seconds) is still
-    // a cancel, and the final status has to say what the CLICK said, not what
-    // the race decided. Cancelling a failed run IS setting it to 'aborted'.
-    if (['done', 'aborted'].includes(run?.status ?? '')) {
-      // With the session goes the way a follow-up could report: an open
-      // follow-up commission (web.mjs /send) is given up with it — and what it
-      // left in the worktree is assessed, exactly as the abort path below
-      // assesses its own leftovers. No notification, for the same reason it
-      // gives: whoever clicked the button is looking at the page.
-      db.prepare(`UPDATE runs SET tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')),
-                  agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(m[1])
-      if (run?.followup_since) {
-        addEvent(m[1], 'followup_abandoned', { source: 'user' })
-        abandonFollowUp(m[1], false)
-      }
-      if (run && !run.tmux_closed_at) addEvent(m[1], 'tmux_closed', { source: 'user' })
-      return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
-    }
-    // Set tmux_closed_at right away: otherwise the detail page tries to attach
-    // a terminal to the dead session until the next watcher tick (410 in the browser).
-    // followup_since=NULL: a FAILED run can carry an open follow-up commission —
-    // with the cancel it is given up, like with any other end of the session.
-    // …and what the agent last said about its attention goes with the session.
-    db.prepare(`UPDATE runs SET status='aborted', ended_at=COALESCE(ended_at, datetime('now')),
-                tmux_closed_at=COALESCE(tmux_closed_at, datetime('now')), finish_state=NULL,
-                followup_since=NULL, agent_state=NULL, agent_state_at=NULL WHERE id=?`).run(m[1])
-    // Same event kind reconcileClosedSession() writes, so "why did this run
-    // stop?" has one answer to look for rather than two.
-    addEvent(m[1], 'aborted', { by: 'user' })
-    // An end somebody ASKED for is an abort, even in the finish gate — and what
-    // it leaves behind is assessed like any other unfinished run (no notification:
-    // whoever clicked the button knows).
-    const { assessLater } = await import('./sessions.mjs')
-    assessLater(m[1], false)
-    flowsTick().catch(e => console.error('[flows]', e.message))   // "run finished" triggers, without waiting for the watcher
+    const { endRun } = await import('./sessions.mjs')
+    await endRun(m[1], { by: 'user' })
     return answer(req, res, 200, { ok: true }, `/runs/${m[1]}`)
   }
   // "Resume": pick an ended run back up where it stopped — the same worktree,
@@ -1284,7 +1304,7 @@ async function fragmentApi(req, res, url) {
     const repo = getRepo(run.repo_id)
     return fragment(res, runDetailHead(run, { title })
       + runEditCard(run) + await sandboxCard(run, repo) + integrationSection(run, repo)
-      + runMetrics(run) + runEvents(run.id))
+      + caseSection(run) + runMetrics(run) + runEvents(run.id))
   }
 
   // There is deliberately no per-session fragment. The sessions page ends a

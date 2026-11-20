@@ -167,6 +167,21 @@ export function fmtDuration(sec) {
   return h > 0 ? t('unit.hours_minutes', { h, m: m % 60 }) : t('unit.minutes', { n: m })
 }
 
+/**
+ * A duration in English whatever the UI language — for text an AGENT reads
+ * (the supervisor's bundle and case list, refusals), where `fmtDuration()`
+ * would follow the operator's language. "under 1 min", "40 min",
+ * "3 h 12 min", "2 d 4 h"; '–' for nothing measurable.
+ */
+export function fmtDurationEn(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return '–'
+  const m = Math.floor(sec / 60), h = Math.floor(m / 60), d = Math.floor(h / 24)
+  if (m < 1) return 'under 1 min'
+  if (h < 1) return `${m} min`
+  if (d < 1) return m % 60 ? `${h} h ${m % 60} min` : `${h} h`
+  return h % 24 ? `${d} d ${h % 24} h` : `${d} d`
+}
+
 /** SQLite `datetime('now')` is UTC without a timezone suffix. */
 export function parseDbUtc(ts) {
   if (ts == null || ts === '') return NaN

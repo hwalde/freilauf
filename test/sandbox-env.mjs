@@ -550,6 +550,10 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
       // sandbox shares the tmux server); a live hub must not start cleanup
       // runs because of THIS suite. The manual path stays fully testable.
       FREILAUF_CLEANUP_AUTO_OFF: '1',
+      // The supervision clock starts supervisor rounds — runs of an agent the
+      // suite flagged — and sends notices; a test hub next to a live one must
+      // start none by itself. A suite drives it by hand (`supervisionTick()`).
+      FREILAUF_SUPERVISION_OFF: '1',
       // Incidents page WITHOUT the production grace period — the suite asserts
       // the alarm immediately after the event; the delay itself has its own test.
       FREILAUF_INCIDENT_NOTIFY_DELAY_MS: '0',
@@ -659,6 +663,7 @@ echo "Session '$SESSION' started in $WORKDIR (Harness: e2e-stub)"
     process.env.FREILAUF_GOAL_DELAY_MS = '100'
     process.env.FREILAUF_GOAL_WAIT_MS = '10000'
     process.env.FREILAUF_CLEANUP_AUTO_OFF = '1'
+    process.env.FREILAUF_SUPERVISION_OFF = '1'
     // Same reason as in the hub environment above: no production grace period
     // in the suite (the delayed-notification test drives notify_at by hand).
     process.env.FREILAUF_INCIDENT_NOTIFY_DELAY_MS = '0'

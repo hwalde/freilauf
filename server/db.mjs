@@ -482,6 +482,71 @@ CREATE TABLE IF NOT EXISTS schedule_log (
   UNIQUE(agent_id, slot)
 );
 `)
+// ---- supervision (server/supervision.mjs owns these; nothing else writes them) ----
+// The supervisor flag is part of the AGENT definition and copied to its runs;
+// `runs.supervision_off` is a single run's "leave me alone", set at the start or
+// switched on the run page. Both are 0/1 and never NULL, so a comparison with 1
+// cannot be fooled by a missing value.
+addColumn('agents', 'supervisor', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'supervisor', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('runs', 'supervision_off', 'INTEGER NOT NULL DEFAULT 0')
+db.exec(`
+-- The case file of a run: what the supervisor, the run, the operator, the hub and
+-- an external resolver said about it. Not events: an event is the run's own
+-- history, an entry is what somebody wrote about the run.
+CREATE TABLE IF NOT EXISTS case_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  ts TEXT NOT NULL DEFAULT (datetime('now')),
+  kind TEXT NOT NULL,
+  author TEXT NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  data TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_case_entries_run ON case_entries(run_id, id);
+-- One row per run that has a case file: where the case stands.
+CREATE TABLE IF NOT EXISTS case_state (
+  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+  closed_at TEXT,
+  closed_reason TEXT,
+  last_look_at TEXT,
+  look_again_at TEXT,
+  nudges INTEGER NOT NULL DEFAULT 0,
+  looks_unchanged INTEGER NOT NULL DEFAULT 0,
+  state_fp TEXT,
+  parked_at TEXT,
+  last_round_at TEXT
+);
+-- Problems a supervisor handed to somebody outside the hub (server/escalations.mjs,
+-- the only writer). The list an external resolver collects through
+-- GET /api/escalations; the run it is about keeps the result in its case file.
+CREATE TABLE IF NOT EXISTS escalations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  raised_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  class TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open',
+  claimed_by TEXT,
+  claimed_at TEXT,
+  resolved_at TEXT,
+  outcome TEXT,
+  note TEXT,
+  announced_at TEXT,
+  reminded_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_state ON escalations(state, id);
+CREATE INDEX IF NOT EXISTS idx_escalations_run ON escalations(run_id);
+`)
+// When the hub last typed a supervisor's nudge into this run (server/supervision-acts.mjs).
+// The agent's own `_working prompt` hook follows a beat later; where the hook
+// carries no head (cursor, hermes) this moment is how its echo is recognised.
+addColumn('runs', 'nudge_typed_at', 'TEXT')
+// How often the clock handed this case to a round since a supervisor last
+// looked at it (server/supervision-clock.mjs): a case no round ever looks at is
+// parked like one six rounds found unchanged, not handed out forever.
+addColumn('case_state', 'handouts_unlooked', 'INTEGER NOT NULL DEFAULT 0')
 /**
  * Drop the CHECK rule on `agents.harness` — once, idempotently.
  *

@@ -42,6 +42,9 @@ import {
   skillsInstallOn, skillsAutoUpdate,
 } from './skills.mjs'
 import { t } from './i18n.mjs'
+import { caseEntries, caseEntryCount, caseState } from './supervision.mjs'
+import { runTranscript, transcriptLimits } from './transcript.mjs'
+import { listEscalations, escalationItem, escalationById, isoUtc } from './escalations.mjs'
 
 const LIMIT_MAX = 200
 const LIMIT_DEFAULT = 50
@@ -268,6 +271,56 @@ export async function readApi(req, res, url) {
       events,
       incidents: allIncidentsOf(run.id),
     })
+    return true
+  }
+
+  // ---- a run's case file (server/supervision.mjs) -------------------------
+  // Read-only like everything here: looking at a case through this route writes
+  // no `look` entry (the supervisor's bundle does that, on its own route). The
+  // newest `limit` entries, oldest first, plus where the case stands.
+  if ((m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/case$/))) {
+    const run = getRun(m[1])
+    if (!run) { json(res, 404, { ok: false, error: t('api.unknown_run') }); return true }
+    const limit = limitOf(url)
+    json(res, 200, {
+      ok: true,
+      run: { id: run.id, short_id: shortId(run.id), supervisor: run.supervisor, supervision_off: run.supervision_off },
+      state: caseState(run.id),
+      total: caseEntryCount(run.id),
+      limit,
+      entries: caseEntries(run.id, { limit }),
+    })
+    return true
+  }
+
+  // ---- a run's transcript (server/transcript.mjs) ----------------------------
+  // The tail of what its agent said and did, one shape for every coding agent,
+  // `source` saying where it came from. Read-only: no look is recorded here.
+  // Bounded: `tail` messages (ceiling 200) and `chars` (ceiling 60 000).
+  if ((m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/transcript$/))) {
+    const run = getRun(m[1])
+    if (!run) { json(res, 404, { ok: false, error: t('api.unknown_run') }); return true }
+    const limits = transcriptLimits({ tail: url.searchParams.get('tail'), chars: url.searchParams.get('chars') })
+    const tr = await runTranscript(run, limits)
+    json(res, 200, { ok: true, run: { id: run.id, short_id: shortId(run.id), harness: run.harness }, ...limits, ...tr })
+    return true
+  }
+
+  // ---- escalations (server/escalations.mjs) — a FIXED contract ----------------
+  // What an external resolver collects (docs/escalations.md). `state` defaults to
+  // open; an unknown word is a 400 naming the valid ones. Bounded like every list.
+  if (path === '/api/escalations') {
+    const r = listEscalations({ state: url.searchParams.get('state'), limit: url.searchParams.get('limit') })
+    if (!r.ok) { json(res, r.code, { ok: false, error: r.error }); return true }
+    json(res, 200, { ok: true, now: isoUtc(Date.now()), escalations: r.rows.map(escalationItem) })
+    return true
+  }
+  // One escalation in the same item shape, so a resolver can re-read the one it
+  // holds without paging the list; 404 for an id that names nothing.
+  if ((m = path.match(/^\/api\/escalations\/([^/]+)$/))) {
+    const row = escalationById(m[1])
+    if (!row) { json(res, 404, { ok: false, error: `no escalation #${m[1].replace(/[^0-9A-Za-z_-]/g, '').slice(0, 20)}` }); return true }
+    json(res, 200, { ok: true, now: isoUtc(Date.now()), escalation: escalationItem(row) })
     return true
   }
 

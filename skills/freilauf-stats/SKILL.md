@@ -42,7 +42,8 @@ fl-api --url                             # just print the base URL
 ```
 
 Exit codes: `0` = HTTP 2xx, `1` = HTTP error (body still printed), `2` = usage
-error, `3` = the hub did not answer. Inside a run `FL_HUB_URL` is authoritative;
+error, `3` = the hub did not answer, `4` = the request timed out (the hub may be
+there but slow; a POST may have happened — read before repeating it). Inside a run `FL_HUB_URL` is authoritative;
 otherwise the port is read from `~/.config/freilauf/env`. The hub has **no
 authentication** — being able to run the command on the machine is the
 authorization.

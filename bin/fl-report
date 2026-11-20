@@ -16,6 +16,10 @@
 #                                                  (a host, a directory, more memory).
 #                                                  A human decides; keep working on
 #                                                  whatever you CAN do meanwhile.
+#   fl-report reply "your answer"                  Answer a message from the supervisor
+#                                                  (it starts with <freilauf-supervisor>).
+#                                                  Goes into this run's case file; changes
+#                                                  nothing else about the run.
 #   fl-report branch <name>                        Branch reported
 #   fl-report pr <url>                             Pull request reported
 #   fl-report _api_error [error] ["text"]         Rate-limit/provider error (from hooks);
@@ -37,14 +41,14 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
 KIND="$1"; shift
 
 case "$KIND" in
-    done|failed|help|progress|branch|pr|access) ;;
+    done|failed|help|progress|branch|pr|access|reply) ;;
     _turn_end|_exit|_rate_limit|_idle|_pane_died|_api_error|_working|_waiting) ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown kind: %s\n' "$KIND" >&2; exit 2 ;;
@@ -138,6 +142,13 @@ if [[ -n "${1:-}" ]]; then
     else
         TEXT="$*"
     fi
+fi
+
+# A reply without a text is refused here rather than by the hub: a refusal from
+# the hub reads below as "not reachable" and would be filed in the inbox.
+if [[ "$KIND" == "reply" && -z "${TEXT//[[:space:]]/}" ]]; then
+    echo 'fl-report: a reply needs a text: fl-report reply "<your answer>"' >&2
+    exit 2
 fi
 
 # Build the payload as JSON with python3 (quoting-safe, no jq dependency).

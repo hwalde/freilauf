@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# fl-supervise — the command line of a Freilauf supervisor run.
+# Usage:
+#   fl-supervise cases [--text] [--due] [--limit <n>]
+#                                   This round's cases, as the hub handed them
+#                                   out, most urgent first, each with its reason
+#                                   and ages (JSON; --text: readable). --due: what
+#                                   is due right now instead (up to --limit).
+#   fl-supervise look <run> [--json] [--tail <n>] [--chars <n>] [--events <n>] [--entries <n>]
+#                                   Everything about one case: the task, its
+#                                   state, why it is due, events, git, the tail
+#                                   of its transcript, the case file, how to
+#                                   attach. Readable text; --json: the object.
+#                                   Records that you looked. --tail (messages,
+#                                   up to 200) and --chars (up to 60000) widen
+#                                   the transcript; --events and --entries (up
+#                                   to 200) show more of the history.
+#   fl-supervise note <run> "<text>" [--again <minutes>]
+#                                   Write a note into the run's case file;
+#                                   --again also says when to look again.
+#   fl-supervise again <run> <minutes>
+#                                   Look at this case again in <minutes> (1-10080).
+#   fl-supervise close <run> "<reason>"
+#                                   Close the case; it reopens only when
+#                                   something about the run changes.
+#   fl-supervise nudge <run> "<text>"
+#                                   Have the hub type a message into the run's
+#                                   session, under a header that says it comes
+#                                   from you on the operator's behalf. It wakes a
+#                                   waiting agent, answers a help call, and opens
+#                                   a follow-up in a finished run. A few per case
+#                                   (3 unless set) until the operator answers.
+#   fl-supervise question <run> "<text>" [--choice "<label>"]...
+#                                   Ask the operator one question about the case
+#                                   (up to 6 one-click choices). One open
+#                                   question per case; the answer makes it due.
+#   fl-supervise end <run> "<reason>"
+#                                   End the run on purpose (like the operator's
+#                                   kill button, recorded as yours). A done or
+#                                   aborted run only loses its session, a failed
+#                                   one becomes aborted; unmerged work stays.
+#   fl-supervise escalate <run> <class> "<summary>"
+#                                   Hand a problem to somebody outside the hub.
+#                                   <class>: hub_defect, server_service,
+#                                   credentials, quota_or_credit, external_system,
+#                                   needs_access, other. Summary: one line, at
+#                                   most 300 characters.
+#   fl-supervise --help             This text.
+#
+# <run> is the run's full id or its short id (the first 8 characters).
+# Output: the hub's JSON answer on stdout (look: its text), exit 0. A refusal: the hub's sentence
+# on stderr, exit 1 — it says what is the case; do not retry the same call.
+# Exit 2: wrong usage. Exit 3: the hub could not be reached (nothing was written).
+# Exit 4: no answer in time, or the connection broke off (it may have written:
+# read the case first).
+#
+# Works only inside a supervisor run (a run of an agent marked as supervisor):
+# the hub hands such a run FL_RUN_ID and FL_RUN_TOKEN and checks both, and the
+# supervisor flag, on every call. Anywhere else the hub refuses and says why.
+set -euo pipefail
+
+usage() {
+    sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+[[ $# -ge 1 ]] || { usage >&2; exit 2; }
+CMD="$1"; shift
+
+die_usage() { printf 'fl-supervise: %s\n' "$1" >&2; printf 'Run "fl-supervise --help" for the commands.\n' >&2; exit 2; }
+
+# ------------------------------------------------------------ the subcommands
+# One branch per subcommand, each filling OP and the fields of the JSON body.
+# A new subcommand is one more branch here plus its lines in the usage text; the
+# hub decides everything else (server/supervision.mjs, the op table).
+RUN=""; TEXT=""; MINUTES=""; REASON=""; AGAIN=""; LIMIT=""; TAIL=""; CHARS=""; EVENTS=""; ENTRIES=""; FORMAT="json"; DUE=""
+CLASS=""; CHOICES=()
+num_arg() { [[ "${2:-}" =~ ^[0-9]+$ ]] || die_usage "$1 takes a whole number"; }
+case "$CMD" in
+    -h|--help|help) usage; exit 0 ;;
+    cases)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --text) FORMAT="text"; shift ;;
+                --json) FORMAT="json"; shift ;;
+                --limit) num_arg --limit "${2:-}"; LIMIT="$2"; shift 2 ;;
+                --due) DUE="1"; shift ;;
+                *) die_usage "cases: unknown option $1" ;;
+            esac
+        done
+        ;;
+    look)
+        [[ $# -ge 1 ]] || die_usage 'look needs a run: fl-supervise look <run> [--json] [--tail <n>] [--chars <n>]'
+        RUN="$1"; shift; FORMAT="text"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --json) FORMAT="json"; shift ;;
+                --text) FORMAT="text"; shift ;;
+                --tail) num_arg --tail "${2:-}"; TAIL="$2"; shift 2 ;;
+                --chars) num_arg --chars "${2:-}"; CHARS="$2"; shift 2 ;;
+                --events) num_arg --events "${2:-}"; EVENTS="$2"; shift 2 ;;
+                --entries) num_arg --entries "${2:-}"; ENTRIES="$2"; shift 2 ;;
+                *) die_usage "look: unknown option $1" ;;
+            esac
+        done
+        ;;
+    note)
+        [[ $# -ge 2 ]] || die_usage 'note needs a run and a text: fl-supervise note <run> "<text>" [--again <minutes>]'
+        RUN="$1"; TEXT="$2"; shift 2
+        if [[ $# -gt 0 ]]; then
+            [[ "$1" == "--again" && $# -eq 2 ]] || die_usage 'after the text only "--again <minutes>" is understood'
+            AGAIN="$2"
+        fi
+        ;;
+    again)
+        [[ $# -eq 2 ]] || die_usage 'again needs a run and minutes: fl-supervise again <run> <minutes>'
+        RUN="$1"; MINUTES="$2"
+        ;;
+    close)
+        [[ $# -eq 2 ]] || die_usage 'close needs a run and a reason: fl-supervise close <run> "<reason>"'
+        RUN="$1"; REASON="$2"
+        ;;
+    nudge)
+        [[ $# -eq 2 ]] || die_usage 'nudge needs a run and a text: fl-supervise nudge <run> "<text>"'
+        RUN="$1"; TEXT="$2"
+        ;;
+    question)
+        [[ $# -ge 2 ]] || die_usage 'question needs a run and a text: fl-supervise question <run> "<text>" [--choice "<label>"]...'
+        RUN="$1"; TEXT="$2"; shift 2
+        while [[ $# -gt 0 ]]; do
+            [[ "$1" == "--choice" && $# -ge 2 ]] || die_usage 'after the text only --choice "<label>" is understood'
+            CHOICES+=("$2"); shift 2
+        done
+        ;;
+    end)
+        [[ $# -eq 2 ]] || die_usage 'end needs a run and a reason: fl-supervise end <run> "<reason>"'
+        RUN="$1"; REASON="$2"
+        ;;
+    escalate)
+        [[ $# -eq 3 ]] || die_usage 'escalate needs a run, a class and a summary: fl-supervise escalate <run> <class> "<summary>"'
+        RUN="$1"; CLASS="$2"; TEXT="$3"
+        ;;
+    *) die_usage "unknown command: $CMD" ;;
+esac
+
+# The run this call comes FROM, and its bearer. Both set by the hub at launch;
+# the old CC_* names are read like fl-report reads them.
+RUN_ID="${FL_RUN_ID:-${CC_RUN_ID:-}}"
+HUB="${FL_HUB_URL:-${CC_HUB_URL:-http://127.0.0.1:8791}}"
+SOCKET="${FL_HUB_SOCKET:-}"
+TOKEN="${FL_RUN_TOKEN:-}"
+if [[ -z "$RUN_ID" ]]; then
+    echo "fl-supervise: FL_RUN_ID is not set — this command only works inside a Freilauf supervisor run." >&2
+    exit 2
+fi
+
+# The body as JSON, built by python3 so no text can break the quoting. Minutes
+# travel as the string they were typed as: the hub checks them, not this script.
+PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" "$LIMIT" "$TAIL" "$CHARS" "$EVENTS" "$ENTRIES" "$CLASS" "$DUE" ${CHOICES[@]+"${CHOICES[@]}"} <<'PY'
+import json, sys
+cmd, run, text, minutes, reason, again, limit, tail, chars, events, entries, klass, due = sys.argv[1:14]
+choices = sys.argv[14:]
+op = {"look": "bundle"}.get(cmd, cmd)
+body = {"op": op}
+if cmd != "cases":
+    body["run"] = run
+if cmd == "cases" and limit:
+    body["limit"] = limit
+if cmd == "cases" and due:
+    body["due"] = True
+if cmd == "look":
+    if tail:
+        body["tail"] = tail
+    if chars:
+        body["chars"] = chars
+    if events:
+        body["events"] = events
+    if entries:
+        body["entries"] = entries
+if cmd == "note":
+    body["text"] = text
+    if again:
+        body["again"] = again
+elif cmd == "again":
+    body["minutes"] = minutes
+elif cmd == "close" or cmd == "end":
+    body["reason"] = reason
+elif cmd == "nudge":
+    body["text"] = text
+elif cmd == "question":
+    body["text"] = text
+    body["choices"] = choices
+elif cmd == "escalate":
+    body["class"] = klass
+    body["summary"] = text
+print(json.dumps(body))
+PY
+)"
+
+# An unset token sends no header at all; the hub then refuses with its sentence.
+AUTH=()
+[[ -n "$TOKEN" ]] && AUTH=(-H "authorization: Bearer $TOKEN")
+
+# Each transport prints the body followed by a line with the HTTP status. curl
+# exits non-zero only when it could not get an answer — a refusal is an answer,
+# and is never retried on the other transport.
+send_socket() {
+    curl -sS --max-time 15 -X POST --unix-socket "$SOCKET" \
+         -H 'content-type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
+         --data-binary "$PAYLOAD" -w '\n%{http_code}' \
+         "http://hub/api/runs/$RUN_ID/supervise"
+}
+send_http() {
+    curl -sS --max-time 15 -X POST \
+         -H 'content-type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
+         --data-binary "$PAYLOAD" -w '\n%{http_code}' \
+         "$HUB/api/runs/$RUN_ID/supervise"
+}
+
+# The socket first where there is one. Loopback is tried ONLY when the socket
+# could not be connected to at all (curl 7): after a timeout the hub may already
+# have written, and a second send would write the same note twice.
+RC=7
+if [[ -n "$SOCKET" && -S "$SOCKET" ]]; then
+    OUT="$(send_socket 2>/dev/null)" && RC=0 || RC=$?
+fi
+if [[ $RC -eq 7 ]]; then
+    OUT="$(send_http 2>/dev/null)" && RC=0 || RC=$?
+fi
+# 7 (refused), 6 (host not resolved), 3 (malformed URL): nothing was sent.
+if [[ $RC -eq 7 || $RC -eq 6 || $RC -eq 3 ]]; then
+    echo "fl-supervise: the hub is not reachable (socket: ${SOCKET:-none}, url: $HUB). Nothing was written." >&2
+    exit 3
+fi
+# Reached but no answer — curl 28, its 15 s timeout, or a connection that broke
+# off (52, 56, …): the hub may already have written. Exit 4, told apart from 3 ("not
+# reached", nothing written), like fl-api does.
+if [[ $RC -ne 0 ]]; then
+    if [[ $RC -eq 28 ]]; then why="did not answer within 15 s"; else why="broke the connection off (curl exit $RC)"; fi
+    echo "fl-supervise: the hub $why. The call may or may not have been written — read the case file before repeating it." >&2
+    exit 4
+fi
+CODE="${OUT##*$'\n'}"
+BODY="${OUT%$'\n'*}"
+if [[ "$CODE" =~ ^2[0-9][0-9]$ ]]; then
+    if [[ "$FORMAT" == "text" ]]; then
+        # The hub writes the readable form itself (`text` in the answer).
+        printf '%s' "$BODY" | python3 -c 'import json,sys
+j = json.loads(sys.stdin.read())
+print(j.get("text") or json.dumps(j))'
+    else
+        printf '%s\n' "$BODY"
+    fi
+    exit 0
+fi
+# The hub's own sentence, or the raw answer when it was not JSON.
+printf '%s' "$BODY" | python3 -c 'import json,sys
+raw = sys.stdin.read()
+try:
+    j = json.loads(raw)
+    msg = j.get("error") or raw
+except Exception:
+    msg = raw.strip() or "no answer"
+print("fl-supervise: " + msg, file=sys.stderr)' || true
+exit 1

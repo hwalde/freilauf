@@ -839,16 +839,32 @@ authentication the report route had, and the hub's whole API — kill any run, t
 into any session, read settings with the notification token and provider
 credentials in them — sits on the same port.
 
-The socket serves an **allowlist of exactly two routes**, deliberately a
-what-is-served list rather than a blocklist: `POST /api/runs/<id>/report`, and
+The socket serves an **allowlist of exactly three routes**, deliberately a
+what-is-served list rather than a blocklist: `POST /api/runs/<id>/report`,
 `GET /api/runs/<id>/sandbox`, which lets a sandboxed agent read its own policy
-so it can make sense of a 403. Both require the token, and it must match the run
-in the path.
+so it can make sense of a 403, and `POST /api/runs/<id>/supervise`, the
+supervisor's channel (`fl-supervise`), which additionally refuses every run that
+is not a supervisor run. All require the token, and it must match the run in the
+path.
 
 Every run gets a token — sandboxed or not, minted by a database trigger — but
 today only a **sandboxed** run is given the socket and the token in its
 environment; an unsandboxed run still gets `FL_HUB_URL` and reports over
-loopback. **The `127.0.0.1` report route deliberately still accepts a report with
+loopback. The one exception is an unsandboxed **supervisor** run, which gets
+`FL_RUN_TOKEN` because the supervisor route requires it on loopback too — and
+`tmux show-environment` shows that token to any local process of the same user.
+
+The same reach bounds a supervisor's **nudge**, a message the hub types into
+another run's session under a `<freilauf-supervisor>` header that carries the
+operator's authority ([docs/supervision.md](docs/supervision.md)). Only the hub
+writes that header, but outside a sandbox any local process of the same user
+can type into any tmux session, the same tag included: for an unsandboxed run
+the header is authenticated only as far as the supervisor's token reaches.
+Inside a container an agent has no tmux socket and reaches the hub only through
+the socket's three routes, so a sandboxed agent cannot type a forged nudge into
+another run; a process on the host still can.
+
+**The `127.0.0.1` report route deliberately still accepts a report with
 no token at all**, for one transition release: an agent that is mid-run right
 now was started by a hub that knew no token, and breaking that would silence
 every run in flight the moment the release is deployed. Runs from before the

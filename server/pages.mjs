@@ -11,7 +11,7 @@ import { providerBalances } from './balances.mjs'
 import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './coding-agents.mjs'
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
-  runTitleField, runStartTimeFields, runStartFromForm,
+  runTitleField, runStartTimeFields, runStartFromForm, supervisorField, runSupervisionField,
   runSetupFields, runSetupFromForm, branchFields, branchContext, notifyResultField,
   sandboxRunFields,
   agentNameTaken, moveAgent, deleteAgent, EMPTY_SCHEDULE,
@@ -26,8 +26,13 @@ import { runEditAllowed } from './run-edit.mjs'
 import { syncChat, CHAT_FILE } from './opencode-chat.mjs'
 import { readLogTail } from './run-log.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
-  settledAnomalies, archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
+  archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
+import { activeSupervisorAgent } from './supervision.mjs'
+import { startSupervisorRound } from './supervision-clock.mjs'
+import { caseSection, supervisionSwitch, supervisorNotice, escalationsPageBody, escalationNav,
+  supervisionSettingsBody, supervisionSettingsFromForm, supervisionSettingsSummary } from './supervision-pages.mjs'
+import { resolveEscalation, dismissEscalation, ESCALATION_STATE_FILTERS } from './escalations.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
 // cached there, `null` when it cannot be established. See providerChoiceBlock().
@@ -35,7 +40,7 @@ import { harnessOwnCredentials } from './models.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { panelValues, panelState, PANEL_MAX_VALUE } from './panels.mjs'
 import { actionState } from './panel-action.mjs'
-import { trafficLightFromIncidents, openIncidentsOf, allIncidentsOf, needsHuman } from './incidents.mjs'
+import { trafficLightFromIncidents, openIncidentsOf, allIncidentsOf, needsHuman, hasAnomaly, hasOtherAnomaly } from './incidents.mjs'
 import { TYPE_TEXT } from './detect.mjs'
 import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
@@ -109,34 +114,8 @@ const SEVERITY_TEXT = { rot: 'incidents.severity_red', gelb: 'incidents.severity
 /** The yellow anomaly kinds — every other `anomaly:*` is a red one. */
 const YELLOW_ANOMALIES = ['anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:followup_soft_overrun', 'anomaly:unpushed']
 
-const sqlList = kinds => kinds.map(k => `'${k}'`).join(',')
-
-/**
- * The anomaly kinds this run may still be coloured by — as a WHERE fragment.
- *
- * `cleared:*` kinds fall out by themselves: `clearAnomalies()` renames the
- * event, so neither `LIKE 'anomaly:%'` nor an IN-list matches a retracted one.
- * What did NOT fall out until now is an anomaly the run's own state has already
- * answered — `settledAnomalies()` is that rule (server/run-state.mjs): the
- * statements a run's end answers, plus "branch not pushed" on a run whose work
- * the hub itself put on origin.
- */
-function stillSpeaking(run) {
-  const settled = settledAnomalies(run)
-  return settled.length ? ` AND kind NOT IN (${sqlList(settled)})` : ''
-}
-
-/** Does the run carry one of these anomalies, still asking for attention? */
-function hasAnomaly(run, kinds) {
-  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`)
-    .get(run.id)
-}
-
-/** …and the counterpart: any anomaly that is NOT one of the yellow ones. */
-function hasOtherAnomaly(run, kinds) {
-  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%'
-    AND kind NOT IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`).get(run.id)
-}
+// `hasAnomaly()` / `hasOtherAnomaly()` live in server/incidents.mjs: the
+// supervisor's due check asks the same question and must not import this module.
 
 function trafficLight(run) {
   const vf = trafficLightFromIncidents(run.id)
@@ -965,8 +944,11 @@ export async function layout(req, title, active, content, selectedRepo = null, w
   // sandbox, so an installation without it sees no trace of it.
   const reviewNav = reviewInUse()
     ? [['/reviews', t('nav.reviews') + (openReviews().length ? ` (${openReviews().length})` : '')]] : []
+  // "Escalations" the same way: only while a supervisor agent is active or any
+  // escalation exists, with the number still waiting for somebody.
+  const escNav = escalationNav()
   const nav = [['/', t('nav.overview')], ['/agents', t('nav.agents')], ['/sessions', t('nav.sessions')],
-    ...reviewNav, ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
+    ...reviewNav, ...(escNav ? [escNav] : []), ['/repos', t('nav.repos')], ['/settings', t('nav.settings')]]
     .map(([href, label]) => `<a href="${href}" class="${active === href ? 'on' : ''}">${e(label)}</a>`).join('')
   // Only ACTIVE repos are offered. This one query feeds both the header
   // switcher and the Quick-Run dialog (which takes the list as a parameter), so
@@ -1549,6 +1531,7 @@ export async function pageAgents(req, res, url) {
   <p><a class="btn" href="/agents/edit?repo=${sel.id}">${e(t('agents.create'))}</a>
      <a class="btn" href="/flows">${e(t('nav.flows'))}</a>
      <span class="dim">${e(t('agents.flows_hint'))}</span></p>
+  ${supervisorNotice()}
   ${agentsTable(agents, { repoId: sel.id })}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.agents'), '/agents', body, sel.id))
 }
@@ -1562,7 +1545,7 @@ export function agentRow(a, ctx) {
   return `
   <tr id="agent-${a.id}">
     <td><form method="post" action="/agents/toggle" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(a.active ? t('agents.on') : t('agents.off'))}</button></form></td>
-    <td>${e(a.name)}</td><td>${e(harnessLabel(a.harness))}</td><td>${e(a.model || '–')}</td>
+    <td>${e(a.name)}${a.supervisor === 1 ? ` <span class="dim">· ${e(t('supervisor.badge'))}</span>` : ''}</td><td>${e(harnessLabel(a.harness))}</td><td>${e(a.model || '–')}</td>
     <td>${e(scheduleText(a))}</td><td>${e(t('unit.minutes', { n: a.expected_minutes }))}</td>
     <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
     <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(t('agents.start_now'))}</button></form>
@@ -1598,6 +1581,7 @@ export async function pageRunForm(req, res, url) {
   ${runTitleField({})}
   ${runDefFields(template, branchContext(sel.id))}
   ${runStartTimeFields({})}
+  ${activeSupervisorAgent() ? runSupervisionField({}) : ''}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="${e(t('runform.agent_name_ph'))}">)</label>`
   const body = `
@@ -1757,6 +1741,7 @@ export async function pageRun(req, res, url, id) {
   ${run.report_detail_md ? `<h3>${e(t('run.detail_report'))}</h3><pre>${e(run.report_detail_md)}</pre>` : ''}
   ${flowSection(run)}
   ${incidentSection(id, run)}
+  ${caseSection(run, Date.now(), { error: url.searchParams.get('case_error') === 'empty' })}
   <h3>${e(t('run.metrics'))}</h3>
   ${runMetrics(run)}
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
@@ -1922,7 +1907,8 @@ export function runDetailHead(run, ctx) {
          <button>${e(t(run.archived_at ? 'run.restore' : 'run.archive'))}</button></form>
        ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
          : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</div>`
-    : ''}`
+    : ''}
+  ${supervisionSwitch(run)}`
 }
 
 /** A finish_state / merge_status as a word, falling back to the raw value. */
@@ -2405,6 +2391,11 @@ export async function repoDelete(req, res, url, formBody) {
   try {
     db.prepare('DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
     db.prepare('DELETE FROM incidents WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    // The case files (server/supervision.mjs). They cascade with the run too,
+    // but this transaction says every child it removes rather than relying on it.
+    db.prepare('DELETE FROM case_entries WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    db.prepare('DELETE FROM case_state WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    db.prepare('DELETE FROM escalations WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
     db.prepare('DELETE FROM runs WHERE repo_id=?').run(repo.id)
     db.prepare('DELETE FROM agents WHERE repo_id=?').run(repo.id)
     db.prepare('DELETE FROM repos WHERE id=?').run(repo.id)
@@ -2818,6 +2809,8 @@ export async function pageSettings(req, res, url) {
      <span class="dim">${e(t('settings.review_hint', { setup: reviewSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/cleanup">${e(t('cleanup.settings_title'))}</a>
      <span class="dim">${e(t('settings.cleanup_hint', { setup: cleanupSettingsSummary() }))}</span></p>
+  <p><a class="btn" href="/settings/supervision">${e(t('supervision.settings_title'))}</a>
+     <span class="dim">${e(t('settings.supervision_hint', { setup: supervisionSettingsSummary() }))}</span></p>
   <p><a class="btn" href="/settings/skills">${e(t('flskills.title'))}</a>
      <span class="dim">${e(t('settings.skills_hint', { state: t(skillsInstallOn() ? 'layout.on' : 'layout.off') }))}</span></p>
   <p><a class="btn" href="/settings/sandbox">${e(t('sandbox.settings.title'))}</a>
@@ -3072,6 +3065,29 @@ export async function reviewSettingsSave(req, res, url, formBody) {
   redirect(res, '/settings/review')
 }
 
+/** The Escalations page (server/escalations.mjs): one state filter at a time, open by default. */
+export async function pageEscalations(req, res, url) {
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('escalation.page_title'), '/escalations',
+      escalationsPageBody(url.searchParams.get('state') ?? 'open', Date.now(), { error: url.searchParams.get('esc_error') })))
+}
+
+/**
+ * The page's resolve and dismiss buttons. The operator's own routes, apart from
+ * the resolver's contract: a resolve here is the operator's (`asOperator`),
+ * whoever had claimed it. A refusal — usually a resolver was quicker — comes
+ * back to the list with the reason instead of silently.
+ */
+export async function escalationPageAction(req, res, url, formBody, id, act) {
+  const b = await formBody()
+  const state = ESCALATION_STATE_FILTERS.includes(String(b.state ?? '')) ? b.state : 'open'
+  const r = act === 'resolve'
+    ? resolveEscalation(id, { outcome: b.outcome, note: b.note, asOperator: true })
+    : dismissEscalation(id)
+  const err = r.ok ? '' : `&esc_error=${r.code === 409 ? 'changed' : r.code === 404 ? 'gone' : 'invalid'}`
+  redirect(res, `/escalations?state=${state}${err}`)
+}
+
 /** The Reviews page: every open code review, and the latest decided ones. */
 export async function pageReviews(req, res) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
@@ -3168,6 +3184,28 @@ export async function cleanupSettingsSave(req, res, url, formBody) {
   if (b.cleanup_repo_id) setSetting('cleanup_repo_id', String(b.cleanup_repo_id))
   setSetting('cleanup_prompt', String(b.cleanup_prompt ?? ''))
   redirect(res, '/settings/cleanup')
+}
+
+// ---------------- supervision (Settings → Supervision) ----------------
+//
+// The clock's numbers and which agent supervises. Its own page and its own
+// save handler, like the cleanup page: the handler writes exactly the keys of
+// this form (supervision-pages.mjs), so the big form's allowlist is not involved.
+
+export async function pageSupervisionSettings(req, res, url) {
+  const stored = Object.fromEntries(db.prepare(`SELECT key, value FROM settings WHERE key LIKE 'supervision_%'`).all()
+    .map(r => [r.key, r.value]))
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    .end(await layout(req, t('supervision.settings_title'), '/settings', supervisionSettingsBody(stored)))
+}
+
+export async function supervisionSettingsSave(req, res, url, formBody) {
+  const b = await formBody()
+  const { values, problems } = supervisionSettingsFromForm(b)
+  // All or nothing: a page that saved four of five numbers would look saved.
+  if (problems.length) return problemPage(req, res, t('supervision.settings_title'), problems, '/settings/supervision')
+  for (const [k, v] of Object.entries(values)) setSetting(k, v)
+  redirect(res, '/settings/supervision')
 }
 
 // ---------------------------------------------------------------------------
@@ -3649,7 +3687,9 @@ function agentFields(a = {}, repoId) {
   ${runDefFields(a, branchContext(repoId))}
   <input type="hidden" name="repo_id" value="${repoId}">
   ${scheduleFields(a)}
-  <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>`
+  <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>
+  ${supervisorField(a)}
+  ${supervisorNotice()}`
 }
 
 export async function agentEdit(req, res, url) {
@@ -3695,7 +3735,7 @@ export async function agentSave(req, res, url, formBody) {
   // SQLite constraint that surfaces as a 500. The other repo is free to carry
   // the same name, which is what the move feature relies on.
   else if (agentNameTaken(+b.repo_id, name, id ? +id : null)) problems.push(t('agents.name_taken', { name }))
-  const def = await runDefFromForm(b, problems)
+  const def = await runDefFromForm(b, problems, { agentForm: true })
   const zp = scheduleFromForm(b, problems)
   if (problems.length) return problemPage(req, res, t('agentform.title_edit'), problems, back)
 
@@ -3851,6 +3891,14 @@ export async function agentStart(req, res, url, formBody) {
   // A manual start is allowed even with the pipeline switched off (planning
   // 4.8) — the switch only gates the SCHEDULED starts. Both branches used to
   // stand here, doing exactly the same thing.
+  // A supervisor agent goes through its own seam: the hub runs the due check
+  // by hand and the round gets its case list (server/supervision-clock.mjs).
+  // Its refusals (not the active supervisor, a round still in flight) are said.
+  if (agent.supervisor === 1) {
+    const r = await startSupervisorRound(agent)
+    if (!r.runId && r.error) return problemPage(req, res, t('agents.start_now'), [r.error], `/agents?repo=${agent.repo_id}`)
+    return redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
+  }
   const r = await startForAgent(agent)
   redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
 }

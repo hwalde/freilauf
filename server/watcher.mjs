@@ -224,6 +224,14 @@ async function runTick() {
   // (server/cleanup.mjs), one runs by itself. The memory read is the sidebar's
   // cached measurement — the same number the panel shows, not a second one.
   try { await maybeAutoCleanup() } catch (e) { console.error('[cleanup]', e.message) }
+  // The supervision clock (server/supervision-clock.mjs): a supervisor round
+  // when cases are due, the fence for a stuck round, the timed escalation
+  // notices. No model is asked; a quiet pass writes nothing.
+  // `FREILAUF_SUPERVISION_OFF=1` switches it off (every suite sets it).
+  try {
+    const { supervisionTick } = await import('./supervision-clock.mjs')
+    await supervisionTick()
+  } catch (e) { console.error('[supervision]', e.message) }
   // The finish gate has its own 5-second timer (server/integrate.mjs); this is
   // the net under it, for the case that timer ever stops.
   if (!integratorTimerOff()) {
