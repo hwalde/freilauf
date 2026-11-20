@@ -925,6 +925,29 @@ export async function handleReport(runId, body, via = 'http') {
 }
 
 /**
+ * `fl-report reply "<text>"` — the run answers a supervisor's nudge (or tells
+ * its supervisor something unasked). The one report kind that is not about the
+ * work: it becomes a `reply` entry in the run's OWN case file and changes
+ * nothing else — not progress, not help, not done, not the status — whether the
+ * run is working or long finished. It is never pushed into a supervisor's
+ * session: the case is due again, and the next round pulls it.
+ *
+ * Its answer travels back as fl-report's output, like every report's; a refusal
+ * is `ok:false`, which fl-report files in the inbox — the empty reply is
+ * stopped by fl-report itself before it gets that far.
+ */
+async function handleReply(run, text) {
+  if (!String(text ?? '').trim()) return { ok: false, error: 'a reply needs a text: fl-report reply "<your answer>"' }
+  // Lazily, like every hub module a report reaches into: supervision imports this module.
+  const { recordReply } = await import('./supervision-acts.mjs')
+  const r = recordReply(run.id, text)
+  return { ok: true, message: r.duplicate
+    ? 'Freilauf: this reply is already in the case file; it was not written twice.'
+    : 'Freilauf: your reply is in this run\'s case file. The supervisor reads it on its next round; '
+      + 'nobody is waiting in this session for more. Carry on with your work.' }
+}
+
+/**
  * `fl-report access "<what you need and why>"` — the agent asking for something
  * the sandbox is keeping from it (SANDBOX.md).
  *
@@ -952,29 +975,6 @@ export async function handleReport(runId, body, via = 'http') {
  * A repeat of the SAME request (an agent that hits the same wall twice) counts
  * on the open incident and stays quiet, the way a replayed help call does.
  */
-/**
- * `fl-report reply "<text>"` — the run answers a supervisor's nudge (or tells
- * its supervisor something unasked). The one report kind that is not about the
- * work: it becomes a `reply` entry in the run's OWN case file and changes
- * nothing else — not progress, not help, not done, not the status — whether the
- * run is working or long finished. It is never pushed into a supervisor's
- * session: the case is due again, and the next round pulls it.
- *
- * Its answer travels back as fl-report's output, like every report's; a refusal
- * is `ok:false`, which fl-report files in the inbox — the empty reply is
- * stopped by fl-report itself before it gets that far.
- */
-async function handleReply(run, text) {
-  if (!String(text ?? '').trim()) return { ok: false, error: 'a reply needs a text: fl-report reply "<your answer>"' }
-  // Lazily, like every hub module a report reaches into: supervision imports this module.
-  const { recordReply } = await import('./supervision-acts.mjs')
-  const r = recordReply(run.id, text)
-  return { ok: true, message: r.duplicate
-    ? 'Freilauf: this reply is already in the case file; it was not written twice.'
-    : 'Freilauf: your reply is in this run\'s case file. The supervisor reads it on its next round; '
-      + 'nobody is waiting in this session for more. Carry on with your work.' }
-}
-
 async function handleAccessRequest(run, text, { followup = false } = {}) {
   const runId = run.id
   const beleg = String(text ?? '').trim().slice(0, 300)

@@ -125,14 +125,14 @@ const ESCALATION_OUTCOME_WORDS = ['solved', 'unsolved', 'operator', 'dismissed']
  * The escalations page (`/escalations`): the list for one state filter in the
  * read API's order (waiting ones oldest first), each with the run it is about and, while it
  * is open or claimed, the operator's two buttons — resolve (with an outcome
- * and a note) and dismiss ("not a problem"). Plain POST forms to the contract's
- * own routes, sent back here; the resolve form carries `operator=1` so the
- * case file names the operator, whoever had claimed it.
+ * and a note) and dismiss ("not a problem"). Plain POST forms to the page's own
+ * routes (`/escalations/<id>/resolve|dismiss`, pages.mjs), never the resolver's
+ * contract routes: a resolve from here is the operator's. `error` is the word
+ * the redirect brought back when a button was refused.
  */
-export function escalationsPageBody(filter = 'open', nowMs = Date.now()) {
+export function escalationsPageBody(filter = 'open', nowMs = Date.now(), { error = null } = {}) {
   const state = ESCALATION_STATE_FILTERS.includes(filter) ? filter : 'open'
   const list = listEscalations({ state, limit: ESCALATIONS_LIMIT_MAX })
-  const back = `/escalations?state=${state}`
   const tabs = ESCALATION_STATE_FILTERS.map(s =>
     `<a href="/escalations?state=${s}" class="${s === state ? 'on' : ''}">${e(t(`escalation.state_${s}`))}</a>`).join(' · ')
   const rows = (list.rows ?? []).map(row => {
@@ -153,18 +153,19 @@ export function escalationsPageBody(filter = 'open', nowMs = Date.now()) {
         ${it.run.repo ? `· ${e(it.run.repo)}` : ''}</div>
       ${it.note ? `<div class="dim">${e(t('escalation.note'))}: ${e(it.note)}</div>` : ''}
       ${pending ? `<div class="btn-row">
-        <form method="post" action="/api/escalations/${it.id}/resolve" class="inline">
-          <input type="hidden" name="back" value="${e(back)}"><input type="hidden" name="operator" value="1">
+        <form method="post" action="/escalations/${it.id}/resolve" class="inline">
+          <input type="hidden" name="state" value="${e(state)}">
           <select name="outcome" aria-label="${e(t('escalation.outcome'))}">${outcomes}</select>
           <input name="note" maxlength="500" placeholder="${e(t('escalation.note_ph'))}">
           <button>${e(t('escalation.resolve'))}</button></form>
-        <form method="post" action="/api/escalations/${it.id}/dismiss" class="inline">
-          <input type="hidden" name="back" value="${e(back)}">
+        <form method="post" action="/escalations/${it.id}/dismiss" class="inline">
+          <input type="hidden" name="state" value="${e(state)}">
           <button>${e(t('escalation.dismiss'))}</button></form></div>` : ''}
     </li>`
   }).join('')
   return `<h2>${e(t('escalation.page_title'))}</h2>
     <p class="dim">${e(t('escalation.intro'))}</p>
+    ${['changed', 'gone', 'invalid'].includes(error) ? `<p class="warn" id="escalation-error">${e(t(`escalation.err_${error}`))}</p>` : ''}
     <p class="esc-tabs">${tabs}</p>
     ${rows ? `<ol class="escalations">${rows}</ol>` : `<p class="dim" id="escalations-empty">${e(t('escalation.none'))}</p>`}`
 }

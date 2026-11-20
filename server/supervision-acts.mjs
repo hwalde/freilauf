@@ -53,9 +53,14 @@ export function nudgeLimit() {
  *   typed   the tag, as KEYSTROKES — so the head of the submitted line starts
  *           with it even where claude collapses a long paste into a placeholder
  *           (docs/pitfalls.md), and the run's prompt hook can say "this was a
- *           nudge" (reports.mjs, submissionKind);
+ *           nudge" (reports.mjs, submissionKind). A CONSTANT without digits:
+ *           whatever is typed reaches a TUI as keys, and in a numbered menu or a
+ *           dialog a digit is a choice — the supervisor's short id goes into the
+ *           pasted header instead;
  *   pasted  the header the hub writes — who it is from, whose authority it
- *           carries, how to answer — and the supervisor's text VERBATIM after it.
+ *           carries, how to answer — and the supervisor's text after it, with
+ *           only the envelope's own tag neutralised (`&lt;`), so the text can
+ *           neither close the envelope nor open a second one.
  *
  * Only the hub composes the header; nothing the supervisor sends can change it.
  * Short and plain, because it lands in the context of an agent that may run on
@@ -64,17 +69,21 @@ export function nudgeLimit() {
  */
 export function composeNudge({ from, text }) {
   const who = shortId(String(from ?? ''))
-  const typed = `<${NUDGE_TAG} from=${who}>`
+  const typed = `<${NUDGE_TAG}>`
+  const body = String(text ?? '').replace(new RegExp(`<(/?${NUDGE_TAG})`, 'gi'), '&lt;$1')
   const pasted = [
     '',
     `From the supervisor of this Freilauf hub (run ${who}), on behalf of the operator and with the operator's authority.`,
     'Reply with: fl-report reply "<your answer>" — nobody reads your screen.',
     'Message:',
-    String(text ?? ''),
+    body,
     `</${NUDGE_TAG}>`,
   ].join('\n')
   return { typed, pasted }
 }
+
+/** Runs a nudge is being typed into right now: a second one would interleave its keys with the first's. */
+const TYPING = new Set()
 
 /** How many nudges this case received since the operator last answered (SPEC 7.15). */
 export function nudgesSinceAnswer(runId) {
@@ -93,6 +102,8 @@ const NUDGE_REFUSALS = {
     + 'Reviving it is a separate step; or end it, or close the case.',
   unknown: (run) => `Refused: tmux could not say whether run ${shortId(run.id)} is alive, so nothing was typed. `
     + 'Try again on a later round.',
+  busy: (run) => `Refused: a nudge is being typed into run ${shortId(run.id)} right now. Wait for its answer; `
+    + 'do not send two at once.',
   typeFailed: (run, why) => `Refused: typing into the session of run ${shortId(run.id)} failed (${why}). `
     + 'Nothing was recorded; read the case before trying again.',
 }
@@ -120,6 +131,14 @@ export async function nudgeOp({ caller, target, body }) {
   const text = boundCaseText(raw, Number.MAX_SAFE_INTEGER).text
   if (!text) return { code: 400, ok: false, error: NUDGE_REFUSALS.empty() }
   if (text.length > NUDGE_TEXT_MAX) return { code: 400, ok: false, error: NUDGE_REFUSALS.long(text.length) }
+  // One nudge per run at a time: two typed at once interleave their keys in one
+  // session, and both would pass the limit below before either was counted.
+  if (TYPING.has(target.id)) return { code: 409, ok: false, error: NUDGE_REFUSALS.busy(target) }
+  TYPING.add(target.id)
+  try { return await typeNudge({ caller, target, text, ids }) } finally { TYPING.delete(target.id) }
+}
+
+async function typeNudge({ caller, target, text, ids }) {
   const max = nudgeLimit()
   const sent = nudgesSinceAnswer(target.id)
   if (sent >= max) return { code: 403, ok: false, error: NUDGE_REFUSALS.limit(target, sent, max), nudges_since_answer: sent, limit: max }
@@ -145,11 +164,13 @@ export async function nudgeOp({ caller, target, body }) {
   }
   db.prepare(`UPDATE runs SET last_activity_at=datetime('now') WHERE id=?`).run(target.id)
 
-  // What the line means depends on where the run stood when it was typed —
-  // the same three ways the send route takes, attributed to the supervisor.
+  // What the line means depends on where the run stands now that it was typed
+  // — read AGAIN, because the checks and the typing took a second in which the
+  // run may have reported or been answered. The same three ways the send route
+  // takes, attributed to the supervisor.
   const fresh = getRun(target.id) ?? target
-  const into = target.status === 'waiting_help' ? 'help'
-    : FINISHED.includes(target.status) ? 'followup' : 'running'
+  const into = fresh.status === 'waiting_help' ? 'help'
+    : FINISHED.includes(fresh.status) ? 'followup' : 'running'
   if (fresh.agent_state === 'waiting') noteAgentState(fresh, 'working', 'supervisor')
   addEvent(target.id, 'supervisor_message', { by: caller.id, into, text: text.slice(0, 500) })
   if (into === 'help') answerHelpCall(target.id, text, 'supervisor', { by: caller.id })

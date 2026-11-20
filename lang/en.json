@@ -2047,5 +2047,8 @@
   "escalation.note": "Note",
   "escalation.note_ph": "Note for the case file (optional)",
   "escalation.resolve": "Resolve",
-  "escalation.dismiss": "Dismiss: not a problem"
+  "escalation.dismiss": "Dismiss: not a problem",
+  "escalation.err_changed": "Nothing changed: the escalation is no longer open — somebody else decided it a moment ago.",
+  "escalation.err_gone": "There is no such escalation.",
+  "escalation.err_invalid": "Not saved: choose an outcome, and keep the note under 500 characters."
 }

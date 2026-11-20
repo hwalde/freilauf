@@ -2047,5 +2047,8 @@
   "escalation.note": "Notiz",
   "escalation.note_ph": "Notiz für die Fallakte (optional)",
   "escalation.resolve": "Lösen",
-  "escalation.dismiss": "Verwerfen: kein Problem"
+  "escalation.dismiss": "Verwerfen: kein Problem",
+  "escalation.err_changed": "Nichts geändert: Die Eskalation ist nicht mehr offen — jemand anderes hat sie gerade entschieden.",
+  "escalation.err_gone": "Diese Eskalation gibt es nicht.",
+  "escalation.err_invalid": "Nicht gespeichert: Wähle ein Ergebnis und halte die Notiz unter 500 Zeichen."
 }

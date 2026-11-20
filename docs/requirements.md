@@ -837,11 +837,14 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   names which, and everything is bounded (`tail` ≤ 200, `chars` ≤ 60 000).
 - What a transcript reader read is never written to a log, an event or an
   entry: it can hold a secret the agent printed.
-- A nudge is typed by the hub only: the tag `<freilauf-supervisor from=<short
-  id>>` as keystrokes, then a pasted header and the supervisor's text verbatim
+- A nudge is typed by the hub only: the constant tag `<freilauf-supervisor>`
+  as keystrokes (no digits: in a numbered menu a digit is a choice), then a
+  pasted header naming the supervisor run and the supervisor's text
   (`composeNudge()`); control characters other than newline and tab are
-  removed first, so a text cannot end the paste and type keys of its own;
-  over `NUDGE_TEXT_MAX` it is refused, never cut.
+  removed first, so a text cannot end the paste and type keys of its own, and
+  the envelope's tag inside the text is neutralised, so it can neither close
+  the envelope nor open a second one; over `NUDGE_TEXT_MAX` it is refused,
+  never cut; one nudge per run is typed at a time.
 - A nudge reuses the functions behind `POST /send`, never the route:
   `supervisor_message {by}` always, `help_answered` / `followup_started`
   `{via:'supervisor', by}` by the run's state, a `message` entry; nothing a
@@ -875,7 +878,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   is open or claimed.
 - Raising writes an `escalated` entry; resolving or dismissing writes a
   `resolved` entry (author `resolver:<by>`, else `resolver:<claimed_by>`, else
-  `operator`; the page's own form is the operator), which makes the case due.
+  `operator`), which makes the case due; the escalations page resolves and
+  dismisses through its own routes (`/escalations/<id>/…`) as the operator,
+  so no caller of the contract routes can write as the operator.
 - With `supervision_escalation_grace_minutes` at 0 (the default) the operator
   hears of an escalation when it is raised, on the urgent route; the timed
   announcements (`escalationNotices()`) mark what they sent, so a clock never

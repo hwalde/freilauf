@@ -30,6 +30,7 @@ import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
 import { harnessLabel } from './harnesses/index.mjs'
 import { activeSupervisorAgent, startSupervisorRound } from './supervision.mjs'
 import { caseSection, supervisionSwitch, supervisorNotice, escalationsPageBody, escalationNav } from './supervision-pages.mjs'
+import { resolveEscalation, dismissEscalation, ESCALATION_STATE_FILTERS } from './escalations.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
 // cached there, `null` when it cannot be established. See providerChoiceBlock().
@@ -3063,7 +3064,24 @@ export async function reviewSettingsSave(req, res, url, formBody) {
 /** The Escalations page (server/escalations.mjs): one state filter at a time, open by default. */
 export async function pageEscalations(req, res, url) {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    .end(await layout(req, t('escalation.page_title'), '/escalations', escalationsPageBody(url.searchParams.get('state') ?? 'open')))
+    .end(await layout(req, t('escalation.page_title'), '/escalations',
+      escalationsPageBody(url.searchParams.get('state') ?? 'open', Date.now(), { error: url.searchParams.get('esc_error') })))
+}
+
+/**
+ * The page's resolve and dismiss buttons. The operator's own routes, apart from
+ * the resolver's contract: a resolve here is the operator's (`asOperator`),
+ * whoever had claimed it. A refusal — usually a resolver was quicker — comes
+ * back to the list with the reason instead of silently.
+ */
+export async function escalationPageAction(req, res, url, formBody, id, act) {
+  const b = await formBody()
+  const state = ESCALATION_STATE_FILTERS.includes(String(b.state ?? '')) ? b.state : 'open'
+  const r = act === 'resolve'
+    ? resolveEscalation(id, { outcome: b.outcome, note: b.note, asOperator: true })
+    : dismissEscalation(id)
+  const err = r.ok ? '' : `&esc_error=${r.code === 409 ? 'changed' : r.code === 404 ? 'gone' : 'invalid'}`
+  redirect(res, `/escalations?state=${state}${err}`)
 }
 
 /** The Reviews page: every open code review, and the latest decided ones. */

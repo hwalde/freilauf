@@ -2047,5 +2047,8 @@
   "escalation.note": "备注",
   "escalation.note_ph": "案卷备注（可选）",
   "escalation.resolve": "解决",
-  "escalation.dismiss": "驳回：不是问题"
+  "escalation.dismiss": "驳回：不是问题",
+  "escalation.err_changed": "未作更改：该升级事项已不再待处理——刚刚已有他人作出处理。",
+  "escalation.err_gone": "不存在该升级事项。",
+  "escalation.err_invalid": "未保存：请选择一个结果，并将备注控制在 500 个字符以内。"
 }

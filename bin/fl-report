@@ -17,7 +17,7 @@
 #                                                  A human decides; keep working on
 #                                                  whatever you CAN do meanwhile.
 #   fl-report reply "your answer"                  Answer a message from the supervisor
-#                                                  (it starts with <freilauf-supervisor …>).
+#                                                  (it starts with <freilauf-supervisor>).
 #                                                  Goes into this run's case file; changes
 #                                                  nothing else about the run.
 #   fl-report branch <name>                        Branch reported

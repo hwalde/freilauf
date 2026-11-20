@@ -55,8 +55,9 @@ POST /api/escalations/<id>/dismiss                                    open|claim
 - A name (`by`) is 1–64 characters of letters, digits and `. _ @ -`.
 - Two resolvers claiming the same escalation: exactly one gets the 200.
 - `outcome=operator` means the problem now lies with the human.
-- `dismiss` is the operator's "not a problem"; it is offered on the hub's
-  escalations page and is not meant for a resolver.
+- `dismiss` is the operator's "not a problem" and is not meant for a resolver.
+  The hub's escalations page resolves and dismisses through routes of its own,
+  so these routes never write as the operator except by the rule below.
 
 ## What the run's case file hears
 

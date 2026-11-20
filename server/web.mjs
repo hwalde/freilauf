@@ -23,7 +23,7 @@ import {
   repoEdit, repoSave, settingsSave,
   codingAgentSave, codingAgentDelete,
   pageFavorites, favoriteEdit, favoriteSave, favoriteDelete,
-  pageMergeSettings, mergeSettingsSave, pageReviews, pageReviewSettings, reviewSettingsSave, pageEscalations,
+  pageMergeSettings, mergeSettingsSave, pageReviews, pageReviewSettings, reviewSettingsSave, pageEscalations, escalationPageAction,
   pageCleanupSettings, cleanupSettingsSave,
   pageSkillSettings, skillSettingsSave, skillSettingsSync,
   repoToggle, repoDelete,
@@ -310,6 +310,12 @@ async function dispatch(req, res, url, path, formBody) {
   // driven through #prov, #model and #effort, and those ids exist once per page.
   if (req.method === 'GET' && path === '/reviews') return pageReviews(req, res, url)
   if (req.method === 'GET' && path === '/escalations') return pageEscalations(req, res, url)
+  // The page's own buttons — not the resolver's contract routes, so the
+  // operator's authorship cannot be claimed through the API (escalations.mjs).
+  {
+    const em = req.method === 'POST' && path.match(/^\/escalations\/(\d{1,15})\/(resolve|dismiss)$/)
+    if (em) return escalationPageAction(req, res, url, formBody, em[1], em[2])
+  }
   // Settings → Reports: the deputy, the operator's rules and the daily digest
   // (server/report-pages.mjs), plus the digests themselves.
   if (req.method === 'GET' && path === '/settings/reports') return reportPages.pageReportSettings(req, res, url)
@@ -540,20 +546,19 @@ async function api(req, res, url) {
     return answer(req, res, 200, { ok: true, entry: r.id }, b.back || `/runs/${run.id}#run-case`)
   }
   // Escalations (server/escalations.mjs): the four transitions of the FIXED
-  // contract (docs/escalations.md). JSON with its status code for a resolver
-  // (`fl-api` sends `accept: application/json`); the escalations page's forms are
-  // redirected back. 404 unknown id, 409 a state the transition does not apply
-  // to (nothing changes), 400 a parameter it cannot take.
+  // contract (docs/escalations.md), JSON with its status code for a resolver.
+  // 404 unknown id, 409 a state the transition does not apply to (nothing
+  // changes), 400 a parameter it cannot take. The escalations page has its own
+  // routes (/escalations/<id>/…), so nothing here writes as the operator.
   if (req.method === 'POST' && (m = path.match(/^\/api\/escalations\/(\d{1,15})\/(claim|release|resolve|dismiss)$/))) {
     const b = await form(req)
     const [, id, act] = m
     const r = act === 'claim' ? claimEscalation(id, b.by)
       : act === 'release' ? releaseEscalation(id)
-        : act === 'resolve' ? resolveEscalation(id, { outcome: b.outcome, note: b.note, by: b.by, asOperator: b.operator === '1' })
+        : act === 'resolve' ? resolveEscalation(id, { outcome: b.outcome, note: b.note, by: b.by })
           : dismissEscalation(id)
-    const back = String(b.back ?? '').startsWith('/escalations') ? b.back : null
-    if (!r.ok) return answer(req, res, r.code, { ok: false, error: r.error, ...(r.state ? { state: r.state } : {}) }, back)
-    return answer(req, res, 200, { ok: true, escalation: escalationItem(r.row) }, back)
+    if (!r.ok) return json(res, r.code, { ok: false, error: r.error, ...(r.state ? { state: r.state } : {}) })
+    return json(res, 200, { ok: true, escalation: escalationItem(r.row) })
   }
   // Same definition, same validation and same start path as the run form
   // (pages.mjs) — this endpoint used to be its own third copy and saved an

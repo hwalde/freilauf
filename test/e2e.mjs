@@ -9071,12 +9071,13 @@ export default {
       equal(k.state.nudges, 1, 'counted on the case')
       const pane = await waitFor(async () => { const p = await paneText(W2); return p.includes('Please commit your work') ? p : null },
         { what: 'the nudge in the pane', timeoutMs: 10_000 })
-      contains(pane, `[agent saw] <freilauf-supervisor from=${shortIdOf(SUP)}>`, 'the tag arrives first, typed')
+      contains(pane, '[agent saw] <freilauf-supervisor>', 'the tag arrives first, typed')
+      contains(pane, `(run ${shortIdOf(SUP)})`, 'the header names the supervisor run')
       contains(pane, "on behalf of the operator and with the operator's authority", 'the header the hub wrote')
       contains(pane, 'fl-report reply', 'with the way to answer')
       // The agent's own prompt hook a beat later — the head starts with the tag.
       const before = kinds(W2, 'agent_working')
-      await reportTo(W2, { kind: '_working', source: 'prompt', prompt_head: `<freilauf-supervisor from=${shortIdOf(SUP)}> From the supervisor` })
+      await reportTo(W2, { kind: '_working', source: 'prompt', prompt_head: '<freilauf-supervisor> From the supervisor' })
       equal(kinds(W2, 'agent_working'), before, 'the echo changes nothing')
     })
 
@@ -9088,14 +9089,14 @@ export default {
       equal(n.code, 0, `nudged (${n.stderr.trim()})`)
       const pane = await waitFor(async () => { const p = await paneText(L2); return p.includes('END-OF-LONG-NUDGE') ? p : null },
         { what: 'the end of the long nudge in the pane', timeoutMs: 10_000 })
-      contains(pane, '<freilauf-supervisor from=', 'the tag still leads')
+      contains(pane, '<freilauf-supervisor>', 'the tag still leads')
       equal((await caseOf(L2)).entries[0].text, long, 'and the case file keeps it verbatim')
       const tooLong = await supervise(SUP, ['nudge', shortIdOf(L2), 'x'.repeat(4001)])
       equal(tooLong.code, 1, 'over 4000 characters is refused')
       contains(tooLong.stderr, 'at most 4000', 'with the bound')
     })
 
-    await check('a nudge into a finished run opens a follow-up marked as the supervisor\'s; a head-less echo changes nothing', async () => {
+    await check('a nudge into a finished run opens a follow-up marked as the supervisor\'s; its echo, with a head or without, changes nothing', async () => {
       const F2 = await freshRun('finishes, then gets more work')
       await reportDone(F2)
       const n = await supervise(SUP, ['nudge', shortIdOf(F2), 'Also update the changelog, then report again.'])
@@ -9107,13 +9108,22 @@ export default {
       equal(started[0].via, 'supervisor', 'marked as the supervisor\'s, not the operator\'s')
       equal(started[0].by, SUP, 'naming the supervisor run')
       isTrue(!!lauf(F2).nudge_typed_at, 'the moment of typing is kept for the echo')
-      // cursor and hermes: the prompt hook carries no head.
-      await reportTo(F2, { kind: '_working', source: 'prompt' })
-      equal(kinds(F2, 'followup_started'), 1, 'the head-less echo opens no second commission')
+      // claude: the prompt hook's head starts with the typed tag. On a finished
+      // run with a commission open, a person's line would restart it.
+      await reportTo(F2, { kind: '_working', source: 'prompt', prompt_head: '<freilauf-supervisor> From the supervisor of this Freilauf hub' })
+      equal(kinds(F2, 'followup_started'), 1, 'the echo with a head opens no second commission')
       equal(lauf(F2).nudge_typed_at, null, 'and spends the window')
-      // A person typing after the echo is a person again.
+      // cursor and hermes: the prompt hook carries no head.
+      equal((await supervise(SUP, ['nudge', shortIdOf(F2), 'And the changelog date, please.'])).code, 0, 'a second nudge')
+      equal(evPayloads(F2, 'followup_started').at(-1)?.via, 'supervisor', 'restarts the commission as the supervisor\'s')
+      await reportTo(F2, { kind: '_working', source: 'prompt' })
+      equal(kinds(F2, 'followup_started'), 2, 'the head-less echo changes nothing either')
+      equal(lauf(F2).nudge_typed_at, null, 'and spends the window')
+      // The control: a person typing after the echo is a person again.
       await reportTo(F2, { kind: '_working', source: 'prompt' })
       equal(evPayloads(F2, 'followup_started').at(-1)?.via, 'session', 'the next head-less line is the operator\'s')
+      await reportTo(F2, { kind: '_working', source: 'prompt', prompt_head: 'please also fix the tests' })
+      equal(kinds(F2, 'followup_started'), 4, 'and so is a line with a human head')
       const page = await (await fetchPath(`/runs/${F2}`)).text()
       contains(page, 'it opened a follow-up', 'the case file says what the nudge did')
     })
@@ -9130,7 +9140,7 @@ export default {
       const ans = evPayloads(H2, 'help_answered')
       equal(ans.length, 1, 'one answer')
       equal(`${ans[0].via}:${ans[0].by}`, `supervisor:${SUP}`, 'by the supervisor')
-      await reportTo(H2, { kind: '_working', source: 'prompt', prompt_head: `<freilauf-supervisor from=${shortIdOf(SUP)}>` })
+      await reportTo(H2, { kind: '_working', source: 'prompt', prompt_head: '<freilauf-supervisor>' })
       equal(kinds(H2, 'help_answered'), 1, 'the echo answers nothing a second time')
     })
 
@@ -9144,6 +9154,20 @@ export default {
       equal((await caseOf(N2)).entries.filter(e => e.kind === 'message').length, 3, 'and not recorded')
       equal((await postForm(`/api/runs/${N2}/case/answer`, { text: 'tell it to go ahead' })).status, 200, 'the operator answers')
       equal((await supervise(SUP, ['nudge', shortIdOf(N2), 'go ahead'])).code, 0, 'the supervisor may nudge again')
+    })
+
+    await check('a nudge into a run whose agent is gone (dead pane) is refused and changes nothing', async () => {
+      const P2 = await freshRun('its agent exits')
+      const s = lauf(P2).tmux_session
+      await sh('tmux', ['set-option', '-t', `=${s}:`, 'remain-on-exit', 'on'])
+      await sh('tmux', ['send-keys', '-t', `=${s}:`, 'C-d'])
+      await waitFor(async () => (await sh('tmux', ['display', '-p', '-t', `=${s}:`, '#{pane_dead}'])).stdout.trim() === '1',
+        { what: 'the stub pane to die', timeoutMs: 10_000 })
+      const n = await supervise(SUP, ['nudge', shortIdOf(P2), 'still there?'])
+      equal(n.code, 1, 'refused')
+      contains(n.stderr, 'pane is dead', 'because the agent is gone')
+      equal((await caseOf(P2)).total, 0, 'nothing recorded')
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
     })
 
     await check('a nudge into a run without a session is refused and changes nothing', async () => {
@@ -9197,17 +9221,25 @@ export default {
       contains(ab[0].reason ?? '', 'two weeks ago', 'with the reason')
       isFalse(ab.some(p => p.by === 'user'), 'never "by user"')
       const { abortedByFrom } = await import('../server/run-state.mjs')
-      equal(abortedByFrom(ab[0]), 'supervisor', 'the deputy\'s operator-ended rule reads it as the supervisor\'s')
+      equal(abortedByFrom(ab[0]), 'supervisor', 'the abort reads as the supervisor\'s')
+      const { endedByOperator } = await import('../server/triage.mjs')
+      equal(endedByOperator({ kind: 'report', hub_types: '[]' }, lauf(E2)), false, 'the deputy\'s operator-ended rule does not fire')
       const act = (await caseOf(E2)).entries.at(-1)
       equal(`${act.kind}:${act.data?.op}:${act.data?.outcome}`, 'action:end:aborted', 'an action entry')
       const look = await supervise(SUP, ['look', shortIdOf(E2), '--json'])
       equal(look.json?.due?.exclusion, 'ended_by_supervisor', 'and the run is no case any more')
       const D3 = await freshRun('done, session still up')
       await reportDone(D3)
+      equal((await supervise(SUP, ['nudge', shortIdOf(D3), 'one more thing'])).code, 0, 'a follow-up opened by a nudge')
       const e2 = await supervise(SUP, ['end', shortIdOf(D3), 'nothing more to do here'])
       equal(e2.json?.outcome, 'session_closed', 'a done run only loses its session')
+      equal(e2.json?.followup_abandoned, true, 'and its open follow-up is abandoned')
       equal(lauf(D3).status, 'done', 'and stays done')
       equal(evPayloads(D3, 'tmux_closed').at(-1)?.source, 'supervisor', 'closed by the supervisor')
+      const abandoned = db.prepare(`SELECT id, payload FROM events WHERE run_id=? AND kind='followup_abandoned' ORDER BY id DESC LIMIT 1`).get(D3)
+      equal(JSON.parse(abandoned.payload).source, 'supervisor', 'abandoned by the supervisor')
+      equal(endedByOperator({ kind: 'event', hub_types: '["followup_abandoned"]', event_id: abandoned.id }, lauf(D3)), false,
+        'which the deputy does not read as the operator either')
       equal((await supervise(SUP, ['end', shortIdOf(D3), ' '])).code, 1, 'an end without a reason is refused')
     })
 
@@ -9276,6 +9308,9 @@ export default {
       equal(unknownState.code, 1, 'an unknown state word exits 1')
       contains(unknownState.json?.error ?? '', 'open, claimed, resolved, dismissed, all', 'and names the valid ones')
 
+      const noBy = await api(['--raw', '--status', '-X', 'POST', `/api/escalations/${id}/claim`])
+      equal(noBy.code, 1, 'a claim without by exits 1')
+      contains(noBy.stderr, 'HTTP 400', 'with a 400')
       const claim = await api(['--raw', '-X', 'POST', `/api/escalations/${id}/claim`, 'by=collector-1'])
       equal(claim.code, 0, 'claim exits 0')
       equal(`${claim.json?.escalation?.state}|${claim.json?.escalation?.claimed_by}`, 'claimed|collector-1', 'claimed by the resolver')
@@ -9304,16 +9339,32 @@ export default {
       equal(nf.code, 1, 'an unknown id exits 1')
       contains(nf.stderr, 'HTTP 404', 'with a 404')
       equal((await api(['--raw', '/api/escalations', 'state=resolved'])).json.escalations[0]?.id, id, 'it is in the resolved list')
+      const r3 = await supervise(SUP, ['escalate', shortIdOf(X2), 'quota_or_credit', 'The provider credit is used up.'])
+      const byRes = await api(['--raw', '-X', 'POST', `/api/escalations/${r3.json?.escalation}/resolve`, 'outcome=operator', 'by=collector-2'])
+      equal(byRes.code, 0, 'resolved without a claim')
+      equal((await caseOf(X2)).entries.at(-1).author, 'resolver:collector-2', 'by the resolver it named')
+      const r5 = await supervise(SUP, ['escalate', shortIdOf(X2), 'external_system', 'The upstream mirror answers 503.'])
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${r5.json?.escalation}/claim`, 'by=collector-3'])).code, 0, 'claimed')
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${r5.json?.escalation}/resolve`, 'outcome=unsolved', 'operator=1'])).code, 0, 'resolved')
+      equal((await caseOf(X2)).entries.at(-1).author, 'resolver:collector-3', 'the contract route takes no operator marker: the rule of 7.27 holds')
 
       const r2 = await supervise(SUP, ['escalate', shortIdOf(X2), 'server_service', 'The database on the machine is down.'])
       const id2 = r2.json?.escalation
       const html = await (await fetchPath('/escalations')).text()
       contains(html, `id="escalation-${id2}"`, 'the page lists the open one')
-      contains(html, `action="/api/escalations/${id2}/dismiss"`, 'with dismiss')
-      contains(html, `action="/api/escalations/${id2}/resolve"`, 'and resolve')
+      contains(html, `action="/escalations/${id2}/dismiss"`, 'with dismiss')
+      contains(html, `action="/escalations/${id2}/resolve"`, 'and resolve, on the page\'s own routes')
       contains(html, 'href="/escalations" class="on">Escalations (1)', 'the nav entry carries the count')
-      equal((await postForm(`/api/escalations/${id2}/dismiss`, { back: '/escalations' }, { asBrowser: true })).status, 303, 'dismissed from the page')
+      equal((await postForm(`/escalations/${id2}/dismiss`, { state: 'open' }, { asBrowser: true })).status, 303, 'dismissed from the page')
       equal((await caseOf(X2)).entries.at(-1).data?.outcome, 'dismissed', 'the case file hears that too')
+      const late = await postForm(`/escalations/${id2}/resolve`, { state: 'open', outcome: 'solved' }, { asBrowser: true })
+      contains(late.headers.get('location') ?? '', 'esc_error=changed', 'a button that comes too late comes back with the reason')
+      contains(await (await fetchPath('/escalations?state=open&esc_error=changed')).text(), 'id="escalation-error"', 'shown on the page')
+      const r4 = await supervise(SUP, ['escalate', shortIdOf(X2), 'needs_access', 'The run needs read access to the shared bucket.'])
+      equal((await api(['--raw', '-X', 'POST', `/api/escalations/${r4.json?.escalation}/claim`, 'by=collector-1'])).code, 0, 'claimed by a resolver')
+      equal((await postForm(`/escalations/${r4.json?.escalation}/resolve`, { state: 'open', outcome: 'solved', note: 'granted' }, { asBrowser: true })).status, 303,
+        'the operator resolves it from the page')
+      equal((await caseOf(X2)).entries.at(-1).author, 'operator', 'and the case file names the operator, not the resolver')
       const all = await api(['--raw', '/api/escalations', 'state=all', 'limit=1'])
       equal(all.json?.escalations?.length, 1, 'limit bounds the list')
 

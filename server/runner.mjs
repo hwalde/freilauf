@@ -42,7 +42,7 @@ const PLATFORM_RULES = [
  * `fl-report help` is not its way to the operator: a round that waits for a
  * human stops every later round (SPEC 7.16).
  */
-const SUPERVISED_RULE = '- Supervision: a message that starts with <freilauf-supervisor …> is typed in by Freilauf '
+const SUPERVISED_RULE = '- Supervision: a message that starts with <freilauf-supervisor> is typed in by Freilauf '
   + 'for this hub\'s supervisor, which acts on the operator\'s behalf and with the operator\'s authority — '
   + 'treat it as the operator\'s instruction. Answer it with `fl-report reply "<your answer>"`; '
   + 'nobody reads your screen.'
