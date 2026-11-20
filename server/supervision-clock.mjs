@@ -75,15 +75,18 @@ async function endStuckRound(round, nowMs, intervalMs) {
   const from = round.followup_since ? parseDbUtc(round.followup_since) : parseDbUtc(round.started_at)
   const age = fmtDurationEn(Math.max(0, (nowMs - from) / 1000))
   const bound = fmtDurationEn(roundBoundMs(round, intervalMs) / 1000)
+  const lastEv = db.prepare('SELECT max(id) m FROM events WHERE run_id=?').get(round.id)?.m ?? 0
   const r = await endRun(round.id, { by: 'hub', reason: 'round_stuck' })
-  // A round that is `done` with a follow-up held in the finish gate
-  // (`followup_open`, no commission clock) keeps holding the clock after
-  // `endRun()`, which only closes its session: the hub gives that follow-up up
-  // too, or every pass would end the same round again and no round would start.
-  const after = db.prepare('SELECT status, followup_open, followup_since FROM runs WHERE id=?').get(round.id)
-  if (after?.status === 'done' && (after.followup_open || after.followup_since)) {
+  // A round with a follow-up held in the finish gate (`followup_open`, whatever
+  // its status: a failed run keeps `failed` during a follow-up) still holds the
+  // clock after `endRun()`, which leaves that flag alone: the hub gives the
+  // follow-up up too, or every pass would end the same round again and no
+  // round would start. Recorded once — `endRun()` may have written it already.
+  const after = db.prepare('SELECT followup_open, followup_since FROM runs WHERE id=?').get(round.id)
+  if (after && (after.followup_open || after.followup_since)) {
     db.prepare(`UPDATE runs SET followup_open = 0, followup_since = NULL, finish_state = NULL WHERE id = ?`).run(round.id)
-    addEvent(round.id, 'followup_abandoned', { source: 'hub', reason: 'round_stuck' })
+    const said = db.prepare(`SELECT 1 FROM events WHERE run_id=? AND id > ? AND kind='followup_abandoned' LIMIT 1`).get(round.id, lastEv)
+    if (!said) addEvent(round.id, 'followup_abandoned', { source: 'hub', reason: 'round_stuck' })
   }
   await notifyRun(round.id, 'supervision_round_stuck', `${reportHeader(round, 'SUPERVISOR ROUND ENDED')}\n\n`
     + `🟠 The hub ended this supervisor round: it was open for ${age}, longer than its bound of ${bound} `

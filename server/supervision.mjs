@@ -327,7 +327,11 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
     return changed && conds.length ? hit({ reopen: true, changed: true }) : no('closed')
   }
   if (input || againReached) return hit({ changed })
-  if (Number.isFinite(againMs) && againMs > nowMs) return changed && conds.length ? hit({ changed: true }) : no('look_again_pending')
+  if (Number.isFinite(againMs) && againMs > nowMs) {
+    if (changed && conds.length) return hit({ changed: true })
+    // `held`: a real condition stands, only the look-again time holds it back.
+    return { ...no('look_again_pending'), held: conds.length > 0 }
+  }
   if (!conds.length) return no('not_due')
   // 4.7: not again within the same interval unless something came in (handled above).
   const lastSeen = Math.max(parseDbUtc(state?.last_look_at) || 0, parseDbUtc(state?.last_round_at) || 0)
@@ -1029,7 +1033,8 @@ registerSupervisorOp('bundle', {
     // The loop fence: the sixth look at the same state parks the case.
     // Only a case: one that is due, or due but for its interval or look-again
     // time. A healthy run or a closed case looked at often is not "going nowhere".
-    const isCase = bundle.due.due || ['looked_recently', 'look_again_pending'].includes(bundle.due.exclusion)
+    const isCase = bundle.due.due || bundle.due.exclusion === 'looked_recently'
+      || (bundle.due.exclusion === 'look_again_pending' && bundle.due.held)
     const park = isCase && look.looks_unchanged >= PARK_AFTER && !caseState(target.id)?.parked_at
       ? await parkCase(target.id, { why: 'looks', count: look.looks_unchanged, fp: bundle.due.fp, nowMs }) : { parked: false }
     const notes = [

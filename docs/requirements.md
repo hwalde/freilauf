@@ -936,14 +936,14 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - A round open longer than max(2 x interval, 3 x its expected minutes) —
   measured from its open follow-up's commission when there is one, never while
   deferred — is ended through `endRun({by:'hub'})` and announced once as
-  `supervision_round_stuck`; a `done` round whose follow-up is held in the
-  finish gate has that follow-up given up too, so an ended round never keeps
-  holding the clock; a supervisor round is never a case, so this is the only
+  `supervision_round_stuck`; a round whose follow-up is held in the finish
+  gate (any status) has that follow-up given up too, so an ended round never
+  keeps holding the clock; a supervisor round is never a case, so this is the only
   thing that keeps a hanging round from stopping supervision.
 - A case is parked (`parkCase()`: `parked_at`, an `action` entry by the hub,
   one `supervision_parked` message) after `PARK_AFTER` (6) looks with the same
-  fingerprint at a case (due, or held back only by its interval or look-again
-  time — never a healthy run or a closed case), or when it would be handed out after six
+  fingerprint at a case (due, or with a due condition held back only by its
+  interval or look-again time — never a healthy run or a closed case), or when it would be handed out after six
   rounds that never looked at it; a parked case comes back only on news, on a
   changed fingerprint with a real condition — whichever way it was parked — or
   by the operator's un-park button (due at the next round through a look-again
