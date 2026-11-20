@@ -15106,15 +15106,15 @@ process.stdout.write(JSON.stringify(out))
       equal(sv.supervisionRefusal({ ...sup, supervisor: '1' }, op, run())?.code, 403, "a '1' string is not the flag")
     })
 
-    await check('ops are registered in a table, not an if-chain', () => {
-      equal(sv.supervisorOps().join(','), 'note,again,close', 'the ops of this stage')
+    await check('ops are registered in a table, not an if-chain', async () => {
+      equal(sv.supervisorOps().join(','), 'note,again,close,bundle,cases', 'the ops so far')
       sv.registerSupervisorOp('unit_probe', { target: false, handler: () => ({ probe: true }) })
       isTrue(sv.supervisorOps().includes('unit_probe'), 'a registered op is known')
       const caller = runRow('5e000000-0000-4000-8000-0000000000a1', { supervisor: 1 })
-      const r = sv.handleSupervise(caller.id, caller.report_token, { op: 'unit_probe' })
+      const r = await sv.handleSupervise(caller.id, caller.report_token, { op: 'unit_probe' })
       equal(r.code, 200, 'and served through the one handler')
       equal(r.body.probe, true, 'with its own answer')
-      equal(sv.handleSupervise(caller.id, 'nope', { op: 'unit_probe' }).code, 401, 'behind the token')
+      equal((await sv.handleSupervise(caller.id, 'nope', { op: 'unit_probe' })).code, 401, 'behind the token')
     })
 
     await check('entries are bounded, typed and attributed', () => {
@@ -15180,6 +15180,291 @@ process.stdout.write(JSON.stringify(out))
       contains(notice, 'sv-second', 'and the one that is not')
       db.prepare('UPDATE agents SET supervisor=0').run()
       equal(supervisorNotice(), '', 'no notice with one or none')
+    })
+  }
+
+
+  group('Supervision: what the supervisor sees — transcripts, the due check, the git summary')
+  {
+    const sv = await import('../server/supervision.mjs')
+    const tr = await import('../server/transcript.mjs')
+    const { fmtDurationEn, toDbUtc: dbUtc } = await import('../server/util.mjs')
+    const { abortedByFrom } = await import('../server/run-state.mjs')
+
+    await check('durations an agent reads are English whatever the UI language', () => {
+      equal(fmtDurationEn(20), 'under 1 min', 'seconds')
+      equal(fmtDurationEn(40 * 60), '40 min', 'minutes')
+      equal(fmtDurationEn(3 * 3600 + 12 * 60 + 5), '3 h 12 min', 'hours and minutes')
+      equal(fmtDurationEn(2 * 3600), '2 h', 'whole hours')
+      equal(fmtDurationEn(52 * 3600), '2 d 4 h', 'days')
+      equal(fmtDurationEn(NaN), '–', 'nothing measurable')
+    })
+
+    await check('claude: the JSONL becomes messages, a tool call and its result one line each', async () => {
+      const { claudeTranscriptMessages } = await import('../server/harnesses/claude.mjs')
+      const lines = [
+        '{"type":"summary","summary":"NOT-A-MESSAGE"}',
+        JSON.stringify({ type: 'user', timestamp: '2026-01-01T10:00:00.000Z', message: { role: 'user', content: 'DO-THE-TASK' } }),
+        JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T10:01:00.000Z', message: { role: 'assistant', content: [
+          { type: 'thinking', thinking: 'PONDER' }, { type: 'text', text: 'I WILL RUN TESTS' },
+          { type: 'tool_use', name: 'Bash', input: { command: `npm test ${'x'.repeat(500)}` } }] } }),
+        JSON.stringify({ type: 'user', timestamp: '2026-01-01T10:02:00.000Z', message: { role: 'user', content: [
+          { type: 'tool_result', content: 'line one\nline two\n' + 'y'.repeat(900) }] } }),
+      ]
+      const all = claudeTranscriptMessages(lines.join('\n'))
+      equal(all.map(m => m.role).join(','), 'user,assistant,tool,result', 'roles in order, the summary left out')
+      equal(all[0].at, '2026-01-01T10:00:00.000Z', 'the record\'s own timestamp')
+      contains(all[1].text, '(thinking) PONDER', 'thinking stays with the assistant')
+      isTrue(all[2].text.startsWith('Bash {') && !all[2].text.includes('\n') && all[2].text.length <= tr.TOOL_LINE_MAX, 'the call is one bounded line')
+      isTrue(!all[3].text.includes('\n') && all[3].text.length <= tr.TOOL_LINE_MAX, 'and so is its result')
+      equal(claudeTranscriptMessages('half a record"}\n' + lines[1], { truncated: true }).length, 1, 'a cut-off first line is skipped')
+    })
+
+    await check('claude: the capability reads the run\'s own file, behind the suite\'s fence', async () => {
+      const { getHarness } = await import('../server/harnesses/index.mjs')
+      const { claudeProjectSlug } = await import('../server/watcher.mjs')
+      const prev = process.env.FREILAUF_CLAUDE_PROJECTS
+      process.env.FREILAUF_CLAUDE_PROJECTS = join(sandbox, 'claude-projects')
+      try {
+        const run = { id: '7a000000-0000-4000-8000-000000000001', harness: 'claude', workdir_effective: '/wt/claude-run' }
+        equal(await getHarness('claude').transcript(run, { tail: 5 }), null, 'no file: null, so the hub falls back')
+        const dir = join(sandbox, 'claude-projects', claudeProjectSlug(run.workdir_effective))
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, `${run.id}.jsonl`), JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'CLAUDE-SAID' }] } }) + '\n')
+        const r = await tr.runTranscript(run, {})
+        equal(r.source, 'transcript', 'the run answers from its own record')
+        equal(r.messages[0].text, 'CLAUDE-SAID', 'with what was said')
+      } finally {
+        if (prev === undefined) delete process.env.FREILAUF_CLAUDE_PROJECTS; else process.env.FREILAUF_CLAUDE_PROJECTS = prev
+      }
+    })
+
+    await check('cursor: the measured transcript shape becomes messages, turn_ended is none', async () => {
+      const { messagesFromJsonl } = await import('../server/cursor-transcript.mjs')
+      const text = [
+        JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'CURSOR-TASK' }] } }),
+        JSON.stringify({ role: 'assistant', message: { content: [{ type: 'text', text: 'LOOKING' }, { type: 'tool_use', name: 'Read', input: { path: 'a.js' } }] } }),
+        JSON.stringify({ type: 'turn_ended', status: 'success' }),
+      ].join('\n')
+      const m = messagesFromJsonl(text)
+      equal(m.map(x => `${x.role}:${x.text}`).join('|'), 'user:CURSOR-TASK|assistant:LOOKING|tool:Read {"path":"a.js"}', 'three messages')
+      isTrue(m.every(x => x.at === null), 'cursor records carry no time, and none is invented')
+    })
+
+    await check('opencode: the store\'s rows become messages, subagents marked, the tail kept', async () => {
+      const { chatMessages: cm } = await import('../server/opencode-chat.mjs')
+      {
+        const { d } = v2Store([{ id: 'root' }, { id: 'kid', parent: 'root' }], [
+          { s: 'root', type: 'system', data: { text: 'SYSTEM-CHATTER' } },
+          { s: 'root', type: 'user', data: { text: 'OC-TASK' } },
+          { s: 'root', type: 'assistant', data: { content: [{ type: 'text', text: 'OC-ANSWER' },
+            tool('edit', { status: 'error', input: { filePath: 'y' }, error: { message: 'NO-MATCH' } })] } },
+          { s: 'kid', type: 'assistant', data: { content: [{ type: 'text', text: 'KID-ANSWER' }] } },
+        ])
+        const m = cm(d, ['root', 'kid'], { tail: 10 })
+        equal(m.map(x => x.role).join(','), 'user,assistant,tool,assistant', 'roles')
+        contains(m[2].text, 'edit', 'the tool')
+        contains(m[2].text, 'error: NO-MATCH', 'with its failure on the same line')
+        equal(m[3].text, '(subagent) KID-ANSWER', 'a subagent says so')
+        isFalse(m.some(x => x.text.includes('SYSTEM-CHATTER')), 'no system chatter')
+        equal(cm(d, ['root', 'kid'], { tail: 2 }).map(x => x.role).join(','), 'tool,assistant', 'only the newest tail')
+        d.close()
+      }
+    })
+
+    await check('the bound: newest tail, a character budget, and it says what was cut', () => {
+      const msgs = Array.from({ length: 10 }, (_, i) => ({ role: 'assistant', at: null, text: `m${i} ${'z'.repeat(98)}` }))
+      const a = tr.boundMessages(msgs, { tail: 4, chars: 10_000 })
+      equal(a.messages.map(m => m.text.slice(0, 2)).join(','), 'm6,m7,m8,m9', 'the newest four, newest last')
+      equal(a.cut.older, 6, 'six left out')
+      const b = tr.boundMessages(msgs, { tail: 10, chars: 250 })
+      equal(b.messages.length, 2, 'only what fits the characters')
+      isTrue(b.cut.chars, 'and it says so')
+      const c = tr.boundMessages([{ role: 'log', text: 'a'.repeat(5000) + 'THE-END' }], { tail: 5, chars: 100 })
+      isTrue(c.messages[0].text.endsWith('THE-END') && c.messages[0].text.length <= 100, 'one huge message keeps its end')
+      equal(tr.transcriptLimits({ tail: '99999', chars: 'lots' }).tail, tr.TRANSCRIPT_TAIL_MAX, 'tail held to its ceiling')
+      equal(tr.transcriptLimits({ tail: '0', chars: '' }).chars, tr.TRANSCRIPT_CHARS_DEFAULT, "'' and 0 are the defaults, never 0")
+    })
+
+    await check('the fallback order over tmux\'s three answers', () => {
+      equal(tr.fallbackPlan(true, null), 'pane', 'a live pane: its screen')
+      equal(tr.fallbackPlan(false, null), 'log', 'a dead pane: the recording')
+      equal(tr.fallbackPlan(null, true), 'log', 'a gone session: the recording')
+      equal(tr.fallbackPlan(null, null), 'unknown', 'no answer: not read as dead or alive')
+      equal(tr.fallbackPlan(null, false), 'unknown', 'a session that is there but whose pane gave no answer')
+    })
+
+    await check('without a record, the recording; without that, an honest nothing', async () => {
+      const run = { id: '7a000000-0000-4000-8000-000000000002', harness: 'hermes', tmux_session: null }
+      const none = await tr.runTranscript(run, {})
+      equal(none.source, 'none', 'nothing at all')
+      contains(none.note, 'no recording', 'and says what is missing')
+      mkdirSync(join(sandbox, 'runs', run.id), { recursive: true })
+      writeFileSync(join(sandbox, 'runs', run.id, 'log.txt'), 'hello\n\x1b[31mRED-LINE\x1b[0m\nRED-LINE\n')
+      const log = await tr.runTranscript({ ...run, tmux_session: 'fl-unit-no-such-session-zz' }, {})
+      equal(log.source, 'log', 'a session that is gone falls to the recording')
+      equal(log.messages[0].text, 'hello\nRED-LINE', 'cleaned of escapes and repeats')
+    })
+
+    await check('who ended an aborted run', () => {
+      equal(abortedByFrom({ by: 'user' }), 'operator', 'kill button')
+      equal(abortedByFrom({ source: 'web' }), 'operator', 'sessions page')
+      equal(abortedByFrom({ by: 'flow' }), 'flow', 'a flow')
+      equal(abortedByFrom({ by: 'supervisor' }), 'supervisor', 'a supervisor')
+      equal(abortedByFrom({ source: 'retention' }), 'hub', 'everything else is the hub')
+      equal(abortedByFrom(null), null, 'no payload')
+    })
+
+    // ---- the due predicate, as a table (SPEC 4.7, 4.1a, 7.9–7.14) ----
+    const NOW = Date.parse('2026-06-01T12:00:00Z')
+    const ago = (min) => dbUtc(NOW - min * 60_000)
+    const cfg = { waitMs: 30 * 60_000, intervalMs: 60 * 60_000 }
+    const R = (x = {}) => ({ id: 'r', status: 'running', supervisor: 0, supervision_off: 0, archived_at: null,
+      resolves_run_id: null, started_at: ago(300), ended_at: null, agent_state: null, agent_state_at: null,
+      last_activity_at: ago(1), merge_status: null, finish_state: null, followup_since: null, followup_open: 0, help_text: null, ...x })
+    const F = (x = {}) => ({ mergeMode: 'off', anomalies: [], incidents: [], entries: { reply: 0, answer: 0, resolved: 0 },
+      lastInput: null, lastLookId: 0, lastClosedId: 0, supervisionSince: ago(1000), paneDied: false, abortedBy: null,
+      waitingSince: null, helpSince: null, ...x })
+    const waiting = (min) => R({ agent_state: 'waiting', agent_state_at: ago(1), last_activity_at: ago(min) })
+    const failed = (x = {}) => R({ status: 'failed', ended_at: ago(120), ...x })
+    const red = { id: 7, typ: 'rate_limit', schwere: 'rot', erst_gesehen: ago(50) }
+    const fpOf = (run, facts) => sv.stateFingerprint(run, facts)
+
+    await check('the due predicate over the whole table', () => {
+      const rows = [
+        // [what, run, state, facts, expected reason | 'x:<exclusion>']
+        ['a working run', R(), null, F(), 'x:not_due'],
+        ['waiting past the threshold', waiting(45), null, F({ waitingSince: ago(45) }), 'waiting_input'],
+        ['waiting under the threshold', waiting(10), null, F({ waitingSince: ago(10) }), 'x:not_due'],
+        ['7.10: since the newest agent_waiting event, not the renewed column', waiting(45), null, F({ waitingSince: ago(50) }), 'waiting_input'],
+        ['7.11: help past the threshold', R({ status: 'waiting_help' }), null, F({ helpSince: ago(45) }), 'waiting_help'],
+        ['7.11: help under it — the operator was just paged', R({ status: 'waiting_help' }), null, F({ helpSince: ago(5) }), 'x:not_due'],
+        ['overrun', R(), null, F({ anomalies: ['anomaly:overrun'] }), 'anomaly'],
+        ['no activity', R(), null, F({ anomalies: ['anomaly:no_activity'] }), 'anomaly'],
+        ['a soft overrun is no case', R(), null, F({ anomalies: ['anomaly:soft_overrun'] }), 'x:not_due'],
+        ['a red incident', R(), null, F({ incidents: [red] }), 'red_incident'],
+        ['a yellow one is not', R(), null, F({ incidents: [{ ...red, schwere: 'gelb' }] }), 'x:not_due'],
+        ['ended without a report', R({ status: 'running' }), null, F({ anomalies: ['anomaly:exit_without_report'] }), 'no_report'],
+        ['its pane died', failed(), null, F({ paneDied: true }), 'pane_died'],
+        ['it failed', failed(), null, F(), 'failed'],
+        ['merge blocked', R({ status: 'done', ended_at: ago(60), merge_status: 'blocked_conflict' }), null, F({ mergeMode: 'hub' }), 'merge_blocked'],
+        ['7.12: unmerged leftovers where the hub merges', R({ status: 'aborted', ended_at: ago(60), merge_status: 'unmerged_commits' }), null, F({ mergeMode: 'hub', abortedBy: 'hub' }), 'unmerged'],
+        ['7.12: done, no merge status, past the grace', R({ status: 'done', ended_at: ago(60) }), null, F({ mergeMode: 'hub' }), 'unmerged'],
+        ['7.12: …within the grace', R({ status: 'done', ended_at: ago(10) }), null, F({ mergeMode: 'hub' }), 'x:not_due'],
+        ['7.12: a repository with merging off is no case', R({ status: 'done', ended_at: ago(60) }), null, F(), 'x:not_due'],
+        ['merged is fine', R({ status: 'done', ended_at: ago(60), merge_status: 'merged' }), null, F({ mergeMode: 'hub' }), 'x:not_due'],
+        ['an aborted run with nothing left is no case', R({ status: 'aborted', ended_at: ago(60) }), null, F({ abortedBy: 'hub' }), 'x:not_due'],
+        ['7.9: ended before supervision began', failed({ ended_at: ago(2000) }), null, F(), 'x:not_due'],
+        ['7.9: still waiting, whatever its age', R({ ...waiting(45), started_at: ago(5000) }), null, F({ waitingSince: ago(45) }), 'waiting_input'],
+        // exclusions
+        ['a supervisor run', failed({ supervisor: 1 }), null, F(), 'x:supervisor_run'],
+        ['4.1a: taken out', failed({ supervision_off: 1 }), null, F(), 'x:taken_out'],
+        ['archived', failed({ archived_at: ago(5) }), null, F(), 'x:archived'],
+        ['7.13: a conflict run', failed({ resolves_run_id: 'o' }), null, F(), 'x:conflict_resolver'],
+        ['ended by the operator', R({ status: 'aborted', ended_at: ago(60), merge_status: 'unmerged_commits' }), null, F({ mergeMode: 'hub', abortedBy: 'operator' }), 'x:ended_by_operator'],
+        ['ended by a flow', R({ status: 'aborted', ended_at: ago(60) }), null, F({ abortedBy: 'flow', paneDied: true }), 'x:ended_by_flow'],
+        ['ended by a supervisor', R({ status: 'aborted', ended_at: ago(60) }), null, F({ abortedBy: 'supervisor', paneDied: true }), 'x:ended_by_supervisor'],
+        ['parked', failed(), { parked_at: ago(10) }, F(), 'x:parked'],
+        // what came in
+        ['an answer since the last look', R(), { last_look_at: ago(5) }, F({ lastInput: { id: 9, kind: 'answer', ts: ago(2) }, lastLookId: 5 }), 'answer'],
+        ['a reply since the last look', R(), null, F({ lastInput: { id: 9, kind: 'reply', ts: ago(2) } }), 'reply'],
+        ['an escalation result', R(), null, F({ lastInput: { id: 9, kind: 'resolved', ts: ago(2) } }), 'resolved'],
+        ['an answer already looked at', R(), { last_look_at: ago(5) }, F({ lastInput: { id: 4, kind: 'answer', ts: ago(9) }, lastLookId: 5 }), 'x:not_due'],
+        // the interval and look-again
+        ['looked at within the interval', failed(), { last_look_at: ago(10) }, F(), 'x:looked_recently'],
+        ['looked at an interval ago', failed(), { last_look_at: ago(90) }, F(), 'failed'],
+        ['a look-again time that has come', R(), { look_again_at: ago(1) }, F(), 'look_again'],
+        ['a look-again time still ahead holds a standing condition back', failed(), { look_again_at: ago(-30) }, F(), 'x:look_again_pending'],
+        ['a look-again time still ahead yields to an answer', failed(), { look_again_at: ago(-30) }, F({ lastInput: { id: 3, kind: 'answer', ts: ago(1) } }), 'answer'],
+      ]
+      for (const [what, run, state, facts, want] of rows) {
+        const v = sv.dueVerdict(run, state, facts, NOW, cfg)
+        if (want.startsWith('x:')) {
+          equal(v.due, false, `${what}: not due`)
+          equal(v.exclusion, want.slice(2), `${what}: ${want.slice(2)}`)
+        } else {
+          equal(v.due, true, `${what}: due (${v.exclusion ?? ''})`)
+          equal(v.reason, want, `${what}: ${want}`)
+        }
+      }
+    })
+
+    await check('7.14: a closed case and a pending look-again come back only on news', () => {
+      const run = failed()
+      const facts = F()
+      const fp = fpOf(run, facts)
+      const closed = { closed_at: ago(30), state_fp: fp }
+      equal(sv.dueVerdict(run, closed, facts, NOW, cfg).exclusion, 'closed', 'closed, nothing changed: stays closed')
+      const moved = F({ incidents: [red] })
+      const v = sv.dueVerdict(run, closed, moved, NOW, cfg)
+      isTrue(v.due && v.reopen && v.changed, 'the state changed: due again, reopening the case')
+      const nudgedBack = sv.dueVerdict(run, closed, F({ lastInput: { id: 12, kind: 'reply', ts: ago(1) }, lastClosedId: 10 }), NOW, cfg)
+      isTrue(nudgedBack.due && nudgedBack.reason === 'reply' && nudgedBack.reopen, 'a reply after the closing reopens it')
+      equal(sv.dueVerdict(run, closed, F({ lastInput: { id: 8, kind: 'reply', ts: ago(40) }, lastClosedId: 10 }), NOW, cfg).exclusion,
+        'closed', 'a reply from before the closing does not')
+      const okNow = R({ status: 'done', ended_at: ago(60), merge_status: 'merged' })
+      equal(sv.dueVerdict(okNow, { closed_at: ago(30), state_fp: 'old' }, F(), NOW, cfg).exclusion, 'closed',
+        'a change for the better with no condition is no reason to reopen')
+      const pending = { look_again_at: ago(-30), state_fp: fp }
+      isTrue(sv.dueVerdict(run, pending, moved, NOW, cfg).due, 'a pending look-again yields to a changed state')
+      isTrue(sv.dueVerdict(run, pending, moved, NOW, cfg).changed, 'and says so')
+    })
+
+    await check('several reasons: the most urgent leads, the rest are named', () => {
+      const v = sv.dueVerdict(waiting(45), null, F({ waitingSince: ago(45), anomalies: ['anomaly:overrun'],
+        lastInput: { id: 3, kind: 'answer', ts: ago(2) } }), NOW, cfg)
+      equal(v.reason, 'answer', 'an answer outranks everything')
+      equal(v.reasons.join(','), 'answer,waiting_input,anomaly', 'then by urgency')
+      equal(Math.round((NOW - v.sinceMs) / 60_000), 2, 'the age is the leading reason\'s')
+      const s = sv.dueSentence(sv.dueVerdict(waiting(45), null, F({ waitingSince: ago(45) }), NOW, cfg), NOW)
+      contains(s, 'waits for input, for 45 min', 'the sentence carries the phrased age')
+    })
+
+    await check('the fingerprint moves with the state and not with the clock', () => {
+      const run = R({ status: 'waiting_help', help_text: 'which branch?' })
+      const facts = F({ anomalies: ['anomaly:overrun', 'anomaly:no_activity'], incidents: [red] })
+      const fp = fpOf(run, facts)
+      equal(fpOf({ ...run, last_activity_at: ago(0), agent_state_at: ago(0) }, facts), fp, 'activity and assertions do not move it')
+      equal(fpOf(run, { ...facts, anomalies: ['anomaly:no_activity', 'anomaly:overrun'] }), fp, 'nor does the order of the anomalies')
+      isTrue(fpOf({ ...run, status: 'running' }, facts) !== fp, 'the status does')
+      isTrue(fpOf({ ...run, help_text: 'other' }, facts) !== fp, 'a new help question does')
+      isTrue(fpOf(run, { ...facts, incidents: [] }) !== fp, 'a closed incident does')
+      isTrue(fpOf(run, { ...facts, entries: { reply: 1, answer: 0, resolved: 0 } }) !== fp, 'a reply in the case file does')
+      isTrue(fpOf({ ...run, merge_status: 'merged' }, facts) !== fp, 'the merge status does')
+    })
+
+    await check('the git summary: null for everything nobody could read, never 0 or clean', async () => {
+      const { worktreeSummary } = await import('../server/integrate.mjs')
+      const repo = { extras: [] }
+      const nothing = await worktreeSummary({ harness: 'claude', workdir_effective: null }, repo)
+      equal(nothing.exists, null, 'no worktree recorded: unknown, not gone')
+      equal(nothing.ahead, null, 'no count')
+      const gone = await worktreeSummary({ harness: 'claude', workdir_effective: join(sandbox, 'no-such-worktree') }, repo)
+      equal(gone.exists, false, 'a removed worktree is gone')
+      equal(gone.dirty, null, 'and its dirt is unknown, not clean')
+      const plain = join(sandbox, 'not-a-git-dir')
+      mkdirSync(plain, { recursive: true })
+      const ng = await worktreeSummary({ harness: 'claude', workdir_effective: plain }, repo)
+      equal(ng.exists, true, 'a directory git cannot read is there')
+      equal(ng.head, null, 'its HEAD unknown')
+      equal(ng.dirty_count, null, 'its dirt unknown — never 0')
+      const wt = join(sandbox, 'git-summary')
+      mkdirSync(wt, { recursive: true })
+      const g = (...a) => execFileSync('git', ['-C', wt, ...a], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'u', GIT_AUTHOR_EMAIL: 'u@x', GIT_COMMITTER_NAME: 'u', GIT_COMMITTER_EMAIL: 'u@x' } }).trim()
+      g('init', '-q', '-b', 'main')
+      writeFileSync(join(wt, 'a.txt'), 'a'); g('add', '.'); g('commit', '-qm', 'base')
+      const base = g('rev-parse', 'HEAD')
+      writeFileSync(join(wt, 'b.txt'), 'b'); g('add', '.'); g('commit', '-qm', 'THE-WORK')
+      writeFileSync(join(wt, 'c.txt'), 'c')
+      const s = await worktreeSummary({ harness: 'claude', workdir_effective: wt, base_sha: base }, repo)
+      equal(s.branch, 'main', 'the branch')
+      equal(s.head?.subject, 'THE-WORK', 'HEAD and its subject')
+      isTrue(Number.isFinite(s.head?.at_ms), 'and its time')
+      equal(s.ahead, 1, 'one commit past the start')
+      equal(s.dirty_count, 1, 'one uncommitted file')
+      equal(s.dirty.join(','), 'c.txt', 'named')
+      equal((await worktreeSummary({ harness: 'claude', workdir_effective: wt, base_sha: null }, repo)).ahead, null,
+        'no recorded start: the count is unknown, not 0')
     })
   }
 

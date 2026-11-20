@@ -434,6 +434,55 @@ async function dirtyFiles(run, repo) {
 }
 
 /**
+ * A short git summary of a run's worktree, for somebody who LOOKS (the
+ * supervisor's bundle) — read-only, built from what the finish gate already
+ * asks, and never a fetch, a collection of a clone's tip, or a merge dry run.
+ *
+ * Every field nobody could read is `null` — never 0, never `[]`, never "clean":
+ *   exists        the worktree directory is there (false: removed, null: no path recorded)
+ *   branch        what HEAD is on ('HEAD' when detached)
+ *   head          HEAD's sha and subject, and its commit time in ms
+ *   base          the sha the run started from
+ *   ahead         commits on HEAD that the base does not have
+ *   dirty         the agent's uncommitted paths (hub-owned paths excluded), first 20
+ *   dirty_count   how many there are
+ * plus `merge_status` / `finish_state` from the row, which the integrator owns.
+ * HEAD, branch and the count are `rev-parse` / `rev-list`, which `runGit()` lets
+ * through even for a sandboxed clone whose container is gone; the status is
+ * `dirtyFiles()`, the one `git status` the hub has.
+ */
+export async function worktreeSummary(run, repo = getRepo(run?.repo_id)) {
+  const out = { worktree: run?.workdir_effective ?? null, exists: null, branch: null, head: null, base: null,
+    ahead: null, dirty: null, dirty_count: null,
+    merge_status: run?.merge_status ?? null, finish_state: run?.finish_state ?? null }
+  if (!run?.workdir_effective) return out
+  out.exists = existsSync(run.workdir_effective)
+  if (!out.exists) return out
+  const br = await runGit(run, ['rev-parse', '--abbrev-ref', 'HEAD'])
+  if (br.ok && br.stdout.trim()) out.branch = br.stdout.trim()
+  const hd = await runGit(run, ['rev-list', '-1', '--format=%H%x09%ct%x09%s', 'HEAD'])
+  if (hd.ok) {
+    const line = hd.stdout.split('\n').find(l => /^[0-9a-f]{40,64}\t/.test(l))
+    if (line) {
+      const [sha, ct, ...subject] = line.split('\t')
+      const atMs = Number(ct) * 1000
+      out.head = { sha, subject: subject.join('\t'), at_ms: Number.isFinite(atMs) && ct !== '' ? atMs : null }
+    }
+  }
+  out.base = run.base_sha || null
+  if (out.base && out.head) {
+    const n = await runGit(run, ['rev-list', '--count', `${out.base}..HEAD`])
+    const s = n.ok ? n.stdout.trim() : ''
+    if (/^\d+$/.test(s)) out.ahead = Number(s)
+  }
+  if (repo) {
+    const d = await dirtyFiles(run, repo)
+    if (!d.unknown) { out.dirty = d.files.slice(0, 20); out.dirty_count = d.files.length }
+  }
+  return out
+}
+
+/**
  * Would this tip merge into origin/{base}? `git merge-tree --write-tree` answers
  * that WITHOUT touching a worktree — measured with git 2.43: exit 1 on conflict,
  * the conflicting paths on stdout, `git status` afterwards empty. Anything that

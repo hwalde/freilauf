@@ -43,6 +43,7 @@ import {
 } from './skills.mjs'
 import { t } from './i18n.mjs'
 import { caseEntries, caseEntryCount, caseState } from './supervision.mjs'
+import { runTranscript, transcriptLimits } from './transcript.mjs'
 
 const LIMIT_MAX = 200
 const LIMIT_DEFAULT = 50
@@ -288,6 +289,19 @@ export async function readApi(req, res, url) {
       limit,
       entries: caseEntries(run.id, { limit }),
     })
+    return true
+  }
+
+  // ---- a run's transcript (server/transcript.mjs) ----------------------------
+  // The tail of what its agent said and did, one shape for every coding agent,
+  // `source` saying where it came from. Read-only: no look is recorded here.
+  // Bounded: `tail` messages (ceiling 200) and `chars` (ceiling 60 000).
+  if ((m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/transcript$/))) {
+    const run = getRun(m[1])
+    if (!run) { json(res, 404, { ok: false, error: t('api.unknown_run') }); return true }
+    const limits = transcriptLimits({ tail: url.searchParams.get('tail'), chars: url.searchParams.get('chars') })
+    const tr = await runTranscript(run, limits)
+    json(res, 200, { ok: true, run: { id: run.id, short_id: shortId(run.id), harness: run.harness }, ...limits, ...tr })
     return true
   }
 

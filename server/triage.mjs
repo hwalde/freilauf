@@ -33,6 +33,7 @@ import { chainUsable, jobFallbacks, jobRouting, jobSource, jobRetry, jobReasonin
 import {
   escapeData, clip, cutSentence, stamp, runFactLines, projectName, displayName,
 } from './report-context.mjs'
+import { abortedByFrom } from './run-state.mjs'
 
 // ---------------------------------------------------------------------------
 // settings
@@ -559,8 +560,7 @@ export function endedByOperator(note, run) {
   if (run.status !== 'aborted') return false
   const ev = db.prepare(`SELECT payload FROM events WHERE run_id=? AND kind='aborted' ORDER BY id DESC LIMIT 1`).get(run.id)
   try {
-    const p = JSON.parse(ev?.payload ?? '{}') ?? {}
-    return p.by === 'user' || p.source === 'web'
+    return abortedByFrom(JSON.parse(ev?.payload ?? '{}') ?? {}) === 'operator'
   } catch { return false }
 }
 

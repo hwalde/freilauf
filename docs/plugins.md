@@ -340,6 +340,7 @@ and does without.
 | `modelArgs(run, ctx, opts)` | fn | CLI arguments for `fl-start`; returns `{args, fehlt}` (`fehlt` = provider ids whose credential is missing). **Three arguments now** — see below |
 | `resumeCommand(run)` | fn (optional) | the shell command a HUMAN continues this run's session with, `cd <workdir> && …` included; `null` when the CLI has no reliable way (hermes). Called by `server/integrate.mjs` for every escalation message, the run's detail page and the failed/aborted Telegram texts. Only the plugin knows how its CLI names a session — claude gets `--session-id <run id>` from the hub and can name it back, cursor's id is its transcript's directory, opencode continues the last session of the worktree |
 | `resumeId(run)` | fn or async fn (optional) | the id the HUB continues this run's conversation with when its tmux session was lost (`server/runner.mjs`, `resumeRun` → `fl-start --resume <id>`). Without it the run id is used — right for a CLI that accepted `{session_id}` at launch. Also asked when the OPERATOR revives an ended run (Revive button). `null` means "nothing to continue": a fresh agent is started instead and handed the whole record — the original task, every report, questions and answers, the state of the worktree (`handoverPrompt()`). claude answers the run id when its transcript exists, cursor its transcript's basename, opencode the run's ROOT session out of its store (`'last'` = `--continue`), hermes the newest parentless session of the worktree out of `~/.hermes/state.db` (`'latest'` when the store does not say — hermes scopes that to the workspace `--in` names) |
+| `transcript(run, {tail, chars})` | fn or async fn (optional) | the tail of what this run's agent said and did, from the CLI's OWN record: `{ source?, messages: [{role, at, text}] }`, oldest first, at most `tail` messages, or `null` when there is no record for this run. `role` is `user`, `assistant`, `tool` (a call) or `result` (a tool's answer); a call and a result are ONE line each; `at` is ISO 8601 or `null` where the record carries no time (never invented). The hub bounds the answer by `chars`, so a reader only has to keep its own reading cheap (read the end of a file, keep the newest rows). Without it, or on `null`, the hub falls back to the live pane's screen and then to the terminal recording, and `GET /api/runs/<id>/transcript` says which `source` answered. claude reads its JSONL, cursor its transcript, opencode its store; hermes has none yet. Never write what it read anywhere: a transcript can hold a secret the agent printed |
 | `retireConversation(run)` | fn or async fn (optional) | called before a FRESH agent starts under a run that already had a conversation (the handover above), for a CLI that would refuse or reuse the id the hub hands it at launch. Moves the old conversation aside and returns where it went, or `null` when there was none. claude renames `<run id>.jsonl`, because `--session-id <run id>` refuses an id whose transcript exists |
 | `usage(ctx)` | async fn | subscription usage for the overview panel, or `null`. Shapes in `usage.mjs`: `{kind:'claude', …}` / `{kind:'cursor', plan, spent_usd, included_usd, included_estimated?, bonus_usd?, remaining_usd, auto_pct?, api_pct?, auto_note?, api_note?, auto_models?, pct, cycle_end}`. For cursor, `auto_pct` / `api_pct` come from Cursor's own display messages when those sentences carry a `%`; the numeric fields are the fallback. `spent_usd` is the included-dollar estimate and is not the bar. |
 
@@ -1812,25 +1813,31 @@ Three page-level rules worth knowing:
    subagent's end. Then declare `attention: { source, note }`. Without it a run
    of this coding agent never reads "waiting for input" — not wrong, but the
    Plugins page will say so.
-8. Optional but worth it: `resumeCommand(run)`. Every escalation the integration
+8. **Let a supervisor read the conversation.** If the CLI keeps a record of
+   it (a JSONL file, a session store), declare `transcript(run, {tail, chars})`
+   (see the contract table): it is what the supervisor's `look` and the flows'
+   `transcript` source read. Import the hub helpers it needs lazily inside the
+   function. Without it the hub shows the pane's screen or the recording, which
+   for a full-screen TUI is far less readable.
+9. Optional but worth it: `resumeCommand(run)`. Every escalation the integration
    produces ends with "here is how you pick this session up"; a harness without
    it names the worktree instead. Find out from the CLI's own `--help` rather
    than guessing — a command that opens somebody ELSE's conversation is worse
    than no command.
-9. Optional: `gate` if this coding agent runs on an account the hub can meter,
+10. Optional: `gate` if this coding agent runs on an account the hub can meter,
    and `llm` if its CLI can answer a one-shot question. For `llm`, read the
    three rules in `cli-llm.mjs` first and declare `overhead: true`.
    `ownCredentials(ctx)` too — but **only if the CLI's credential store has been
    measured**: it decides a sentence the Plugins page states as fact, and a
    guess there is worse than leaving the capability out (see above). Declare
    `keyFreeProviders` either way; that is what the launch path reads.
-10. Optional: `skills`, the two lists of directories this CLI reads agent skills
+11. Optional: `skills`, the two lists of directories this CLI reads agent skills
    from (see "Where a coding agent looks for skills"). Only declare a directory
    you have **measured** — the CLI's own documentation, or its search list read
    out of the binary. Without it the coding agent is simply listed as unserved
    on Settings → Freilauf skills, which is the honest answer; with a wrong one
    the hub writes files where nothing reads them.
-11. Done: install detection, the discovery scan, the forms, the Plugins page, the
+12. Done: install detection, the discovery scan, the forms, the Plugins page, the
     detection patterns, the pulse, the budget-gate routing and the skill
     installer all follow the registry. Configure the new coding agent under
     Settings → Plugins.

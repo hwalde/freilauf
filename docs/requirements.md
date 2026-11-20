@@ -726,8 +726,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   settings on two paths; the watcher, the flows and the incidents keep their
   view of a run whether it is archived or not — only displays that promise
   rows (the sidebar's overview-linked count, the read API's `archived` filter),
-  the retention and title-retry passes, and the supervisor's refusal (an
-  archived run is not a case) read `archived_at`.
+  the retention and title-retry passes, and the supervisor's refusal and due
+  check (an archived run is not a case) read `archived_at`.
 - `repos.active=0` removes the repo from every dropdown and starts nothing
   (manual path included) while history stays reachable through an explicit
   `?repo=`.
@@ -779,6 +779,42 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   fragment; it is hidden unless the case file has entries or, on a run that is
   not a supervisor run, a supervisor agent is active; the operator's answer
   needs a text or a choice and is accepted with no question open.
+- `dueVerdict()` is the one due predicate: pure (no subprocess, git, tmux or
+  database), fed by `caseFacts()`, applied to every candidate by `dueCases()`;
+  its exclusions come before its conditions, and a supervisor, taken-out,
+  archived, conflict, parked run or one ended by the operator, a flow or a
+  supervisor is never due.
+- `supervision_since` is set once, when supervision first becomes active; a
+  run that ended before it is never due for how it ended, so switching a
+  supervisor on does not make the past a case.
+- "Waiting since" is the newest `agent_waiting` event, and waiting for help is
+  due only after the same threshold, so the supervisor does not race the
+  operator who was paged.
+- "Done but unmerged" is a case only where `merge_mode = 'hub'`.
+- A closed case or a pending look-again comes back only when its
+  `stateFingerprint()` changed or a reply, answer or escalation result arrived
+  after the last look or the closing (compared by entry id, not by second);
+  the fingerprint holds no ages and no activity, so the clock alone never
+  changes it; closing stores it.
+- Without news a case is not due again within the interval after a look.
+- Text an agent reads (bundle, case list, refusals) phrases durations with
+  `fmtDurationEn()`, never the UI-language `fmtDuration()`, and every age in
+  it is computed by the hub.
+- The bundle is `op: bundle` on the supervisor route and records a `look`
+  (entry, `last_look_at`, fingerprint, looks without a change); the read API's
+  `/case` and `/transcript` record nothing.
+- In the bundle, untrusted text (titles, prompts, transcripts, entries,
+  payloads) is fenced in `<data>` with `<`, `>`, `&` escaped, so it cannot
+  close the fence and read as the hub's words.
+- The bundle of a run whose session or worktree is gone still answers and says
+  so; what nobody could read is `null` or "unknown", never 0 or "clean"
+  (`worktreeSummary()` never fetches, collects a clone's tip or dry-runs a merge).
+- One transcript shape for every coding agent: the plugin's `transcript()`
+  first, then the live pane's screen (`fallbackPlan()`: an unanswered tmux is
+  "unknown" and the screen is not read), then the cleaned recording; `source`
+  names which, and everything is bounded (`tail` ≤ 200, `chars` ≤ 60 000).
+- What a transcript reader read is never written to a log, an event or an
+  entry: it can hold a secret the agent printed.
 
 ## Skills
 

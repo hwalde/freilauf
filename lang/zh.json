@@ -1994,5 +1994,20 @@
   "case.note_again": "{minutes} 分钟后再次查看",
   "case.answer_choice": "已选择：{choice}",
   "case.state_closed": "自 {at} 起已关闭：{reason}",
-  "case.state_look_again": "监督者将在 {at} 再次查看。"
+  "case.state_look_again": "监督者将在 {at} 再次查看。",
+  "case.look_due": "需要查看，原因：{reason}",
+  "case.look_not_due": "当时并不需要查看",
+  "case.reason_answer": "你已回答",
+  "case.reason_resolved": "一个升级问题已有结果",
+  "case.reason_reply": "该运行已回复",
+  "case.reason_waiting_help": "它在等待帮助",
+  "case.reason_waiting_input": "它的代理在等待输入",
+  "case.reason_pane_died": "它的进程未提交报告就终止了",
+  "case.reason_no_report": "它未提交报告就结束了",
+  "case.reason_failed": "它失败了",
+  "case.reason_red_incident": "存在未解决的红色事件",
+  "case.reason_anomaly": "运行时间过长或没有动静",
+  "case.reason_merge_blocked": "它的合并被阻止",
+  "case.reason_unmerged": "它的工作尚未合并",
+  "case.reason_look_again": "约定的复查时间已到"
 }

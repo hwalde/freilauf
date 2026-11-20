@@ -24,6 +24,13 @@ a day on which nothing was released.
 - Every run has a case file: a section on its page, oldest entry first with author and age, and `GET /api/runs/<id>/case`. The operator answers there, or through `POST /api/runs/<id>/case/answer` (`text`, optional `choice`).
 - A single run can be taken out of supervision: a checkbox in the single-run form and a switch on the run's page (both shown while a supervisor agent is active), and `POST /api/runs/<id>/supervision` with `off=1|0`. Each change is an event of the run.
 - `POST /api/runs/<own id>/supervise` on the loopback listener and on the report socket, bearer required on both. An unsandboxed supervisor run gets `FL_RUN_TOKEN` in its session for it; every other run's environment is unchanged.
+- **Supervision, second part: the supervisor can see.** `fl-supervise cases` lists what is due now, most urgent first, with the reason and the ages computed by the hub (JSON; `--text` for the readable list). `fl-supervise look <run>` prints everything about one case in one text — what it was asked to do, its state with every duration phrased, why it is due, its last events, a git summary of its worktree, the tail of its transcript, its case file and how a human would attach (`--json` for the object, `--tail`/`--chars` for more transcript). Looking is recorded in the case file and shown on the run's page.
+- `GET /api/runs/<id>/transcript`: the tail of what a run's agent said and did, one shape for every coding agent (`tail` up to 200 messages, `chars` up to 60 000), with `source` saying where it came from — the coding agent's own record (claude, cursor, opencode), else the live screen of its pane, else its terminal recording.
+- Coding-agent plugins can supply a `transcript(run, {tail, chars})` reader (docs/plugins.md).
+
+### Changed
+
+- A flow's `extract` step with the `transcript` source now reads cursor's and opencode's own records too, not only claude's.
 
 ## 2026-11-03
 

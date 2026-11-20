@@ -282,7 +282,7 @@ export function repoAtCapacity(repoId) {
  * string, so '' must be treated as "not set", never as 0 — an operator who
  * clears a field must get the default back, not a gate that blocks everything.
  */
-function numSetting(key, fallback) {
+export function numSetting(key, fallback) {
   const v = db.prepare(`SELECT value FROM settings WHERE key=?`).get(key)?.value
   const n = Number(v)
   return (v !== undefined && v !== null && String(v).trim() !== '' && Number.isFinite(n)) ? n : fallback

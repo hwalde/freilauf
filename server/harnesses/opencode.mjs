@@ -416,6 +416,28 @@ const plugin = {
     return (await rootSessionId(run)) ?? null
   },
 
+  /**
+   * The transcript capability (docs/plugins.md): the tail of the run's whole
+   * session tree out of opencode's store, read-only and closed again in the
+   * same breath. `null` when the store cannot answer (no store, a moved schema,
+   * a home the hub cannot read); the hub then falls back to the screen.
+   */
+  async transcript(run, { tail = 40 } = {}) {
+    if (!run?.workdir_effective) return null
+    const { openStore, runSessionIds, runStartMs } = await import('../opencode-store.mjs')
+    const { chatMessages } = await import('../opencode-chat.mjs')
+    const d = openStore(run)
+    if (!d) return null
+    try {
+      const ids = runSessionIds(d, run.workdir_effective, runStartMs(run))
+      if (!ids.length) return null
+      const messages = chatMessages(d, ids, { tail })
+      return messages.length ? { source: 'transcript', messages } : null
+    } finally {
+      try { d.close() } catch {}
+    }
+  },
+
   modelArgs(run, ctx = null, opts = null) {
     const args = []
     const fehlt = []

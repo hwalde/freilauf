@@ -171,7 +171,7 @@ async function handle(req, res) {
     try { b = JSON.parse(await readBody(req) || '{}') } catch { /* an unreadable body is an empty one */ }
     // The SAME handler the loopback route calls, which checks the token again —
     // one set of rules for both listeners.
-    const r = handleSupervise(route.runId, bearerToken(req), b)
+    const r = await handleSupervise(route.runId, bearerToken(req), b)
     return json(res, r.code, r.body)
   }
   const run = db.prepare(`SELECT id, sandbox, sandbox_spec, sandbox_container FROM runs WHERE id = ?`).get(route.runId)

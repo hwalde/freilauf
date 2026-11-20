@@ -16,6 +16,7 @@ import { RUNS_DIR, fmtDbUtc } from './util.mjs'
 import { notify, notifyMuted, detailUrl } from './notify.mjs'
 import { TYPE_TEXT, agentCopedAfter } from './detect.mjs'
 import { env } from './env.mjs'
+import { settledAnomalies } from './run-state.mjs'
 
 /**
  * How long a red incident waits BEFORE the notification fires. The delay is a grace
@@ -137,6 +138,41 @@ export function needsHuman(v, run = null, jetztMs = Date.now()) {
   const zuletzt = msFrom(v.zuletzt_gesehen)
   if (!Number.isFinite(zuletzt) || jetztMs - zuletzt < NOTIFY_DELAY_MS) return false
   return !agentCopedAfter(msFrom(run?.last_activity_at), zuletzt)
+}
+
+const sqlList = kinds => kinds.map(k => `'${k}'`).join(',')
+
+/**
+ * The anomaly kinds this run may still be coloured by — as a WHERE fragment.
+ *
+ * `cleared:*` kinds fall out by themselves: `clearAnomalies()` renames the
+ * event, so neither `LIKE 'anomaly:%'` nor an IN-list matches a retracted one.
+ * What did NOT fall out until now is an anomaly the run's own state has already
+ * answered — `settledAnomalies()` is that rule (server/run-state.mjs): the
+ * statements a run's end answers, plus "branch not pushed" on a run whose work
+ * the hub itself put on origin.
+ */
+function stillSpeaking(run) {
+  const settled = settledAnomalies(run)
+  return settled.length ? ` AND kind NOT IN (${sqlList(settled)})` : ''
+}
+
+/** Does the run carry one of these anomalies, still asking for attention? */
+export function hasAnomaly(run, kinds) {
+  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`)
+    .get(run.id)
+}
+
+/** …and the counterpart: any anomaly that is NOT one of these kinds. */
+export function hasOtherAnomaly(run, kinds) {
+  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%'
+    AND kind NOT IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`).get(run.id)
+}
+
+/** Every anomaly kind still speaking for this run, sorted — what the supervisor's fingerprint and due check read. */
+export function activeAnomalies(run) {
+  return db.prepare(`SELECT DISTINCT kind FROM events WHERE run_id=? AND kind LIKE 'anomaly:%'${stillSpeaking(run)} ORDER BY kind`)
+    .all(run.id).map(r => r.kind)
 }
 
 export function openIncidentsOf(runId) {

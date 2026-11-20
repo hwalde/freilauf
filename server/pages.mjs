@@ -26,7 +26,7 @@ import { runEditAllowed } from './run-edit.mjs'
 import { syncChat, CHAT_FILE } from './opencode-chat.mjs'
 import { readLogTail } from './run-log.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
-  settledAnomalies, archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
+  archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
 import { activeSupervisorAgent, startSupervisorRound } from './supervision.mjs'
 import { caseSection, supervisionSwitch, supervisorNotice } from './supervision-pages.mjs'
@@ -37,7 +37,7 @@ import { harnessOwnCredentials } from './models.mjs'
 import { subscriptionUsage } from './usage.mjs'
 import { panelValues, panelState, PANEL_MAX_VALUE } from './panels.mjs'
 import { actionState } from './panel-action.mjs'
-import { trafficLightFromIncidents, openIncidentsOf, allIncidentsOf, needsHuman } from './incidents.mjs'
+import { trafficLightFromIncidents, openIncidentsOf, allIncidentsOf, needsHuman, hasAnomaly, hasOtherAnomaly } from './incidents.mjs'
 import { TYPE_TEXT } from './detect.mjs'
 import { llmModelsMru, rememberLlmModel } from './pruefer.mjs'
 import { skillListe, skillAnzeige, skillFelder, skillsAusFormular } from './zusaetze.mjs'
@@ -111,34 +111,8 @@ const SEVERITY_TEXT = { rot: 'incidents.severity_red', gelb: 'incidents.severity
 /** The yellow anomaly kinds — every other `anomaly:*` is a red one. */
 const YELLOW_ANOMALIES = ['anomaly:no_activity', 'anomaly:soft_overrun', 'anomaly:followup_soft_overrun', 'anomaly:unpushed']
 
-const sqlList = kinds => kinds.map(k => `'${k}'`).join(',')
-
-/**
- * The anomaly kinds this run may still be coloured by — as a WHERE fragment.
- *
- * `cleared:*` kinds fall out by themselves: `clearAnomalies()` renames the
- * event, so neither `LIKE 'anomaly:%'` nor an IN-list matches a retracted one.
- * What did NOT fall out until now is an anomaly the run's own state has already
- * answered — `settledAnomalies()` is that rule (server/run-state.mjs): the
- * statements a run's end answers, plus "branch not pushed" on a run whose work
- * the hub itself put on origin.
- */
-function stillSpeaking(run) {
-  const settled = settledAnomalies(run)
-  return settled.length ? ` AND kind NOT IN (${sqlList(settled)})` : ''
-}
-
-/** Does the run carry one of these anomalies, still asking for attention? */
-function hasAnomaly(run, kinds) {
-  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`)
-    .get(run.id)
-}
-
-/** …and the counterpart: any anomaly that is NOT one of the yellow ones. */
-function hasOtherAnomaly(run, kinds) {
-  return !!db.prepare(`SELECT 1 FROM events WHERE run_id=? AND kind LIKE 'anomaly:%'
-    AND kind NOT IN (${sqlList(kinds)})${stillSpeaking(run)} LIMIT 1`).get(run.id)
-}
+// `hasAnomaly()` / `hasOtherAnomaly()` live in server/incidents.mjs: the
+// supervisor's due check asks the same question and must not import this module.
 
 function trafficLight(run) {
   const vf = trafficLightFromIncidents(run.id)

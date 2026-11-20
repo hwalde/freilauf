@@ -1994,5 +1994,20 @@
   "case.note_again": "In {minutes} min wieder ansehen",
   "case.answer_choice": "Gewählt: {choice}",
   "case.state_closed": "Geschlossen seit {at}: {reason}",
-  "case.state_look_again": "Der Supervisor schaut um {at} wieder hin."
+  "case.state_look_again": "Der Supervisor schaut um {at} wieder hin.",
+  "case.look_due": "Fällig, weil: {reason}",
+  "case.look_not_due": "Zu dem Zeitpunkt nicht fällig",
+  "case.reason_answer": "du hast geantwortet",
+  "case.reason_resolved": "eine Eskalation kam zurück",
+  "case.reason_reply": "der Lauf hat geantwortet",
+  "case.reason_waiting_help": "er wartet auf Hilfe",
+  "case.reason_waiting_input": "sein Agent wartet auf Eingabe",
+  "case.reason_pane_died": "sein Prozess ist ohne Bericht gestorben",
+  "case.reason_no_report": "er endete ohne Bericht",
+  "case.reason_failed": "er ist fehlgeschlagen",
+  "case.reason_red_incident": "ein roter Vorfall ist offen",
+  "case.reason_anomaly": "er läuft zu lange oder ist still",
+  "case.reason_merge_blocked": "sein Merge ist blockiert",
+  "case.reason_unmerged": "seine Arbeit ist nicht gemergt",
+  "case.reason_look_again": "seine Wiedervorlage war erreicht"
 }

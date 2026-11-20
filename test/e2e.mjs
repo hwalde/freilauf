@@ -8849,7 +8849,7 @@ export default {
       contains((await supervise(SUP, ['note', 'abcd1111', 'x'])).stderr, 'is archived', 'an archived run')
       const unknownOp = await viaLoopback(`/api/runs/${SUP}/supervise`, { token: lauf(SUP).report_token, body: { op: 'explode', run: PLAIN } })
       equal(unknownOp.status, 400, 'an unknown op is a 400')
-      contains(unknownOp.json?.error ?? '', 'note, again, close', 'naming the ops there are')
+      contains(unknownOp.json?.error ?? '', 'note, again, close, bundle, cases', 'naming the ops there are')
     })
 
     await check('the operator answers in the case file, on the page and through the API', async () => {
@@ -8894,6 +8894,111 @@ export default {
       equal((await caseOf(id)).total, 1, 'the existing case file stays readable')
       const supPage = await (await fetchPath(`/runs/${SUP}`)).text()
       contains(supPage, 'id="run-supervision" hidden', 'a supervisor run has no switch: it is never a case')
+    })
+
+    // ---- stage A2: what the supervisor sees ----
+    /** Make a run's agent wait for input since `min` minutes, the way the hooks leave it. */
+    const makeWaiting = (runId, min) => {
+      db.prepare(`INSERT INTO events(run_id, kind, ts, payload) VALUES(?, 'agent_waiting', datetime('now', ?), '{"source":"e2e"}')`)
+        .run(runId, `-${min} minutes`)
+      db.prepare(`UPDATE runs SET agent_state='waiting', agent_state_at=datetime('now'), last_activity_at=datetime('now', ?) WHERE id=?`)
+        .run(`-${min} minutes`, runId)
+    }
+    let WAIT = null
+
+    await check('the transcript route answers for a stub run, naming its source, bounded', async () => {
+      const j = await (await fetchPath(`/api/runs/${PLAIN}/transcript`)).json()
+      isTrue(j.ok, 'answers')
+      equal(j.source, 'pane', 'no claude record in the fence, a live pane: its screen')
+      equal(j.messages[0]?.role, 'screen', 'one screen message')
+      contains(j.messages[0]?.text ?? '', 'E2E agent started', 'with what the pane shows')
+      const big = await (await fetchPath(`/api/runs/${PLAIN}/transcript?tail=99999&chars=99999999`)).json()
+      equal(big.tail, 200, 'tail held to its ceiling')
+      equal(big.chars, 60000, 'chars too')
+      const small = await (await fetchPath(`/api/runs/${PLAIN}/transcript?chars=30`)).json()
+      isTrue(small.messages[0].text.length <= 30 && small.cut.chars, 'a small budget cuts, and says so')
+      equal((await fetchPath(`/api/runs/${randomUUID()}/transcript`)).status, 404, 'an unknown run is a 404')
+      equal((await caseOf(PLAIN)).entries.filter(e => e.kind === 'look').length, 0, 'reading it records no look')
+    })
+
+    await check('cases lists a run made due and omits one taken out of supervision', async () => {
+      WAIT = (await laufStarten({ repo_id: repoId, prompt: 'waits for somebody' })).runId
+      await sessionMerken(WAIT)
+      makeWaiting(WAIT, 45)
+      const OUT = (await laufStarten({ repo_id: repoId, prompt: 'waits too, but alone', supervision_off: '1' })).runId
+      await sessionMerken(OUT)
+      makeWaiting(OUT, 45)
+      const c = await supervise(SUP, ['cases', '--limit', '50'])
+      equal(c.code, 0, `cases answers (${c.stderr.trim()})`)
+      const mine = c.json?.cases?.find(x => x.run === WAIT)
+      isTrue(!!mine, 'the waiting run is a case')
+      equal(mine?.reason, 'waiting_input', 'because its agent waits')
+      equal(Math.round((mine?.for_s ?? 0) / 60), 45, 'for 45 minutes, computed by the hub')
+      contains(mine?.why ?? '', 'for 45 min', 'and phrased')
+      isFalse(c.json.cases.some(x => x.run === OUT), 'the run taken out is not')
+      // PLAIN's case was closed, and the operator answered three times after that:
+      // news after the closing reopens it, and an answer is the most urgent reason.
+      const reopened = c.json.cases.find(x => x.run === PLAIN)
+      equal(reopened?.reason, 'answer', 'the closed case the operator answered after is due again')
+      equal(reopened?.reopen, true, 'and says it reopens')
+      isFalse(c.json.cases.some(x => x.run === SUP), 'nor the supervisor itself')
+      const t = await supervise(SUP, ['cases', '--text', '--limit', '50'])
+      contains(t.stdout, shortIdOf(WAIT), 'the readable form names it')
+      contains(t.stdout, 'case(s) due', 'as a list')
+      equal(t.json, null, '--text prints text, not JSON')
+      const off = await supervise(PLAIN, ['cases'])
+      equal(off.code, 1, 'outside a supervisor run, cases is refused too')
+    })
+
+    await check('look on a waiting run prints the bundle with phrased ages and records the look', async () => {
+      const short = shortIdOf(WAIT)
+      const l = await supervise(SUP, ['look', short])
+      equal(l.code, 0, `look answers (${l.stderr.trim()})`)
+      const text = l.stdout
+      for (const part of ['## What it was asked to do', '## State', '## Why it is due', '## Last events', '## Git',
+        '## Transcript', '## Case file', '## How a human would attach']) contains(text, part, part)
+      isTrue(text.indexOf('## State') < text.indexOf('## Git') && text.indexOf('## Git') < text.indexOf('## Transcript')
+        && text.indexOf('## Transcript') < text.indexOf('## Case file'), 'in the order a supervisor reasons')
+      contains(text, 'waiting for input for 45 min', 'the waiting time, computed and phrased')
+      contains(text, 'Due: its agent waits for input, for 45 min', 'why it is due')
+      contains(text, '<data>\nwaits for somebody', 'the prompt fenced as data')
+      contains(text, 'live screen', 'the transcript says where it came from')
+      contains(text, `tmux attach -t '=${lauf(WAIT).tmux_session}'`, 'how to attach')
+      contains(text, 'Uncommitted files of the agent: none', 'the git state of a clean worktree')
+      const k = await caseOf(WAIT)
+      equal(k.entries.map(e => `${e.kind}:${e.author}`).join(','), `look:${SUP}`, 'one look entry, by the supervisor')
+      equal(k.entries[0].data?.due, 'waiting_input', 'with what it saw')
+      isTrue(!!k.state.last_look_at && !!k.state.state_fp, 'the case state knows when and what')
+      equal(k.state.looks_unchanged, 1, 'the first look')
+      const j = await supervise(SUP, ['look', short, '--json'])
+      equal(j.json?.state?.display_status, 'waiting_input', '--json gives the object')
+      equal(j.json?.due?.exclusion, 'looked_recently', 'looked at a moment ago: not due again within the interval')
+      equal((await caseOf(WAIT)).state.looks_unchanged, 2, 'a second look at the same state counts')
+      const page = await (await fetchPath(`/runs/${WAIT}`)).text()
+      contains(page, 'Due because: its agent waits for input', 'the operator reads the look on the run page')
+      const c = await supervise(SUP, ['cases', '--limit', '50'])
+      isFalse(c.json.cases.some(x => x.run === WAIT), 'once looked at, it is not due again within the interval')
+    })
+
+    await check('the bundle of a run whose session and worktree are gone still comes back and says so', async () => {
+      const id = (await laufStarten({ repo_id: repoId, prompt: 'about to vanish' })).runId
+      const s = await sessionMerken(id)
+      const wt = lauf(id).workdir_effective
+      await sh('tmux', ['kill-session', '-t', `=${s}`])
+      db.prepare(`UPDATE runs SET status='failed', ended_at=datetime('now') WHERE id=?`).run(id)
+      // Only a worktree under the suite's own worktrees directory — never the repo checkout.
+      const removable = !!wt && wt.startsWith(join(SB, 'worktrees') + '/')
+      isTrue(removable, 'the run has a worktree of its own to remove')
+      if (removable) rmSync(wt, { recursive: true, force: true })
+      const l = await supervise(SUP, ['look', shortIdOf(id)])
+      equal(l.code, 0, `look answers (${l.stderr.trim()})`)
+      contains(l.stdout, 'is gone; there is nothing to attach to', 'the session is gone, said plainly')
+      contains(l.stdout, 'is gone.', 'the worktree too')
+      contains(l.stdout, 'terminal recording', 'the transcript falls back to the recording')
+      contains(l.stdout, 'Due: it failed', 'and the run is due because it failed')
+      const j = await supervise(SUP, ['look', shortIdOf(id), '--json'])
+      equal(j.json?.attach?.session_gone, true, 'the object says gone')
+      equal(j.json?.git?.dirty, null, 'and the dirt of a missing worktree is unknown, not clean')
     })
 
     await check('without an active supervisor agent the switch and the checkbox are gone, the route still works', async () => {

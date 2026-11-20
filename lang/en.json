@@ -1994,5 +1994,20 @@
   "case.note_again": "Look again in {minutes} min",
   "case.answer_choice": "Chosen: {choice}",
   "case.state_closed": "Closed since {at}: {reason}",
-  "case.state_look_again": "The supervisor looks again at {at}."
+  "case.state_look_again": "The supervisor looks again at {at}.",
+  "case.look_due": "Due because: {reason}",
+  "case.look_not_due": "Not due at that moment",
+  "case.reason_answer": "you answered",
+  "case.reason_resolved": "an escalation came back",
+  "case.reason_reply": "the run replied",
+  "case.reason_waiting_help": "it waits for help",
+  "case.reason_waiting_input": "its agent waits for input",
+  "case.reason_pane_died": "its process died without a report",
+  "case.reason_no_report": "it ended without a report",
+  "case.reason_failed": "it failed",
+  "case.reason_red_incident": "a red incident is open",
+  "case.reason_anomaly": "it runs too long or is silent",
+  "case.reason_merge_blocked": "its merge is blocked",
+  "case.reason_unmerged": "its work is not merged",
+  "case.reason_look_again": "its look-again time had come"
 }

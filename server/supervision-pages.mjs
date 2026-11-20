@@ -5,7 +5,7 @@
 // importable without rendering anything.
 import { escapeHtml as e, fmtDuration, fmtDbUtc, parseDbUtc, shortId } from './util.mjs'
 import { t } from './i18n.mjs'
-import { caseEntries, caseState, activeSupervisorAgent, supervisorAgents } from './supervision.mjs'
+import { caseEntries, caseState, activeSupervisorAgent, supervisorAgents, DUE_REASONS } from './supervision.mjs'
 
 /** How many entries the run page shows; the read API reaches further back. */
 const PAGE_ENTRIES = 50
@@ -36,6 +36,10 @@ function dataLine(entry) {
   }
   if (entry.kind === 'note' && d.again_minutes) return t('case.note_again', { minutes: d.again_minutes })
   if (entry.kind === 'answer' && d.choice) return t('case.answer_choice', { choice: d.choice })
+  if (entry.kind === 'look' && 'due' in d) {
+    return d.due && DUE_REASONS[d.due] !== undefined
+      ? t('case.look_due', { reason: t(`case.reason_${d.due}`) }) : t('case.look_not_due')
+  }
   return ''
 }
 
