@@ -2835,6 +2835,19 @@ try {
     }
   })
 
+  await check('agent-edit.py sends a supervisor agent back with its flag, so a save does not unflag it', async () => {
+    const { execFileSync: ef } = await import('node:child_process')
+    const script = new URL('../skills/freilauf-agents/scripts/agent-edit.py', import.meta.url).pathname
+    const py = `import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("agent_edit", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+row = {"name": "s", "repo_id": 1, "active": 1, "harness": "claude", "prompt": "p", "branch_mode": "keiner", "expected_minutes": 20}
+print(json.dumps([m.body_from_row(dict(row, supervisor=1)), m.body_from_row(dict(row, supervisor=0))]))`
+    const [flagged, plain] = JSON.parse(ef('python3', ['-I', '-B', '-c', py, script], { encoding: 'utf8' }))
+    isTrue(flagged.some(([k, v]) => k === 'supervisor' && v === '1'), 'a flagged agent keeps supervisor=1')
+    isFalse(plain.some(([k]) => k === 'supervisor'), 'an ordinary agent sends no flag (the checkbox stays unticked)')
+  })
+
   await check('a shipped skill has a description that could trigger, and stays under the caps', () => {
     for (const s of skillsMod.availableSkills()) {
       isTrue(s.description.length > 40, `${s.name}: description is more than a label`)
@@ -15429,6 +15442,15 @@ process.stdout.write(JSON.stringify(out))
       equal(Math.round((NOW - v.sinceMs) / 60_000), 2, 'the age is the leading reason\'s')
       const s = sv.dueSentence(sv.dueVerdict(waiting(45), null, F({ waitingSince: ago(45) }), NOW, cfg), NOW)
       contains(s, 'waits for input, for 45 min', 'the sentence carries the phrased age')
+    })
+
+    await check('every exclusion is said in words to the agent, never as a bare code', () => {
+      for (const x of sv.DUE_EXCLUSIONS) isTrue(!!sv.EXCLUSION_WORDS[x], `${x} has words`)
+      const v = { due: false, exclusion: 'looked_recently' }
+      const s = sv.dueSentence(v, NOW)
+      contains(s, 'less than one interval ago', 'what the code means')
+      contains(s, 'may still stand', 'and that it is no all-clear')
+      contains(s, '(looked_recently)', 'with the code for whoever greps for it')
     })
 
     await check('the fingerprint moves with the state and not with the clock', () => {

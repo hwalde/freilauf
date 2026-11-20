@@ -44,7 +44,7 @@ import {
 import { t } from './i18n.mjs'
 import { caseEntries, caseEntryCount, caseState } from './supervision.mjs'
 import { runTranscript, transcriptLimits } from './transcript.mjs'
-import { listEscalations, escalationItem, isoUtc } from './escalations.mjs'
+import { listEscalations, escalationItem, escalationById, isoUtc } from './escalations.mjs'
 
 const LIMIT_MAX = 200
 const LIMIT_DEFAULT = 50
@@ -313,6 +313,14 @@ export async function readApi(req, res, url) {
     const r = listEscalations({ state: url.searchParams.get('state'), limit: url.searchParams.get('limit') })
     if (!r.ok) { json(res, r.code, { ok: false, error: r.error }); return true }
     json(res, 200, { ok: true, now: isoUtc(Date.now()), escalations: r.rows.map(escalationItem) })
+    return true
+  }
+  // One escalation in the same item shape, so a resolver can re-read the one it
+  // holds without paging the list; 404 for an id that names nothing.
+  if ((m = path.match(/^\/api\/escalations\/([^/]+)$/))) {
+    const row = escalationById(m[1])
+    if (!row) { json(res, 404, { ok: false, error: `no escalation #${m[1].replace(/[^0-9A-Za-z_-]/g, '').slice(0, 20)}` }); return true }
+    json(res, 200, { ok: true, now: isoUtc(Date.now()), escalation: escalationItem(row) })
     return true
   }
 

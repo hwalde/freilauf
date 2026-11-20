@@ -5,7 +5,8 @@ must not break; where the reason is not obvious it follows in the same
 sentence. The code is the source of truth for *how* any of it is done — a line
 here that the code no longer satisfies is removed or corrected, never kept.
 Contracts for third parties live elsewhere: `docs/plugins.md`,
-`docs/panels.md`, `docs/escalations.md`, `server/flows/AGENTS.md`, `SANDBOX.md`. Which modules
+`docs/panels.md`, `docs/supervision.md`, `docs/escalations.md`,
+`server/flows/AGENTS.md`, `SANDBOX.md`. Which modules
 belong to which section is the "Where is what" table in `AGENTS.md`.
 
 Sections: [Deploying and restarts](#deploying-and-restarts) ·
@@ -770,195 +771,207 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 
 ## Supervision
 
+The contracts are `docs/supervision.md` (the supervisor's commands, the nudge,
+the case and transcript routes) and `docs/escalations.md` (an external
+resolver's routes).
+
+**Who supervises**
+
 - The supervisor flag exists on agents only and is copied to the run
-  (`runs.supervisor`): `runDefFromForm()` sets it only for the agent form and
-  `defFromFlowProps()` forces it off, so no request, favorite, Quick Run,
-  conflict resolver, cleanup agent or flow-started single run may act on other
-  runs.
-- Only the supervision clock starts a flagged agent: the scheduler's tick and
-  catch-up skip it, and a flow's `start_agent` and `toggle_agent` answer it like a
-  switched-off agent; "Start now" goes through `startSupervisorRound()`.
+  (`runs.supervisor`): only the agent form can set it (`runDefFromForm()` with
+  `agentForm`) and `defFromFlowProps()` forces it off, so no request, favorite,
+  Quick Run, conflict resolver, cleanup agent or flow-started run can act on
+  other runs.
+- Only the supervision clock and "Start now" (`startSupervisorRound()`) start a
+  flagged agent: the scheduler's tick and catch-up skip it and a flow's
+  `start_agent` and `toggle_agent` answer it like a switched-off agent, because
+  a round without a case list costs a full context for nothing.
 - One supervisor per hub: `activeSupervisorAgent()` is the lowest id among
-  flagged, switched-on agents in active repos, and the agents page names the
-  others when there are several.
+  flagged, switched-on agents in active repositories, and the agents page, the
+  agent form and Settings → Supervision name the others; unflagging,
+  deactivating or deleting it makes the clock quiet and the platform-rules
+  lines disappear from the next launch.
+- A caller qualifies by its own `runs.supervisor = 1` while it is still working:
+  a round keeps working after its agent is unflagged until it ends, and a
+  finished round is refused because its token outlives it.
 - `runs.supervision_off` is a single-run start option (`runStartFromForm()`),
   never a definition field; every change writes `supervision_off` or
   `supervision_on`; the form checkbox and the run-page switch render only while
   a supervisor agent is active, the route works regardless.
+
+**The channel**
+
+- `POST /api/runs/<own id>/supervise` is one route on both listeners, served by
+  `handleSupervise()`, the bearer required on both and matching the run in the
+  path; a new operation is a `registerSupervisorOp()` entry, never a branch in
+  the route, and the socket's allowlist stays at its three routes.
+- `supervisionRefusal()` is the one authorisation check: the caller is a working
+  supervisor run, and the target is not the caller, another supervisor run,
+  taken out of supervision, archived or unknown; an ambiguous short id is
+  refused with its candidates.
+- `FL_RUN_TOKEN` reaches an unsandboxed run only when `runs.supervisor = 1`, so
+  every other run's environment stays as it was.
+- What an agent reads (refusals, answers, the bundle, the case list, the round's
+  block, the nudge header) is an English literal with durations from
+  `fmtDurationEn()` and exclusions in words (`EXCLUSION_WORDS`), every age
+  computed by the hub; what the operator reads goes through `t()`.
+
+**The case file**
+
 - `server/supervision.mjs` is the only writer of `case_entries` and
   `case_state`; `addCaseEntry()` bounds the text, accepts only the listed kinds
-  and authors, and announces the run, because an entry is not an event.
-- Both tables reference `runs(id) ON DELETE CASCADE`, and repository deletion
-  removes their rows explicitly in its transaction.
-- `POST /api/runs/<own id>/supervise` is one route on both listeners, served by
-  `handleSupervise()`, with the bearer required on both and matching the run in
-  the path; a new operation is a `registerSupervisorOp()` entry.
-- `supervisionRefusal()` is the one authorisation check: the caller is a
-  supervisor run that is still working (a finished round's token outlives it),
-  and the target is not the caller, another supervisor run, taken out of
-  supervision, archived or unknown; an ambiguous short id is refused with its
-  candidates.
-- `FL_RUN_TOKEN` reaches an unsandboxed run only when `runs.supervisor = 1`, so
-  every other run's environment stays as it was; `tmux show-environment` shows
-  that token to any local process of the same user.
-- What an agent reads (refusal sentences, answers) is an English literal; what
-  the operator reads goes through `t()`.
-- `GET /api/runs/<id>/case` is read-only and bounded (`limit`, ceiling 200);
-  only the supervisor route may record that a case was looked at.
+  and authors, and announces the run, because an entry is not an event; the
+  hub's own facts go into `data`, so the page renders them through `t()`.
+- `case_entries`, `case_state` and `escalations` reference `runs(id) ON DELETE
+  CASCADE`, and repository deletion removes their rows explicitly in its
+  transaction.
+- `GET /api/runs/<id>/case` and `/transcript` are read-only and bounded; only
+  the supervisor route's `bundle` records a look (entry, `last_look_at`,
+  fingerprint, looks without a change).
 - The case section (`#run-case`) is always rendered and part of the run-detail
-  fragment; it is hidden unless the case file has entries or, on a run that is
-  not a supervisor run, a supervisor agent is active; the operator's answer
-  needs a text or a choice and is accepted with no question open.
-- `dueVerdict()` is the one due predicate: pure (no subprocess, git, tmux or
-  database), fed by `caseFacts()`, applied to every candidate by `dueCases()`;
-  its exclusions come before its conditions, and a supervisor, taken-out,
-  archived or conflict run, or one ended by the operator (the kill, or the
-  last follow-up abandoned from the page), a flow or a supervisor, is never
-  due; a parked case only as said below.
+  fragment, hidden unless the case file has entries or, on a run that is not a
+  supervisor run, a supervisor agent is active; the operator's answer needs a
+  text or a choice and is accepted with no question open.
+
+**When a run is a case**
+
+- `dueVerdict()` is the one due predicate — pure, fed by `caseFacts()`, applied
+  by `dueCases()` — and its exclusions come before its conditions: a
+  supervisor, taken-out, archived or conflict run, or one ended by the operator
+  (the kill, or its last follow-up abandoned from the page), a flow or a
+  supervisor, is never due.
 - `dueCases()` takes as candidates only runs that are working, ended since
-  supervision began in a state that can be due, or have a look-again time or
+  supervision began in a state that can be due, or carry a look-again time or
   unseen news, working runs first, so runs that ended fine never push an old
-  stuck run past its fence; a hit fence is said in the answer.
-- `supervision_since` is set once, by the first due check that runs while a
-  supervisor agent is active (a clock pass, "Start now", or a supervisor's
-  `cases`), not when the flag is saved; a run that ended before it is never
-  due for how it ended, so switching a supervisor on does not make the past a
-  case.
+  stuck run past the candidate fence; a hit fence is said in the answer.
+- `supervision_since` is set once, by the first due check while a supervisor
+  agent is active, not when the flag is saved; a run that ended before it is
+  never due for how it ended, so switching supervision on does not make the
+  past a case.
 - "Waiting since" is the newest `agent_waiting` event, and waiting for help is
   due only after the same threshold, so the supervisor does not race the
   operator who was paged.
 - "Done but unmerged" is a case only where `merge_mode = 'hub'`.
-- A closed case or a pending look-again comes back only when its
-  `stateFingerprint()` changed or a reply, answer or escalation result arrived
-  after the last look or the closing (compared by entry id, not by second);
-  the fingerprint holds no ages and no activity, so the clock alone never
-  changes it; closing stores it.
-- Without news a case is not due again within the interval after a look or
-  after a round took it (`last_round_at`); the bundle ignores `last_round_at`,
-  so the round that took a case sees why it was handed out.
-- Text an agent reads (bundle, case list, refusals) phrases durations with
-  `fmtDurationEn()`, never the UI-language `fmtDuration()`, and every age in
-  it is computed by the hub.
-- The bundle is `op: bundle` on the supervisor route and records a `look`
-  (entry, `last_look_at`, fingerprint, looks without a change); the read API's
-  `/case` and `/transcript` record nothing.
-- In the bundle, untrusted text (titles, prompts, transcripts, entries,
-  payloads) is fenced in `<data>` with `<`, `>`, `&` escaped, so it cannot
-  close the fence and read as the hub's words.
+- A closed case or a pending look-again comes back only on news (a reply,
+  answer or escalation result newer than the last look or the closing,
+  compared by entry id) or when `stateFingerprint()` changed while a due
+  condition holds; the fingerprint holds no ages and no activity, so the clock
+  alone never changes it.
+- Without news a case is not due again within the interval after a look or after
+  a round took it (`last_round_at`); the bundle ignores `last_round_at`, so the
+  round that took a case sees why.
+- A case is parked (`parkCase()`, announced once as `supervision_parked`) after
+  `PARK_AFTER` looks at the same fingerprint while it is a case (due, or held
+  back only by its interval or look-again time — never a healthy run or a
+  closed case), or when it would be handed to a round after that many rounds
+  that never looked at it; it comes back only on news, on a changed
+  fingerprint with a due condition, or by the operator's un-park (a look-again
+  time of now, reopening a closed case too).
+- A closed or parked case that is due again is reopened or un-parked for real
+  (`applyVerdict()`: a `reopened` entry or an `unpark` action) before a round
+  takes it or a look is recorded, or the next look would read it as closed.
+
+**What the supervisor sees**
+
+- The bundle fences untrusted text (titles, prompts, transcripts, entries,
+  payloads) in `<data>` with `<`, `>`, `&` escaped, so nothing inside can close
+  the fence and read as the hub's words.
 - The bundle of a run whose session or worktree is gone still answers and says
-  so; what nobody could read is `null` or "unknown", never 0 or "clean"
-  (`worktreeSummary()` never fetches, collects a clone's tip or dry-runs a merge).
+  so; what nobody could read is `null` or "unknown", never 0 or "clean", and
+  `worktreeSummary()` never fetches, collects a clone's tip or dry-runs a merge.
 - One transcript shape for every coding agent: the plugin's `transcript()`
   first, then the live pane's screen (`fallbackPlan()`: an unanswered tmux is
-  "unknown" and the screen is not read), then the cleaned recording; `source`
-  names which, and everything is bounded (`tail` ≤ 200, `chars` ≤ 60 000).
-- What a transcript reader read is never written to a log, an event or an
-  entry: it can hold a secret the agent printed.
-- A nudge is typed by the hub only: the constant tag `<freilauf-supervisor>`
-  as keystrokes (no digits: in a numbered menu a digit is a choice), then a
-  pasted header naming the supervisor run and the supervisor's text
-  (`composeNudge()`); control characters other than newline and tab are
-  removed first, so a text cannot end the paste and type keys of its own, and
-  the envelope's tag inside the text is neutralised, so it can neither close
-  the envelope nor open a second one; over `NUDGE_TEXT_MAX` it is refused,
-  never cut; one nudge per run is typed at a time.
-- A nudge reuses the functions behind `POST /send`, never the route:
-  `supervisor_message {by}` always, `help_answered` / `followup_started`
+  "unknown" and the screen is not read), then the cleaned recording, `source`
+  naming which and everything bounded; what a reader read is never written to a
+  log, an event or an entry, because it can hold a secret the agent printed.
+
+**Acting**
+
+- Only the hub writes a nudge (`composeNudge()`): the constant tag
+  `<freilauf-supervisor>` as keystrokes — no digits, because in a numbered menu
+  a digit is a choice — then a pasted header naming the supervisor run and the
+  text, control characters other than newline and tab removed and the
+  envelope's tag inside the text neutralised; a text over `NUDGE_TEXT_MAX` is
+  refused, never cut, and one nudge per run is typed at a time.
+- A nudge reuses the functions behind `POST /send`, never the route, and
+  decides what it meant from the run read again after typing:
+  `supervisor_message` always, `help_answered` / `followup_started`
   `{via:'supervisor', by}` by the run's state, a `message` entry; nothing a
-  nudge writes reads as the operator, and the handover history lists nudges
-  in their own block.
+  nudge writes reads as the operator, and the handover history lists nudges in
+  a block of their own.
 - A nudge is refused, with nothing typed or recorded, when the run has no live
-  session, its pane is dead, tmux cannot say, or the run has had
-  `supervision_nudge_limit` (default 3) nudges since the operator's last
-  answer.
-- Limit of the header's authenticity: on an unsandboxed machine any local
-  process can type into any tmux session, and `tmux show-environment` shows a
-  supervisor run's token; the header is authenticated only as far as the
-  report channel's per-run token reaches, and a sandbox makes it a boundary.
-- The platform rules explain the tag and `fl-report reply` only for a run
-  launched while a supervisor agent is active and that is neither a supervisor
-  run nor taken out; a supervisor run gets its own line instead of the help
-  line; without an active supervisor the prompt is byte for byte what it was.
-- A case has at most one open question (a `question` entry without an
-  `answer` after it); the question goes out on the urgent route with
-  `dedupe:false`, a muted run gets the entry and no message, and the
-  supervisor is told which happened.
+  session, its pane is dead, tmux cannot say, or it has had
+  `supervision_nudge_limit` nudges since the operator's last answer (counted
+  from the answer, so an operator who says "go ahead" does not lock the
+  supervisor out).
+- The header is authenticated only as far as the per-run token reaches: on an
+  unsandboxed machine any local process can type into any tmux session, and
+  `tmux show-environment` shows a supervisor run's token; a sandbox makes it a
+  boundary. The README, `SANDBOX.md` and `docs/supervision.md` say so.
+- The platform rules explain the tag and `fl-report reply` only to a run
+  launched while a supervisor agent is active that is neither a supervisor run
+  nor taken out; a supervisor run gets its own line instead of the help line;
+  without an active supervisor the prompt is byte for byte what it was.
 - `nudge` and `end` refuse an integrator's conflict run (`resolves_run_id`),
   because acting on it would fight the merge it exists for.
-- A run a supervisor ended (`aborted {by:'supervisor'}`, or its last follow-up
-  `followup_abandoned {source:'supervisor'}`) is never due again.
-- Escalations: `server/escalations.mjs` is the only writer; the routes,
-  fields, codes and orders are the contract in `docs/escalations.md`; every
-  transition is one conditional UPDATE, so two resolvers cannot both win;
-  `summary` and `run.title` leave the hub as one line without control
-  characters, bounded; the same class about the same run is refused while one
-  is open or claimed.
+- A case has at most one open question; it goes out on the urgent route with
+  `dedupe:false`, a muted run gets the entry and no message, and the supervisor
+  is told which happened.
+
+**Escalations**
+
+- `server/escalations.mjs` is the only writer; every transition is one
+  conditional UPDATE, so two resolvers cannot both win; `summary` and
+  `run.title` leave the hub as one line without control characters, bounded;
+  the same class about the same run is refused while one is open or claimed.
 - Raising writes an `escalated` entry; resolving or dismissing writes a
   `resolved` entry (author `resolver:<by>`, else `resolver:<claimed_by>`, else
   `operator`), which makes the case due; the escalations page resolves and
-  dismisses through its own routes (`/escalations/<id>/…`) as the operator,
-  so no caller of the contract routes can write as the operator.
-- With `supervision_escalation_grace_minutes` at 0 (the default) the operator
-  hears of an escalation when it is raised, on the urgent route; the timed
-  announcements (`escalationNotices()`) mark what they sent, so a clock never
-  repeats one.
+  dismisses through its own routes as the operator, so no caller of the
+  contract routes can write as the operator.
+- With `supervision_escalation_grace_minutes` at 0 the operator hears of an
+  escalation when it is raised; the clock's timed announcements
+  (`escalationNotices()`) run on every pass whether or not a supervisor is
+  active, because an escalation that exists must not be swallowed, and mark
+  what they sent, so none is repeated.
+
+**The clock and its rounds**
+
 - The clock is `supervisionTick()` in the watcher pass, fenced by
   `FREILAUF_SUPERVISION_OFF`; no model is asked whether anything is due, and a
   pass that finds nothing due starts no run and writes no event.
 - One round at a time: a run carrying a `supervision_round` event that is
-  running, waiting for help, deferred or has an open follow-up holds the
-  clock; a new round starts at most once per `supervision_interval_minutes`,
-  measured from the newest round's stored start, so a restart does not reset
-  it, and the due check itself runs at most once per interval per process.
-- A round is started through `startForAgent()` and so passes the budget gate
-  like any start (a deferred round holds the clock); it honours `pipeline_on`
-  and the agent's `active` switch, and counts against its repository's
-  `max_parallel` without being gated by it, like the cleanup agent.
-- A round's case list is its `supervision_round` event, written by
-  `startRun()` before the launch so the agent's first `fl-supervise cases`
-  finds it; `cases` answers exactly that list and `cases --due` what is due
-  now; every case it took gets `last_round_at` and one more
-  `handouts_unlooked`.
-- The round's prompt extra (`roundBlock()`) is English, lists at most
-  `supervision_cases_per_round` cases most urgent first with the hub's
-  phrased ages, fences every title, repository and agent name as data, tells
-  the round to look first and never to call `fl-report help`, and says
-  "nothing is due" when the list is empty.
-- "Start now" on a flagged agent runs the due check by hand and is not gated
-  by the pipeline, the interval or the fence; it is refused for a flagged agent
-  that is not the active supervisor, while a round holds the clock, and while
-  another start is in progress (one latch shared with the clock, because the
-  round marker is written only after `startRun()`'s awaits), so a hub never has
-  two rounds acting at once.
-- A caller qualifies by its own `runs.supervisor = 1`: a round keeps working
-  after its agent is unflagged until it ends or hits its bound; only the clock
-  and "Start now" decide which agent starts rounds.
-- A round open longer than max(2 x interval, 3 x its expected minutes) —
+  running, waiting for help, deferred, scheduled or has an open follow-up holds
+  the clock; a new round starts at most once per interval, measured from the
+  newest round's stored start so a restart does not reset it, and the due check
+  runs at most once per interval per process.
+- A round starts through `startForAgent()` and so passes the budget gate (a
+  deferred round holds the clock); it needs `pipeline_on` and the agent's
+  `active` switch, and counts against its repository's `max_parallel` without
+  being gated by it, like the cleanup agent.
+- A round's case list is its `supervision_round` event, written by `startRun()`
+  before the launch so the agent's first `fl-supervise cases` finds it; `cases`
+  answers exactly that list and `cases --due` what is due now; every case it
+  took gets `last_round_at` and one more `handouts_unlooked`.
+- The round's block (`roundBlock()`) lists at most
+  `supervision_cases_per_round` cases most urgent first, fences every title,
+  repository and agent name as data, tells the round to look first and never to
+  call `fl-report help`, and says "nothing is due" when the list is empty.
+- "Start now" runs the due check by hand, ungated by the pipeline, the interval
+  or the fence; it is refused for a flagged agent that is not the active
+  supervisor, while a round holds the clock, and while another start is in
+  progress (one latch shared with the clock, because the round marker is
+  written only after `startRun()`'s awaits), so a hub never has two rounds.
+- A round open longer than max(2 × interval, 3 × its expected minutes) —
   measured from its open follow-up's commission when there is one, never while
-  deferred — is ended through `endRun({by:'hub'})` and announced once as
-  `supervision_round_stuck`; a round whose follow-up is held in the finish
-  gate (any status) has that follow-up given up too, so an ended round never
-  keeps holding the clock; a supervisor round is never a case, so this is the only
-  thing that keeps a hanging round from stopping supervision.
-- A case is parked (`parkCase()`: `parked_at`, an `action` entry by the hub,
-  one `supervision_parked` message) after `PARK_AFTER` (6) looks with the same
-  fingerprint at a case (due, or with a due condition held back only by its
-  interval or look-again time — never a healthy run or a closed case), or when it would be handed out after six
-  rounds that never looked at it; a parked case comes back only on news, on a
-  changed fingerprint with a real condition — whichever way it was parked — or
-  by the operator's un-park button (due at the next round through a look-again
-  time of now, and a closed case is reopened with it).
-- A closed or parked case that is due again is reopened or un-parked for real
-  (`applyVerdict()`: a `reopened` entry or an `unpark` action, `closed_at` /
-  `parked_at` cleared) before a round takes it or a look is recorded.
-- Escalation notices run on every clock pass whether or not a supervisor is
-  active, because an escalation that exists must not be swallowed.
-- Unflagging, deactivating or deleting the supervisor agent makes the clock
-  quiet and the platform-rules lines disappear for the next launch.
+  deferred or scheduled — is ended through `endRun({by:'hub'})` and announced
+  once as `supervision_round_stuck`, its follow-up given up whatever its
+  status, because a supervisor round is never a case and nothing else would end
+  a round that hangs.
 - Settings → Supervision writes only its five keys: `''` means the default, a
-  value is a whole number in its range, and 0 is valid only for the
-  escalation grace; a value outside the range that reached the database
-  otherwise is held to it when read.
+  value is a whole number in its range, 0 is valid only for the escalation
+  grace, and a save with one bad field saves nothing; the interval, the cases
+  per round and the waiting threshold are held to their range when read.
 
 ## Skills
 

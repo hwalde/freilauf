@@ -30,7 +30,15 @@ fl-api --url                                  # print the hub base URL
 ```
 
 Repeat a name to send a list (`skills=unlazy skills=other`). Exit code 0 = HTTP
-2xx, 1 = HTTP error (body still printed), 3 = the hub did not answer.
+2xx, 1 = HTTP error (body still printed), 3 = the hub did not answer, 4 = the
+request timed out (the hub is there but slow; a POST may have happened — look
+before repeating it).
+
+**Runs that get stuck, and somebody who looks after them for you:** a hub can
+have a supervisor agent that the hub starts whenever a run waits, fails or will
+not merge — `../freilauf-supervision/SKILL.md`. A run's case file
+(`fl-api /api/runs/<uuid>/case`) holds what that supervisor, the run and the
+operator said about it.
 
 **Before deciding a harness / provider / model / effort, read
 `../freilauf-models/SKILL.md`** — and the operator's saved setups

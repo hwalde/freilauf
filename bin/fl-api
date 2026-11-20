@@ -6,7 +6,8 @@
 #   fl-api -X POST <path> [name=value ...]      POST, form-encoded body
 #   fl-api --url                                print the hub's base URL and exit
 #   fl-api --raw <path> ...                     do not pretty-print the answer
-#   fl-api --status <path> ...                  print "<HTTP code> <path>" to stderr too
+#   fl-api --status <path> ...                  print "HTTP <code> <path>" to stderr too
+#   fl-api --max-time <seconds> <path> ...      give up after this long (default 30)
 #
 # Examples:
 #   fl-api /api/repos
@@ -22,10 +23,12 @@
 # port; the outside path is the VPN proxy (see docs/requirements.md, "Pages and live channel").
 #
 # Exit codes: 0 = HTTP 2xx, 1 = HTTP error (the body is still printed),
-#             2 = usage error, 3 = the hub could not be reached.
+#             2 = usage error, 3 = the hub could not be reached,
+#             4 = the request timed out — the hub is there but slow, and a POST
+#                 may or may not have been carried out: read before repeating it.
 set -euo pipefail
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; }
 
 FL_PATHS="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fl-paths.sh"
 # Sourcing is best effort: inside a run FL_HUB_URL already says everything, and
@@ -52,10 +55,13 @@ hub_base() {
     printf 'http://127.0.0.1:%s' "$port"
 }
 
-METHOD=GET ; PRETTY=1 ; SHOW_STATUS=0
+METHOD=GET ; PRETTY=1 ; SHOW_STATUS=0 ; MAX_TIME=30
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -X|--method) METHOD="${2:-GET}"; shift 2 ;;
+        --max-time)
+            [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { printf 'fl-api: --max-time takes whole seconds\n' >&2; exit 2; }
+            MAX_TIME="$2"; shift 2 ;;
         --raw)       PRETTY=0; shift ;;
         --status)    SHOW_STATUS=1; shift ;;
         --url)       hub_base; echo; exit 0 ;;
@@ -80,11 +86,21 @@ done
 # `--get` makes curl put --data-urlencode pairs into the query string instead of
 # a body, so one encoder covers both directions and nothing has to be escaped by
 # hand here.
-CURL=(curl -sS -m 30 -w '\n%{http_code}' -X "$METHOD" -H 'accept: application/json')
+CURL=(curl -sS -m "$MAX_TIME" -w '\n%{http_code}' -X "$METHOD" -H 'accept: application/json')
 [[ "$METHOD" == GET ]] && CURL+=(--get)
 CURL+=("${QUERY[@]}" "${BODY[@]}" "$BASE$PATH_ARG")
 
-if ! OUT="$("${CURL[@]}" 2>&1)"; then
+RC=0
+OUT="$("${CURL[@]}" 2>&1)" || RC=$?
+# curl 28 is its timeout: something accepted the connection and did not answer
+# in time. That is not "the hub is down" (3), and a caller that polls has to be
+# able to tell the two apart.
+if [[ $RC -eq 28 ]]; then
+    printf 'fl-api: the hub at %s did not answer within %s s.\n' "$BASE" "$MAX_TIME" >&2
+    printf 'It may still be working on the request: read the state before repeating a POST.\n' >&2
+    exit 4
+fi
+if [[ $RC -ne 0 ]]; then
     printf 'fl-api: the hub at %s did not answer.\n%s\n' "$BASE" "$OUT" >&2
     printf 'Is it running? `freilauf status` says; `freilauf logs` shows why not.\n' >&2
     exit 3

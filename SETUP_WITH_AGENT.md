@@ -169,8 +169,9 @@ from the machine itself travels over `lo` and proves nothing about the
 firewall. This is a real trap and it is in `AGENTS.md` under "Pitfalls that
 hurt on any change".
 
-Troubleshooting, in the order that pays off: `freilauf status` → `freilauf logs` →
-`systemctl --user status freilauf.service`. A hub that will not start is almost
+Troubleshooting, in the order that pays off: `freilauf status` → `freilauf logs`
+(it follows the log; as an agent use `freilauf logs --no-follow -n 200`, which
+prints and returns) → `systemctl --user status freilauf.service`. A hub that will not start is almost
 always a missing value in `~/.config/freilauf/env` or a missing certificate.
 
 ### Optional: the sandbox
@@ -517,7 +518,22 @@ The hub starts empty on purpose, and the first thing a browser sees says so:
     coding agent brings its own and needs no change here. Switching it off
     removes exactly the copies Freilauf wrote — each carries a marker file — and
     leaves a skill of your own under the same name alone.
- 7. Optional: **Settings → Favorites**
+ 7. **A supervisor** — *optional, and off until an agent is flagged.* An agent
+    with the **Supervisor** checkbox ticked is started by the hub itself
+    whenever a run needs a look (it waits for input nobody gives, failed, ended
+    without a report, cannot merge) and never by its schedule. It looks at each
+    such run with `fl-supervise`, nudges it, ends it, asks the human one
+    question, or raises an escalation for somebody outside the hub. Do not set
+    one up unasked: every round costs a model's full context. When the human
+    wants one, follow the shipped skill `skills/freilauf-supervision` — it says
+    which repository to give it (one of its own, merging off), and its prompt
+    template has blocks for the human's standing rules, which you ask for and
+    never invent. Settings → **Supervision** then names the active supervisor
+    and holds its clock (interval, cases per round, waiting threshold, nudge
+    limit, escalation grace). The contract is
+    [`docs/supervision.md`](docs/supervision.md); an external resolver of
+    escalations builds against [`docs/escalations.md`](docs/escalations.md).
+ 8. Optional: **Settings → Favorites**
     (the setup half of a run under a name, feeds the Quick Run button in the
     header), **Settings → tmux cleanup** (a special agent that ends the oldest
     inactive tmux sessions to free memory — a threshold starts it by itself,
@@ -584,6 +600,7 @@ tooling. The seams that were designed to be pulled on:
 | run an agent inside a boundary rather than as yourself | **Settings → Sandbox** — off by default, needs a container runtime, configured hub → repo → agent → run with a lower level only ever able to narrow what a higher one locked. Start with the **Audit** shape (watch what a run reaches), then enforce — that order lets you learn your own allowlist before it can block a build. Two agents (opencode, cursor) have completed real runs behind the enforced allowlist; claude and hermes each still hit a launch bug in the box. → [`SANDBOX.md`](SANDBOX.md) |
 | put a project away without losing its history | **Repos → Deactivate**: gone from every dropdown, starts nothing new, everything it owns kept and reachable, reversible in one click. `POST /repos/toggle` (`id`, `active=1\|0`) is the same thing from a script — `server/pages.mjs`, and "Repos and archive" in [`docs/requirements.md`](docs/requirements.md) |
 | script the hub from a shell or from inside a run | `fl-api` — `fl-api /api/runs repo=3 status=running`, `fl-api /api/runs/<id>`, `fl-api -X POST /api/runs/<id>/title title=…`. The read-only half is `server/read-api.mjs`; every write still goes through the ordinary POST routes, which validate |
+| have stuck runs looked after without starting an agent by hand | a **supervisor**: tick **Supervisor** on one agent and give it the prompt template of `skills/freilauf-supervision`; the hub starts it when runs are due. Its own commands are `fl-supervise`, a run answers it with `fl-report reply`, and escalations go to an external resolver of your own → [`docs/supervision.md`](docs/supervision.md), [`docs/escalations.md`](docs/escalations.md) |
 | show your project's own numbers in the sidebar | **panels** — the project pushes (`fl-panel set findings --total 33 --item "bug=17:red"`, or a tool of yours piping JSON in), Freilauf renders them with the time they were measured and never learns what they mean. Push it from a run before it reports, or from a `run_merged` flow → [`docs/panels.md`](docs/panels.md) |
 | do something after a run finishes or a merge lands | **no-code flows** — a graphical designer, no code needed: message running agents, start follow-up runs and wait, extract data from a report via LLM, branch, loop, notify, HTTP, shell command → [`server/flows/AGENTS.md`](server/flows/AGENTS.md) |
 | change when a run is allowed to start | Settings → **Budget gates** — the fieldset is generated from whichever plugins declare a `gate`, so a new one appears there by itself; else `repos.max_parallel` — `server/scheduler.mjs`; a deferred run can be started anyway from its detail page |
@@ -642,6 +659,7 @@ If your task is to change Freilauf rather than just run it:
 | Starting a run, schedules, budget gate | `server/scheduler.mjs`, `server/quota.mjs` |
 | Worktrees, prompt assembly, session launch | `server/runner.mjs`, `bin/fl-start` |
 | Reports coming back in | `server/reports.mjs`, `bin/fl-report` |
+| Supervision: the flag, case files, the due check, nudges, questions, escalations, the clock — and its contracts | `server/supervision.mjs`, `server/supervision-acts.mjs`, `server/supervision-clock.mjs`, `server/supervision-pages.mjs`, `server/escalations.mjs`, `server/transcript.mjs`, `bin/fl-supervise`, **`docs/supervision.md`**, **`docs/escalations.md`**, `skills/freilauf-supervision/` |
 | Watching from the outside; anomalies | `server/watcher.mjs`, `server/detect.mjs`, `server/opencode-log.mjs` |
 | The raw recording and its size cap; opencode's readable chat | `bin/fl-log-cap`, `server/run-log.mjs`, `server/opencode-chat.mjs`, `server/opencode-store.mjs` |
 | Merging a finished run into the base branch | `server/integrate.mjs` |
@@ -659,7 +677,7 @@ If your task is to change Freilauf rather than just run it:
 | A project's own numbers in the sidebar | `server/panels.mjs`, `bin/fl-panel`, **`docs/panels.md`** |
 | No-code flows | `server/flows/` + its own `AGENTS.md` |
 | Running an agent in a container: profiles, layering, network, audit, and what it does **not** do | **`SANDBOX.md`**, `server/sandbox/`, `sandbox/images/README.md` |
-| The report socket and the per-run token | `server/hub-socket.mjs`, `bin/fl-report` |
+| The report socket and the per-run token | `server/hub-socket.mjs`, `bin/fl-report`, `bin/fl-supervise` |
 | Pages, sidebar, live channel | `server/pages.mjs`, `server/events.mjs`, `public/hub.js` |
 | TLS proxy, HTTP/2, the network edge | `vpn-proxy.mjs`, `test/proxy.mjs` |
 | Deploying, rollback, health check | `bin/freilauf-deploy`, `test/deploy.mjs` |
@@ -683,6 +701,8 @@ If your task is to change Freilauf rather than just run it:
     credentials present (environment variable or stored value)
 [ ] a model source chosen for the hub's own questions (run titles at minimum)
 [ ] Settings → Freilauf skills answered (install them, or deliberately not)
+[ ] supervisor: left off (the default), OR set up with skills/freilauf-supervision
+    in a repository of its own, its standing rules asked of the human
 [ ] sandbox: left off (the default), OR a runtime installed by the human,
     every row of "What has to be true" checked, Settings → Sandbox switched
     on, images built, a policy dry-run verified, and SANDBOX.md's limits

@@ -27,7 +27,7 @@ import { shortId, toDbUtc, parseDbUtc, fmtDurationEn, detailUrl } from './util.m
 import { numSetting } from './scheduler.mjs'
 import { activeAnomalies, openIncidentsOf } from './incidents.mjs'
 import { escapeData } from './report-context.mjs'
-// The op handlers of stage B. Both modules import this one back; that cycle is
+// The acting ops' handlers. Both modules import this one back; that cycle is
 // safe because only hoisted function declarations cross it at load time.
 import { nudgeOp, questionOp, endOp } from './supervision-acts.mjs'
 import { escalateOp } from './escalations.mjs'
@@ -175,6 +175,27 @@ export const DUE_EXCLUSIONS = ['supervisor_run', 'taken_out', 'archived', 'confl
   'ended_by_operator', 'ended_by_flow', 'ended_by_supervisor', 'parked', 'closed',
   'look_again_pending', 'looked_recently', 'not_due']
 
+/**
+ * Each exclusion in words, for text an agent reads: a bare code such as
+ * `looked_recently` reads like "leave it alone", while it only means "not again
+ * within the interval" — the condition behind it may well still stand.
+ */
+export const EXCLUSION_WORDS = {
+  supervisor_run: 'it is a supervisor run, and supervisors do not supervise supervisors',
+  taken_out: 'the operator took it out of supervision',
+  archived: 'it is archived',
+  conflict_resolver: 'it is the integrator\'s conflict run',
+  ended_by_operator: 'the operator ended it',
+  ended_by_flow: 'a flow ended it',
+  ended_by_supervisor: 'a supervisor ended it',
+  parked: 'its case is parked',
+  closed: 'its case is closed and nothing new has come in since',
+  look_again_pending: 'its look-again time has not come yet',
+  looked_recently: 'it was looked at or handed out less than one interval ago and nothing new has come in; '
+    + 'what stood then may still stand — read the state',
+  not_due: 'none of the due conditions holds',
+}
+
 /** The anomalies that make a run due (SPEC 4.7): overrun and silence; `exit_without_report` is `no_report`. */
 export const DUE_ANOMALIES = ['anomaly:overrun', 'anomaly:no_activity', 'anomaly:followup_overrun']
 
@@ -201,7 +222,7 @@ export const PARK_AFTER = 6
 /**
  * The state of a run as one short string: when it changes, something happened
  * that a supervisor has not seen (SPEC 7.14), and a case looked at six times
- * with the same one is parked (stage C). Status, display status, finish and
+ * with the same one is parked. Status, display status, finish and
  * merge state, the open incidents, the anomalies still speaking, the help
  * question, the follow-up commission and how many replies, answers and results
  * the case file holds — nothing that moves by itself (no ages, no activity).
@@ -341,7 +362,7 @@ export function dueVerdict(run, state, facts = {}, nowMs = Date.now(), cfg = {})
 
 /** The reason in English words, durations phrased by the hub (SPEC 4.3, 7.32). */
 export function dueSentence(v, nowMs = Date.now(), cfg = {}) {
-  if (!v?.due) return `not due (${v?.exclusion ?? 'unknown'})`
+  if (!v?.due) return `not due: ${EXCLUSION_WORDS[v?.exclusion] ?? 'unknown'} (${v?.exclusion ?? 'unknown'})`
   const age = Number.isFinite(v.sinceMs) ? fmtDurationEn(Math.max(0, (nowMs - v.sinceMs) / 1000)) : null
   const d = v.details ?? {}
   const words = {
@@ -512,7 +533,7 @@ const LIVE_SQL = `(r.status IN ('running', 'waiting_help') OR r.followup_open = 
  * since supervision began in a state that can be due, or have a case file
  * with a look-again time or news nobody looked at. Returns `{ cases, total,
  * considered, capped, since }`, each case `{ run, verdict }`; `capped` says the
- * fence was hit and the oldest finished candidates were not judged. Stage C's clock calls this; so does `cases`.
+ * fence was hit and the oldest finished candidates were not judged. The clock calls this; so does `cases`.
  */
 export function dueCases({ nowMs = Date.now(), limit = 50, begin = false } = {}) {
   const since = supervisionSince(nowMs, { begin })
@@ -850,7 +871,7 @@ function bundleText(b, { nowMs, cfg }) {
   L.push(`Anomalies still speaking: ${s.anomalies.length ? s.anomalies.map(k => k.replace('anomaly:', '')).join(', ') : 'none'}.`)
 
   L.push('', '## Why it is due')
-  L.push(b.due.due ? `Due: ${b.due.sentence}.` : `Not due now: ${b.due.exclusion}.`)
+  L.push(b.due.due ? `Due: ${b.due.sentence}.` : `Not due now: ${EXCLUSION_WORDS[b.due.exclusion] ?? b.due.exclusion} (${b.due.exclusion}).`)
 
   L.push('', `## Last events (${b.events.shown} of ${b.events.total}, newest last)`)
   if (!b.events.list.length) L.push('(none)')
@@ -958,7 +979,7 @@ export function casesText(list, { total, considered, capped = false, nowMs = Dat
  *               `supervisionRefusal()` judges that run before the handler runs);
  *   `handler(ctx)` — `ctx = { caller, target, body, nowMs }`, returns
  *               `{ code?, ...answer }` (code defaults to 200, `ok` to true).
- * Later stages register their ops here; the route does not change.
+ * A new op registers here; the route does not change.
  */
 const OPS = new Map()
 

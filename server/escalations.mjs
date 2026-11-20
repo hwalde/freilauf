@@ -50,7 +50,7 @@ export const ESCALATIONS_LIMIT_MAX = 200
 /** A resolver's name: it becomes the case-file author `resolver:<name>`, so the same shape. */
 const NAME_RE = /^[A-Za-z0-9._@-]{1,64}$/
 
-/** A claimed escalation not resolved within this long is announced once (stage C's clock). */
+/** A claimed escalation not resolved within this long is announced once (the supervision clock). */
 export const CLAIMED_REMIND_MS = 24 * 60 * 60_000
 
 /** How long an escalation may stay unclaimed before the operator hears of it; 0 = at once. */
@@ -195,7 +195,7 @@ export function anyEscalation() {
  * is refused, never cut: the resolver should read what was meant). The same
  * class about the same run while one is still open or claimed is refused — the
  * next round must not raise it again. With the grace setting at 0 (the default)
- * the operator hears of it at once; otherwise stage C's clock does that.
+ * the operator hears of it at once; otherwise the supervision clock does that.
  */
 export async function raiseEscalation({ run, by, cls, summary, nowMs = Date.now() }) {
   const c = String(cls ?? '').trim()
@@ -243,9 +243,10 @@ export async function announceEscalation(row, why = 'unclaimed') {
 }
 
 /**
- * THE function stage C's clock calls: announce what has waited too long
- * (`escalationsToAnnounce()`). Not wired to any clock in this stage — the
- * immediate announcement at grace 0 happens in `raiseEscalation()`.
+ * THE function the supervision clock calls on every pass
+ * (server/supervision-clock.mjs): announce what has waited too long
+ * (`escalationsToAnnounce()`). The immediate announcement at grace 0 happens
+ * in `raiseEscalation()`.
  */
 export async function escalationNotices(nowMs = Date.now()) {
   const rows = db.prepare(`SELECT * FROM escalations WHERE (state='open' AND announced_at IS NULL)

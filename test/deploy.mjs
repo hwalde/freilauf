@@ -566,6 +566,96 @@ try {
     })
 
     // ------------------------------------------------------------------
+    group('freilauf logs: following by default, printing and returning on request')
+
+    /** bin/freilauf with the shims first on the PATH; journalctl only logs its arguments. */
+    const freilauf = (...args) => sh('bash', [join(PROJECT, 'bin', 'freilauf'), ...args], {
+      cwd: SB,
+      env: { ...process.env, HOME, PATH: `${SHIM}:${process.env.PATH}`, FREILAUF_ENV_FILE: join(SB, 'no-such-env'),
+        FREILAUF_TEST_CALLS: CALLS, FREILAUF_TEST_ACTIVE: ACTIVE_FILE,
+        XDG_CONFIG_HOME: join(HOME, '.config'), XDG_DATA_HOME: join(HOME, '.local', 'share') },
+    })
+    const journalCalls = () => calls().split('\n').filter(l => l.startsWith('journalctl '))
+
+    await check('the default still follows the last 100 lines', () => {
+      setActiveUnit('freilauf.service')
+      resetCalls()
+      equal(freilauf('logs').code, 0, 'exit code')
+      const c = journalCalls()
+      equal(c.length, 1, 'one journalctl call')
+      contains(c[0], '-u freilauf', 'of the hub unit')
+      contains(c[0], '-f -n 100', 'following, from the last 100 lines')
+    })
+
+    await check('--no-follow prints the last lines and returns; -n picks how many', () => {
+      resetCalls()
+      equal(freilauf('logs', '--no-follow').code, 0, 'exit code')
+      equal(freilauf('logs', '--no-follow', '-n', '40').code, 0, 'exit code with -n')
+      const [a, b] = journalCalls()
+      isFalse(/(^| )-f( |$)/.test(a), 'no -f: an unattended caller gets its prompt back')
+      contains(a, '--no-pager -n 100', 'no pager, the default 100 lines')
+      contains(b, '--no-pager -n 40', 'and -n 40 when asked')
+      equal(freilauf('logs', '-n', 'many').code, 2, 'a count that is not a number is a usage error')
+      equal(freilauf('logs', '--tail').code, 2, 'and so is an unknown option')
+    })
+
+    // ------------------------------------------------------------------
+    group('fl-api: the exit codes a caller tells "down" from "slow" by')
+
+    {
+      const { createServer } = await import('node:net')
+      const http = await import('node:http')
+      const { execFile } = await import('node:child_process')
+      // execFile, not spawnSync: the HTTP server below answers from this very
+      // process, so its event loop must keep running while fl-api waits.
+      const flApi = (base, ...args) => new Promise((resolve) => {
+        execFile('bash', [join(PROJECT, 'bin', 'fl-api'), ...args], {
+          encoding: 'utf8', timeout: 20_000,
+          env: { ...process.env, HOME, FL_HUB_URL: base, FREILAUF_ENV_FILE: join(SB, 'no-such-env') },
+        }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: String(stdout), err: String(stderr) }))
+      })
+      const listen = (srv) => new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)))
+      // Accepts the connection and never answers — a hub that is there but stuck.
+      const silent = createServer(() => { /* keep the socket open, say nothing */ })
+      const silentPort = await listen(silent)
+      const answering = http.createServer((req, res) => {
+        const code = req.url.startsWith('/missing') ? 404 : 200
+        res.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: code === 200 }))
+      })
+      const answerPort = await listen(answering)
+      // A port nobody listens on: bound once, then closed again.
+      const gone = createServer()
+      const gonePort = await listen(gone)
+      await new Promise(r => gone.close(r))
+      try {
+        await check('2xx exits 0 and an HTTP error exits 1, with --status naming the code', async () => {
+          equal((await flApi(`http://127.0.0.1:${answerPort}`, '--raw', '/api/escalations')).code, 0, '200 → 0')
+          const nf = await flApi(`http://127.0.0.1:${answerPort}`, '--raw', '--status', '/missing')
+          equal(nf.code, 1, '404 → 1')
+          contains(nf.err, 'HTTP 404 /missing', '--status prints the code on stderr')
+        })
+
+        await check('a hub that is not there exits 3', async () => {
+          const r = await flApi(`http://127.0.0.1:${gonePort}`, '--raw', '/api/escalations')
+          equal(r.code, 3, 'connection refused → 3')
+          contains(r.err, 'did not answer', 'and says so')
+        })
+
+        await check('a hub that accepts and does not answer in time exits 4, not 3', async () => {
+          const t0 = Date.now()
+          const r = await flApi(`http://127.0.0.1:${silentPort}`, '--raw', '--max-time', '1', '/api/escalations')
+          equal(r.code, 4, 'timed out → 4')
+          contains(r.err, 'within 1 s', 'it names the bound')
+          contains(r.err, 'before repeating a POST', 'and what that means for a write')
+          isTrue(Date.now() - t0 < 10_000, '--max-time really bounded the wait')
+          equal((await flApi(`http://127.0.0.1:${silentPort}`, '--max-time', '0', '/x')).code, 2, '--max-time 0 is a usage error')
+        })
+      } finally {
+        silent.close(); answering.close()
+      }
+    }
+
+    // ------------------------------------------------------------------
     group('The operator\'s own checkout is none of its business')
 
     await check('nothing outside the sandbox was written', () => {

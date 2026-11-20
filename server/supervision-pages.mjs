@@ -10,7 +10,7 @@ import { caseEntries, caseState, activeSupervisorAgent, supervisorAgents, DUE_RE
   supervisionSetting, ROUND_EVENT } from './supervision.mjs'
 import { questionForPage, NUDGE_LIMIT_KEY, NUDGE_LIMIT_DEFAULT, nudgeLimit } from './supervision-acts.mjs'
 import { listEscalations, escalationItem, pendingEscalationCount, anyEscalation,
-  ESCALATION_STATE_FILTERS, ESCALATIONS_LIMIT_MAX, ESCALATION_GRACE_KEY, escalationGraceMs } from './escalations.mjs'
+  ESCALATION_CLASSES, ESCALATION_STATE_FILTERS, ESCALATIONS_LIMIT_MAX, ESCALATION_GRACE_KEY, escalationGraceMs } from './escalations.mjs'
 
 /** How many entries the run page shows; the read API reaches further back. */
 const PAGE_ENTRIES = 50
@@ -50,7 +50,9 @@ function dataLine(entry) {
   if (entry.kind === 'question' && Array.isArray(d.choices) && d.choices.length) {
     return t('case.question_choices', { choices: d.choices.join(' · ') })
   }
-  if (entry.kind === 'escalated' && d.escalation) return t('case.escalated_line', { id: d.escalation, cls: String(d.class ?? '') })
+  if (entry.kind === 'escalated' && d.escalation) {
+    return t('case.escalated_line', { id: d.escalation, cls: ESCALATION_CLASSES.includes(d.class) ? t(`escalation.class_${d.class}`) : String(d.class ?? '') })
+  }
   if (entry.kind === 'resolved' && d.escalation) {
     return t('case.resolved_line', { id: d.escalation, outcome: t(`escalation.outcome_${ESCALATION_OUTCOME_WORDS.includes(d.outcome) ? d.outcome : 'other'}`) })
   }

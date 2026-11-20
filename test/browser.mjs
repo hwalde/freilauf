@@ -2072,8 +2072,8 @@ try {
     // A new entry announces the run, and the open page asks for the fragment.
     await postForm(`/api/runs/${R_LIVE}/case/answer`, { text: 'pushed from outside' })
     await new Promise(r => setTimeout(r, 900))   // long enough for the swap to have happened
-    const feld = await p.$('#run-case textarea[name=text]')
-    equal(feld ? await feld.inputValue() : '(section was replaced)', 'half an answer', 'the typing survived')
+    const field = await p.$('#run-case textarea[name=text]')
+    equal(field ? await field.inputValue() : '(section was replaced)', 'half an answer', 'the typing survived')
     isFalse((await p.textContent('#run-case')).includes('pushed from outside'), 'the swap waited')
     // …and only waited: once the field is left, the next event brings the entry.
     await p.evaluate(() => document.activeElement.blur())

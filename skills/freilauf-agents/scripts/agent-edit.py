@@ -92,6 +92,10 @@ def body_from_row(a):
     add("repo_id", a.get("repo_id"))
     if a.get("active"):
         add("active", "1")
+    # The supervisor flag is a checkbox too: left out, the save would unflag
+    # the agent and switch supervision off without anybody asking for it.
+    if a.get("supervisor"):
+        add("supervisor", "1")
 
     add("harness", a.get("harness"))
     add("provider", a.get("provider"))

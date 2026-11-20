@@ -8667,25 +8667,25 @@ export default {
     const FL_SUPERVISE = join(PROJECT, 'bin', 'fl-supervise')
     const shortIdOf = (id) => id.split('-')[0]
     const http_ = await import('node:http')
-    const viaSocket = (pfad, { token = null, body: koerper = {} } = {}) =>
+    const viaSocket = (urlPath, { token = null, body = {} } = {}) =>
       new Promise((resolve, reject) => {
-        const kopf = { 'content-type': 'application/json' }
-        if (token) kopf.authorization = `Bearer ${token}`
-        const req = http_.request({ socketPath: SOCK, path: pfad, method: 'POST', headers: kopf }, (res) => {
+        const headers = { 'content-type': 'application/json' }
+        if (token) headers.authorization = `Bearer ${token}`
+        const req = http_.request({ socketPath: SOCK, path: urlPath, method: 'POST', headers }, (res) => {
           let d = ''
           res.setEncoding('utf8')
           res.on('data', (c) => { d += c })
           res.on('end', () => { let j = null; try { j = JSON.parse(d) } catch {} resolve({ status: res.statusCode, json: j }) })
         })
         req.on('error', reject)
-        req.write(JSON.stringify(koerper))
+        req.write(JSON.stringify(body))
         req.end()
       })
-    const viaLoopback = async (pfad, { token = null, body: koerper = {} } = {}) => {
-      const r = await fetchPath(pfad, {
+    const viaLoopback = async (urlPath, { token = null, body = {} } = {}) => {
+      const r = await fetchPath(urlPath, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify(koerper),
+        body: JSON.stringify(body),
       })
       let j = null
       try { j = await r.json() } catch {}
@@ -8693,12 +8693,12 @@ export default {
     }
     /** fl-supervise as the run `asRun` would call it; `channel` 'http' or 'socket'. */
     const supervise = (asRun, args, { channel = 'http', token } = {}) => new Promise((resolve) => {
-      const umgebung = { ...process.env, FL_RUN_ID: asRun, HOME: SB }
-      delete umgebung.FL_HUB_URL; delete umgebung.CC_HUB_URL; delete umgebung.FL_HUB_SOCKET; delete umgebung.FL_RUN_TOKEN
+      const env = { ...process.env, FL_RUN_ID: asRun, HOME: SB }
+      delete env.FL_HUB_URL; delete env.CC_HUB_URL; delete env.FL_HUB_SOCKET; delete env.FL_RUN_TOKEN
       const tok = token === undefined ? lauf(asRun)?.report_token : token
-      if (tok) umgebung.FL_RUN_TOKEN = tok
-      if (channel === 'socket') { umgebung.FL_HUB_SOCKET = SOCK; umgebung.FL_HUB_URL = 'http://127.0.0.1:1' } else umgebung.FL_HUB_URL = BASE
-      execFile(FL_SUPERVISE, args, { env: umgebung, encoding: 'utf8', timeout: 30_000 }, (err, stdout, stderr) => {
+      if (tok) env.FL_RUN_TOKEN = tok
+      if (channel === 'socket') { env.FL_HUB_SOCKET = SOCK; env.FL_HUB_URL = 'http://127.0.0.1:1' } else env.FL_HUB_URL = BASE
+      execFile(FL_SUPERVISE, args, { env, encoding: 'utf8', timeout: 30_000 }, (err, stdout, stderr) => {
         let json = null
         try { json = JSON.parse(stdout) } catch {}
         resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr), json })
@@ -9272,16 +9272,17 @@ export default {
       equal((await caseOf(M2)).entries.at(-1).kind, 'question', 'the question stands in the case file')
     })
 
-    await check('escalations: the whole life cycle through fl-api, the way an external resolver drives it', async () => {
-      const FL_API = join(PROJECT, 'bin', 'fl-api')
-      const api = (args, base = BASE) => new Promise((resolve) => {
-        const umgebung = { ...process.env, FL_HUB_URL: base }
-        execFile(FL_API, args, { env: umgebung, encoding: 'utf8', timeout: 30_000 }, (err, stdout, stderr) => {
-          let json = null
-          try { json = JSON.parse(stdout) } catch {}
-          resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr), json })
-        })
+    /** bin/fl-api of THIS checkout, the way an external resolver on the hub's machine calls it. */
+    const api = (args, base = BASE) => new Promise((resolve) => {
+      const env = { ...process.env, FL_HUB_URL: base }
+      execFile(join(PROJECT, 'bin', 'fl-api'), args, { env, encoding: 'utf8', timeout: 30_000 }, (err, stdout, stderr) => {
+        let json = null
+        try { json = JSON.parse(stdout) } catch {}
+        resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr), json })
       })
+    })
+
+    await check('escalations: the whole life cycle through fl-api, the way an external resolver drives it', async () => {
       const X2 = await freshRun('its credentials expired')
       const bad = await supervise(SUP, ['escalate', shortIdOf(X2), 'weather', 'cloudy'])
       equal(bad.code, 1, 'an unknown class is refused')
@@ -9301,6 +9302,15 @@ export default {
       const it = list.json.escalations.find(x => x.id === id)
       equal(Object.keys(it).join(','), 'id,created_at,class,summary,state,run,claimed_by,claimed_at,resolved_at,outcome,note', 'the fields of the contract, in order')
       equal(Object.keys(it.run).join(','), 'id,short_id,title,agent,repo,harness,status', 'and of its run')
+      const one = await api(['--raw', `/api/escalations/${id}`])
+      equal(one.code, 0, 'GET one escalation exits 0')
+      equal(JSON.stringify(one.json?.escalation), JSON.stringify(it), 'in exactly the shape of the list item')
+      isTrue(one.json?.ok && /Z$/.test(one.json?.now ?? ''), 'ok, and now in UTC')
+      for (const nope of ['999999', 'abc']) {
+        const r404 = await api(['--raw', '--status', `/api/escalations/${nope}`])
+        equal(r404.code, 1, `an unknown id (${nope}) exits 1`)
+        contains(r404.stderr, 'HTTP 404', 'with a 404')
+      }
       isTrue(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(it.created_at), 'ISO 8601 with Z')
       equal(`${it.class}|${it.summary}|${it.state}|${it.run.id}`, `credentials|The API token expired; the run cannot pull.|open|${X2}`, 'one line, about the run')
       equal(`${it.claimed_by}|${it.claimed_at}|${it.resolved_at}|${it.outcome}|${it.note}`, 'null|null|null|null|null', 'nothing decided yet')
@@ -9370,6 +9380,31 @@ export default {
 
       const down = await api(['--raw', '/api/escalations'], 'http://127.0.0.1:1')
       equal(down.code, 3, 'a hub that is down exits 3, not "nothing to do"')
+    })
+
+    // The worked example of docs/escalations.md ("Repairing by commissioning a
+    // run"), driven exactly as written there: a resolver that cannot edit files
+    // on the hub's machine starts a run that does the repair, on a new branch.
+    await check('a resolver repairs by commissioning a run: POST /api/runs as the contract document shows it', async () => {
+      const r = await api(['--raw', '-X', 'POST', '/api/runs', `repo_id=${repoId}`, 'harness=claude',
+        'prompt=Escalation #12: the nightly import fails because the fixture file is missing. Restore it and make the import test pass.',
+        'branch_mode=neu', 'branch_pattern=fix/{kurz}', 'expected_minutes=30', 'title=Repair for escalation #12'])
+      equal(r.code, 0, `started (${r.stderr.trim()})`)
+      equal(Object.keys(r.json ?? {}).join(','), 'ok,runId', 'the answer is {ok, runId} and nothing else')
+      isTrue(/^[0-9a-f-]{36}$/.test(r.json?.runId ?? ''), 'runId is the full uuid')
+      const id = r.json.runId
+      await sessionMerken(id)
+      const row = lauf(id)
+      equal(`${row.status}|${row.title}|${row.branch_mode}`, 'running|Repair for escalation #12|neu', 'a running run with that title')
+      equal(row.branch_expected, `fix/${shortIdOf(id)}`, '{kurz} became its short id: a branch of its own')
+      isTrue(!!row.tmux_session, 'the answer came after the launch: the session already stands')
+      const missing = await api(['--raw', '--status', '-X', 'POST', '/api/runs', `repo_id=${repoId}`, 'harness=claude', 'branch_mode=neu', 'branch_pattern=fix/{kurz}'])
+      equal(missing.code, 1, 'a run without a prompt exits 1')
+      contains(missing.stderr, 'HTTP 400', 'with a 400')
+      equal(missing.json?.ok, false, 'and {ok:false, error}')
+      isTrue(typeof missing.json?.error === 'string' && missing.json.error.length > 0, 'naming the problem')
+      // Ended by the operator, so it is no case for the clock checks below.
+      equal((await postForm(`/api/runs/${id}/kill`, {})).status, 200, 'ended again')
     })
 
     // ---- stage C: the clock ----

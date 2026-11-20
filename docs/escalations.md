@@ -4,7 +4,8 @@ A supervisor run hands a problem it cannot solve inside the hub (credentials,
 credit, a service on the machine, a system elsewhere) to somebody outside it.
 The hub only keeps the list. Whoever collects it — another machine, a script, a
 human — is the **external resolver**; this page is what it writes against. The
-implementation is `server/escalations.mjs`.
+implementation is `server/escalations.mjs`; what the supervisor does and what
+a run's case file holds is [`docs/supervision.md`](supervision.md).
 
 ## The list
 
@@ -36,6 +37,20 @@ GET /api/escalations   state=open|claimed|resolved|dismissed|all   (default: ope
 Classes, a closed list: `hub_defect`, `server_service`, `credentials`,
 `quota_or_credit`, `external_system`, `needs_access`, `other`.
 
+## One escalation
+
+```
+GET /api/escalations/<id>
+```
+
+```json
+{"ok":true,"now":"2026-11-20T16:05:40Z","escalation":{"id":12,"created_at":"2026-11-20T15:40:11Z", …}}
+```
+
+The escalation in exactly the list's item shape, so a resolver can re-read the
+one it holds without paging the list. An id that names nothing is a `404`
+(`{"ok":false,"error":"no escalation #12"}`).
+
 ## The transitions
 
 ```
@@ -50,13 +65,19 @@ POST /api/escalations/<id>/dismiss                                    open|claim
   escalation in the list's shape after the change.
 - `404`: no such id. `409`: the state does not allow the transition, and
   nothing changed (`state` in the answer says where it stands). `400`: a
-  parameter it cannot take (`by` missing or not a name, an outcome outside the
-  list, a note over 500 characters).
+  parameter it cannot take — `by` missing or not a name, an `outcome` outside
+  the list, a `note` over 500 characters (refused, never cut). Every refusal is
+  `{"ok":false,"error":"<sentence>"}`.
 - A name (`by`) is 1–64 characters of letters, digits and `. _ @ -`.
 - Two resolvers claiming the same escalation: exactly one gets the 200.
-- `outcome=operator` means the problem now lies with the human.
-- `dismiss` is the operator's "not a problem" and is not meant for a resolver.
-  The hub's escalations page resolves and dismisses through routes of its own,
+- The three ways out: `resolve outcome=solved` or `outcome=unsolved` (the
+  resolver's result), `resolve outcome=operator` ("the operator takes it from
+  here": the problem now lies with the human), and `dismiss` (the operator's
+  "not a problem", not meant for a resolver).
+- A resolved or dismissed escalation stays closed; there is no reopen. A problem
+  that persists is raised again by the next supervisor round as a new
+  escalation, which gets a new id.
+- The hub's escalations page resolves and dismisses through routes of its own,
   so these routes never write as the operator except by the rule below.
 
 ## What the run's case file hears
@@ -70,6 +91,10 @@ POST /api/escalations/<id>/dismiss                                    open|claim
 - A `resolved` entry makes the case due again: the next supervisor round
   continues from the result.
 
+The run's case file (`GET /api/runs/<id>/case`) and the tail of its transcript
+(`GET /api/runs/<id>/transcript`) are readable too — their shapes are in
+[`docs/supervision.md`](supervision.md#reading-a-case-case-and-transcript).
+
 ## Reaching the hub
 
 The hub listens on 127.0.0.1 only. `bin/fl-api` serves a resolver that can run
@@ -77,14 +102,65 @@ commands on the hub's machine (for example over SSH):
 
 ```
 fl-api --raw /api/escalations state=open
-fl-api --raw -X POST /api/escalations/12/claim by=resolver-1
+fl-api --raw /api/escalations/12
+fl-api --raw --status -X POST /api/escalations/12/claim by=resolver-1
 fl-api --raw -X POST /api/escalations/12/resolve outcome=solved note="Token rotated."
 ```
 
-Its exit codes: `0` an HTTP 2xx, `1` an HTTP error (the body is still printed;
-`--status` prints the code to stderr), `3` the hub could not be reached. Exit 3
-is how a resolver tells "the hub is down" from "nothing to do". A resolver on
-another machine goes through the TLS proxy and sees HTTP status codes only.
+Its exit codes:
+
+| Exit | Means |
+|---|---|
+| `0` | an HTTP 2xx |
+| `1` | an HTTP error; the body is still printed, and `--status` prints `HTTP <code> <path>` to stderr — the way to tell a `404` from a `409` |
+| `2` | a usage error |
+| `3` | the hub could not be reached — it is down, which is not "nothing to do" |
+| `4` | the request timed out: something accepted the connection and did not answer within `--max-time` (default 30 s). The hub is there but slow, and a POST may or may not have been carried out — read the escalation before repeating it |
+
+`freilauf logs --no-follow [-n <lines>]` prints the end of the hub's own log
+(default 100 lines) and returns, for a resolver that wants to know why the hub
+is down or slow; plain `freilauf logs` follows it, for a person at a terminal.
+
+A resolver on another machine goes through the TLS proxy and sees HTTP status
+codes only.
+
+## Repairing by commissioning a run
+
+A resolver that cannot edit files on the hub's machine repairs by starting a
+run that does the repair. That is the ordinary `POST /api/runs`, form-encoded;
+for a run on a branch of its own:
+
+```
+fl-api --raw -X POST /api/runs repo_id=3 harness=claude \
+  prompt="Escalation #12: the nightly import fails because the fixture file is missing. Restore it and make the import test pass." \
+  branch_mode=neu branch_pattern="fix/{kurz}" expected_minutes=30 \
+  title="Repair for escalation #12"
+```
+
+```json
+{"ok":true,"runId":"bf6eb294-810e-45ec-8b8e-49675f012b47"}
+```
+
+- Needed: `repo_id` (`fl-api /api/repos` lists them), `harness` (a coding agent
+  the operator configured), `prompt`, and for a new branch `branch_mode=neu`
+  with a `branch_pattern` — `{kurz}` becomes the run's short id, so every
+  repair gets a branch of its own.
+- `provider` (and usually `model`) is required for every coding agent that is
+  not on a subscription: `fl-api /api/providers harness=<id>` lists the ids,
+  and a list that is not empty means one must be sent. Without it the run
+  starts and dies at its first API call.
+- `expected_minutes` (default 45) drives the overrun warning; `title` is
+  optional. The full field list is in
+  [`skills/freilauf-runs`](../skills/freilauf-runs/SKILL.md) ("Start a run").
+- The answer comes after the launch: `{"ok":true,"runId":"<uuid>"}`, the
+  session already standing. `"deferred":true` beside it means the budget gate
+  parked the run and the hub starts it by itself later — not a failure. A
+  request it cannot take is a `400` with `{"ok":false,"error":"<what is
+  missing>"}` (for example `Prompt is empty.`); a start that failed or was
+  refused (an inactive repository, say) is a `500` with the reason.
+- Follow it with `fl-api /api/runs/<runId>` (`status`, `display_status`,
+  `merge_status`) and put the run id into the `note` of the `resolve`, so the
+  supervisor's next round finds the repair in the case file.
 
 ## When the operator is told
 

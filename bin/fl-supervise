@@ -49,7 +49,8 @@
 # <run> is the run's full id or its short id (the first 8 characters).
 # Output: the hub's JSON answer on stdout (look: its text), exit 0. A refusal: the hub's sentence
 # on stderr, exit 1 — it says what is the case; do not retry the same call.
-# Exit 2: wrong usage. Exit 3: the hub could not be reached.
+# Exit 2: wrong usage. Exit 3: the hub could not be reached (nothing was written),
+# or did not answer in time (it may have written: read the case before repeating).
 #
 # Works only inside a supervisor run (a run of an agent marked as supervisor):
 # the hub hands such a run FL_RUN_ID and FL_RUN_TOKEN and checks both, and the
@@ -57,7 +58,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 [[ $# -ge 1 ]] || { usage >&2; exit 2; }
