@@ -38,9 +38,10 @@ Settings → Supervision holds five numbers (an empty field is the default):
 | `supervision_nudge_limit` | 3 | 1–20 | nudges into one run since the operator last answered in its case file |
 | `supervision_escalation_grace_minutes` | 0 | 0–10080 | how long an escalation may stay unclaimed before the operator hears of it; 0 = when it is raised |
 
-On every watcher pass the hub runs the due check — no model is asked — and
-starts **one round** when something is due, no round is in flight, the pipeline
-switch is on and the interval since the last round has passed. Nothing due
+The clock wakes on every watcher pass. When no round is in flight, a
+supervisor is active, the pipeline switch is on and an interval has passed
+since the last round started, it runs the due check — no model is asked, and at
+most once per interval — and starts **one round** if something is due. Nothing due
 means nothing started and nothing written. A round passes the budget gate like
 any start. "Start now" on the supervisor agent runs the same check by hand,
 regardless of the pipeline switch and the interval, and starts a round even
@@ -143,14 +144,14 @@ carries `run` (its full id) and `short_id`.
 
 | Command (`op`) | Body the CLI sends | Answer fields |
 |---|---|---|
-| `cases` | `{op, limit?, due?}` | `round` (true: this round's list as handed out; false: what is due now), `cases[]`, `total`, `considered`, `capped`, `supervision_since`, `text`. Each case: `run`, `short_id`, `title`, `repo`, `agent`, `harness`, `status`, `display_status`, `started_at`, `reason`, `reasons`, `urgency`, `reopen`, `since` (ISO), `for_s`, `why` (a sentence with the ages phrased), and in a round `looked`. `--limit` (default 20, at most 50) applies to `--due` |
+| `cases` | `{op, limit?, due?}` | `round` (true: this round's list as handed out; false: what is due now), `cases[]`, `total`, `considered`, `capped`, `supervision_since`, `text`. Each case: `run`, `short_id`, `title`, `repo`, `agent`, `harness`, `status`, `display_status`, `started_at`, `reason`, `reasons`, `urgency`, `reopen`, `since` (ISO), `for_s`, `why` (a sentence with the ages phrased), and in a round `looked`. `--limit` (default 20, at most 50) applies whenever the answer is what is due now (`--due`, or a supervisor run the clock did not start) |
 | `look` (`bundle`) | `{op, run, tail?, chars?, events?, entries?}` | `look_entry`, `looks_unchanged`, `parked`, `reopened`, `unparked`, `asked`, `state`, `due`, `events`, `git`, `transcript`, `case`, `attach`, `text`, and `message` when the hub reopened, un-parked or parked the case with this look. Here `run` is `{id, short_id}`. Every `look` — `--json` too — is recorded as a `look` entry |
 | `note` | `{op, run, text, again?}` | `entry`, `cut` (the text was over 4000 characters and was shortened), `look_again_at` |
 | `again` | `{op, run, minutes}` | `entry`, `look_again_at` |
 | `close` | `{op, run, reason}` | `entry`, `closed_at`; or `already_closed: true` and nothing written |
 | `nudge` | `{op, run, text}` | `entry`, `into` (`running`, `help` or `followup`), `nudges_since_answer`, `limit`, `message` |
 | `question` | `{op, run, text, choices[]}` | `entry`, `choices`, `announced` (false: the run is muted, the question stands on its page only), `delivered` (a notification channel took it), `message` |
-| `end` | `{op, run, reason}` | `entry`, `outcome` (`aborted`, or `session_closed` for a run that had already finished — its status stays), `followup_abandoned`, `message` |
+| `end` | `{op, run, reason}` | `entry`, `outcome` (`aborted`; or `session_closed` for a run that was `done` or already `aborted`, whose status stays — a `failed` run becomes `aborted`), `followup_abandoned`, `message` |
 | `escalate` | `{op, run, class, summary}` | `escalation` (its id), `class`, `announced`, `delivered`, `message` |
 
 `look` reads, in this order: what the run was asked to do, its state with every
@@ -171,7 +172,8 @@ fenced in `<data>…</data>` with `<`, `>` and `&` escaped. More history:
 | 400 | an unknown `op` (the answer lists the known ones); no run named; an empty text or reason; a nudge, question or summary over its limit (refused, never cut — only a note is shortened, and says `cut`); minutes outside 1–10080; an unknown escalation class (the answer lists the classes) |
 | 404 | no run matches the reference |
 | 409 | the reference matches several runs (`candidates` lists their short ids); the run has no live session or its pane is dead (`nudge`); another nudge into it is being typed; a question about it is still open; an escalation of the same class about it is still open or claimed |
-| 502, 503 | typing into the session failed, or tmux could not say whether the run is alive — nothing was typed |
+| 502 | typing into the session failed partway: nothing was recorded, but part of the message may have reached the session — read the case before trying again |
+| 503 | tmux could not say whether the run is alive; nothing was typed |
 
 ### The route underneath
 
@@ -332,10 +334,12 @@ most once a day).
 - **One supervisor per hub, one round at a time**, at most
   `supervision_cases_per_round` cases per round; more wait for the next round.
 - **A sandboxed supervisor** reaches the hub only through the socket, which
-  serves `fl-report` and `fl-supervise` and nothing else: everything above
+  serves three routes — `fl-report`, `fl-supervise` and the run's own sandbox
+  policy — and no `fl-api`: everything above
   works, but reviving a run, starting a repair run (`POST /api/runs`) and
   reading another run's worktree need an unsandboxed supervisor.
-- **`end` on a finished run only closes its session**; its status stays and
-  unmerged work stays on its branch and in its worktree.
+- **`end` on a `done` or already `aborted` run only closes its session**; its
+  status stays. A `failed` run becomes `aborted`, as with the operator's kill
+  button. Either way unmerged work stays on its branch and in its worktree.
 - **A nudge needs a live session**; a run without one is revived, ended or
   closed — none of which `nudge` does.

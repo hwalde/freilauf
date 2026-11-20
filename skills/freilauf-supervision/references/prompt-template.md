@@ -147,8 +147,8 @@ you:
 - `fl-supervise close <id> "<why nothing is left to do>"` when it is settled —
   it comes back by itself if something about the run changes;
 - `fl-supervise end <id> "<reason>"` when the run is not worth finishing. On a
-  run that has already finished this only closes its session; its work stays on
-  its branch.
+  run that is done this only closes its session and its status stays; either
+  way its work stays on its branch.
 
 Every look is recorded. A case looked at six times without anything about the
 run changing is parked by the hub and announced to the operator once — so when

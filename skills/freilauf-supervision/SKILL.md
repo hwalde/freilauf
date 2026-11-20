@@ -119,8 +119,8 @@ Settings → Supervision (all optional; empty means the default):
 | nudge limit | 3 | — lower it rather; past it the supervisor must ask or escalate |
 | escalation grace | 0 min | an external resolver collects escalations and the operator should hear only of the ones it did not take |
 
-Rounds also need the pipeline switch on (`freilauf pipeline on`) and the agent
-switched on.
+Rounds the clock starts also need the pipeline switch on (`freilauf pipeline
+on`); every round needs the agent switched on.
 
 ### 5. Check it once
 
@@ -157,13 +157,14 @@ switched on.
 ## What the code does not tell you
 
 - **A sandboxed supervisor can look and talk, not repair.** Inside a container
-  it reaches the hub only through the report socket, which serves `fl-report`
-  and `fl-supervise` and nothing else: no `fl-api`, so no reviving, no repair
+  it reaches the hub only through the report socket, which serves `fl-report`,
+  `fl-supervise` and the run's sandbox policy: no `fl-api`, so no reviving, no repair
   runs, no reading another run's worktree. Leave it unsandboxed if it should do
   those.
-- **"End" on a finished run only closes its session.** Its status stays and
-  its unmerged work stays on its branch and in its worktree; the hub tells the
-  operator about unmerged leftovers.
+- **"End" on a done run only closes its session.** Its status stays (a failed
+  run becomes aborted, as with the kill button), and unmerged work stays on its
+  branch and in its worktree either way; the hub tells the operator about
+  unmerged leftovers.
 - **Reviving a run** whose session is gone is the operator's Revive button,
   reachable as `fl-api -X POST /api/runs/<uuid>/resume text="<what to do now>"`
   (`mode=fresh` hands the record to a fresh agent instead of continuing the old

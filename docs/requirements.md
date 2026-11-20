@@ -946,7 +946,7 @@ resolver's routes).
   newest round's stored start so a restart does not reset it, and the due check
   runs at most once per interval per process.
 - A round starts through `startForAgent()` and so passes the budget gate (a
-  deferred round holds the clock); it needs `pipeline_on` and the agent's
+  deferred round holds the clock); a clock-started round needs `pipeline_on` and the agent's
   `active` switch, and counts against its repository's `max_parallel` without
   being gated by it, like the cleanup agent.
 - A round's case list is its `supervision_round` event, written by `startRun()`

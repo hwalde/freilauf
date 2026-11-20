@@ -115,7 +115,7 @@ Its exit codes:
 | `1` | an HTTP error; the body is still printed, and `--status` prints `HTTP <code> <path>` to stderr — the way to tell a `404` from a `409` |
 | `2` | a usage error |
 | `3` | the hub could not be reached — it is down, which is not "nothing to do" |
-| `4` | the request timed out: something accepted the connection and did not answer within `--max-time` (default 30 s). The hub is there but slow, and a POST may or may not have been carried out — read the escalation before repeating it |
+| `4` | the request timed out: no answer arrived within `--max-time` (default 30 s) — the connection or the answer did not come through in time. The hub is most likely there but slow, and a POST may or may not have been carried out — read the escalation before repeating it |
 
 `freilauf logs --no-follow [-n <lines>]` prints the end of the hub's own log
 (default 100 lines) and returns, for a resolver that wants to know why the hub

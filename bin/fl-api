@@ -92,8 +92,8 @@ CURL+=("${QUERY[@]}" "${BODY[@]}" "$BASE$PATH_ARG")
 
 RC=0
 OUT="$("${CURL[@]}" 2>&1)" || RC=$?
-# curl 28 is its timeout: something accepted the connection and did not answer
-# in time. That is not "the hub is down" (3), and a caller that polls has to be
+# curl 28 is its timeout: the connection or the answer did not arrive within
+# --max-time (a hub that refuses the connection is curl 7, below). That is not "the hub is down" (3), and a caller that polls has to be
 # able to tell the two apart.
 if [[ $RC -eq 28 ]]; then
     printf 'fl-api: the hub at %s did not answer within %s s.\n' "$BASE" "$MAX_TIME" >&2

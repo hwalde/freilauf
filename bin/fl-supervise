@@ -36,8 +36,8 @@
 #                                   question per case; the answer makes it due.
 #   fl-supervise end <run> "<reason>"
 #                                   End the run on purpose (like the operator's
-#                                   kill button, recorded as yours). A finished
-#                                   run only loses its session; unmerged work stays.
+#                                   kill button, recorded as yours). A done run
+#                                   only loses its session; unmerged work stays.
 #   fl-supervise escalate <run> <class> "<summary>"
 #                                   Hand a problem to somebody outside the hub.
 #                                   <class>: hub_defect, server_service,
