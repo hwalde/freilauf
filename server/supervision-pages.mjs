@@ -45,7 +45,7 @@ function dataLine(entry) {
     if (d.op === 'unpark') return t(entry.author === 'operator' ? 'case.action_unpark_operator' : 'case.action_unpark_hub')
     return t('case.action_other', { op: String(d.op ?? '?') })
   }
-  if (entry.kind === 'reopened') return t(d.why === 'changed' ? 'case.reopened_changed' : 'case.reopened_news')
+  if (entry.kind === 'reopened') return t(d.why === 'changed' ? 'case.reopened_changed' : d.why === 'operator' ? 'case.reopened_operator' : 'case.reopened_news')
   if (entry.kind === 'message' && ['help', 'followup', 'running'].includes(d.into)) return t(`case.message_into_${d.into}`)
   if (entry.kind === 'question' && Array.isArray(d.choices) && d.choices.length) {
     return t('case.question_choices', { choices: d.choices.join(' · ') })

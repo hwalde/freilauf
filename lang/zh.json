@@ -2080,5 +2080,7 @@
   "case.action_unpark_operator": "已由你取消搁置：将在下一轮到期。",
   "case.action_unpark_hub": "已被中心取消搁置：运行有了变化，或有人回复了。",
   "case.reopened_news": "已被中心重新打开：关闭后收到了答复、回复或结果。",
-  "case.reopened_changed": "已被中心重新打开：关闭后运行的状态发生了变化。"
+  "case.reopened_changed": "已被中心重新打开：关闭后运行的状态发生了变化。",
+  "supervision.round_starting": "正在启动一个监督轮次；同一时间只运行一个。",
+  "case.reopened_operator": "已重新打开：你取消了这个已关闭案件的搁置。"
 }

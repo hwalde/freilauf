@@ -16,7 +16,7 @@
 // Everything an AGENT reads (the round's case block) is an English literal;
 // what the OPERATOR reads goes through t() (refusals of "Start now") or is a
 // notification text like every other `notifyRun()` text.
-import db, { getRepo, getSetting } from './db.mjs'
+import db, { addEvent, getRepo, getSetting } from './db.mjs'
 import { env } from './env.mjs'
 import { t } from './i18n.mjs'
 import { shortId, parseDbUtc, fmtDurationEn } from './util.mjs'
@@ -76,6 +76,15 @@ async function endStuckRound(round, nowMs, intervalMs) {
   const age = fmtDurationEn(Math.max(0, (nowMs - from) / 1000))
   const bound = fmtDurationEn(roundBoundMs(round, intervalMs) / 1000)
   const r = await endRun(round.id, { by: 'hub', reason: 'round_stuck' })
+  // A round that is `done` with a follow-up held in the finish gate
+  // (`followup_open`, no commission clock) keeps holding the clock after
+  // `endRun()`, which only closes its session: the hub gives that follow-up up
+  // too, or every pass would end the same round again and no round would start.
+  const after = db.prepare('SELECT status, followup_open, followup_since FROM runs WHERE id=?').get(round.id)
+  if (after?.status === 'done' && (after.followup_open || after.followup_since)) {
+    db.prepare(`UPDATE runs SET followup_open = 0, followup_since = NULL, finish_state = NULL WHERE id = ?`).run(round.id)
+    addEvent(round.id, 'followup_abandoned', { source: 'hub', reason: 'round_stuck' })
+  }
   await notifyRun(round.id, 'supervision_round_stuck', `${reportHeader(round, 'SUPERVISOR ROUND ENDED')}\n\n`
     + `🟠 The hub ended this supervisor round: it was open for ${age}, longer than its bound of ${bound} `
     + '(twice the supervision interval, or three times its expected duration). Supervision goes on with the next '
@@ -122,6 +131,14 @@ export function roundBlock(items, { total = items.length, nowMs = Date.now(), cf
 
 // ---------------------------------------------------------- starting a round
 
+/**
+ * A round is being started in this process. The round marker is written only
+ * after the awaits inside `startRun()`, so without this latch a "Start now"
+ * and a clock pass (or two clicks) could both find no round in flight and
+ * start two.
+ */
+let starting = false
+
 /** What a round's start records per case, so `fl-supervise cases` can give exactly this list back. */
 function caseRecord({ run, verdict }) {
   return {
@@ -138,10 +155,14 @@ function caseRecord({ run, verdict }) {
  */
 export async function pickCases(due, cfg, nowMs) {
   const take = []
+  take.parked = 0
   for (const c of due) {
     const st = caseState(c.run.id)
-    if ((st?.handouts_unlooked ?? 0) >= PARK_AFTER) {
+    // A parked case that is due again (`verdict.unpark`: news or a change) is
+    // taken; `startRound()` un-parks it, which starts its counts again.
+    if (!st?.parked_at && (st?.handouts_unlooked ?? 0) >= PARK_AFTER) {
       await parkCase(c.run.id, { why: 'handouts', count: st.handouts_unlooked, fp: c.verdict.fp, nowMs })
+      take.parked++
       continue
     }
     take.push(c)
@@ -189,13 +210,17 @@ async function startRound(agent, cases, { total, capped, nowMs, cfg, source }) {
 export async function startSupervisorRound(agent, { nowMs = Date.now(), source = 'operator' } = {}) {
   const active = activeSupervisorAgent()
   if (!active || active.id !== agent?.id) return { ok: false, error: t('supervision.not_active_supervisor', { name: agent?.name ?? '?' }) }
+  if (starting) return { ok: false, runId: null, error: t('supervision.round_starting') }
   const busy = roundsInFlight()
   if (busy.length) return { ok: false, runId: null, error: t('supervision.round_in_flight', { id: shortId(busy[0].id) }), inFlight: busy[0].id }
-  supervisionSince(nowMs, { begin: true })   // the first round marks where supervision began (SPEC 7.9)
-  const cfg = supervisionConfig()
-  const due = dueCases({ nowMs, limit: 50, begin: true })
-  const cases = await pickCases(due.cases, cfg, nowMs)
-  return startRound(agent, cases, { total: due.total, capped: due.capped, nowMs, cfg, source })
+  starting = true
+  try {
+    supervisionSince(nowMs, { begin: true })   // the first round marks where supervision began (SPEC 7.9)
+    const cfg = supervisionConfig()
+    const due = dueCases({ nowMs, limit: 50, begin: true })
+    const cases = await pickCases(due.cases, cfg, nowMs)
+    return await startRound(agent, cases, { total: due.total - cases.parked, capped: due.capped, nowMs, cfg, source })
+  } finally { starting = false }
 }
 
 // ------------------------------------------------------------------- the clock
@@ -250,11 +275,15 @@ export async function supervisionTick(nowMs = Date.now()) {
   if (Number.isFinite(lastCheckMs) && nowMs >= lastCheckMs && nowMs - lastCheckMs < cfg.intervalMs) return { ...out, quiet: 'checked' }
   lastCheckMs = nowMs
 
+  if (starting) return { ...out, quiet: 'starting' }
   const due = dueCases({ nowMs, limit: 50, begin: true })
   out.due = due.total
   if (!due.cases.length) return { ...out, quiet: 'nothing_due' }
-  const cases = await pickCases(due.cases, cfg, nowMs)
-  if (!cases.length) return { ...out, quiet: 'all_parked' }
-  const r = await startRound(agent, cases, { total: due.total, capped: due.capped, nowMs, cfg, source: 'clock' })
-  return { ...out, started: r.runId ?? null, deferred: !!r.deferred, cases: r.cases, error: r.ok ? null : (r.error ?? null) }
+  starting = true
+  try {
+    const cases = await pickCases(due.cases, cfg, nowMs)
+    if (!cases.length) return { ...out, quiet: 'all_parked' }
+    const r = await startRound(agent, cases, { total: due.total - cases.parked, capped: due.capped, nowMs, cfg, source: 'clock' })
+    return { ...out, started: r.runId ?? null, deferred: !!r.deferred, cases: r.cases, error: r.ok ? null : (r.error ?? null) }
+  } finally { starting = false }
 }

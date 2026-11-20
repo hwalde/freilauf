@@ -926,22 +926,28 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   "nothing is due" when the list is empty.
 - "Start now" on a flagged agent runs the due check by hand and is not gated
   by the pipeline, the interval or the fence; it is refused for a flagged agent
-  that is not the active supervisor and while a round holds the clock, so a
-  hub never has two rounds acting at once.
+  that is not the active supervisor, while a round holds the clock, and while
+  another start is in progress (one latch shared with the clock, because the
+  round marker is written only after `startRun()`'s awaits), so a hub never has
+  two rounds acting at once.
 - A caller qualifies by its own `runs.supervisor = 1`: a round keeps working
   after its agent is unflagged until it ends or hits its bound; only the clock
   and "Start now" decide which agent starts rounds.
 - A round open longer than max(2 x interval, 3 x its expected minutes) —
   measured from its open follow-up's commission when there is one, never while
   deferred — is ended through `endRun({by:'hub'})` and announced once as
-  `supervision_round_stuck`; a supervisor round is never a case, so this is
-  the only thing that keeps a hanging round from stopping supervision.
+  `supervision_round_stuck`; a `done` round whose follow-up is held in the
+  finish gate has that follow-up given up too, so an ended round never keeps
+  holding the clock; a supervisor round is never a case, so this is the only
+  thing that keeps a hanging round from stopping supervision.
 - A case is parked (`parkCase()`: `parked_at`, an `action` entry by the hub,
   one `supervision_parked` message) after `PARK_AFTER` (6) looks with the same
-  fingerprint, or when it would be handed out after six rounds that never
-  looked at it; a parked case comes back only on news, on a changed
-  fingerprint with a real condition, or by the operator's un-park button
-  (due at the next round through a look-again time of now).
+  fingerprint at a case (due, or held back only by its interval or look-again
+  time — never a healthy run or a closed case), or when it would be handed out after six
+  rounds that never looked at it; a parked case comes back only on news, on a
+  changed fingerprint with a real condition — whichever way it was parked — or
+  by the operator's un-park button (due at the next round through a look-again
+  time of now, and a closed case is reopened with it).
 - A closed or parked case that is due again is reopened or un-parked for real
   (`applyVerdict()`: a `reopened` entry or an `unpark` action, `closed_at` /
   `parked_at` cleared) before a round takes it or a look is recorded.

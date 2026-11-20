@@ -9519,6 +9519,12 @@ export default {
       isFalse((await supervise(ROUND4, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === P), 'a parked case is not due')
       const page = await (await fetchPath(`/runs/${P}`)).text()
       contains(page, 'id="case-unpark"', 'the run page offers to un-park it')
+      const settings = await (await fetchPath('/settings/supervision')).text()
+      contains(settings, 'id="supervision-active"', 'Settings → Supervision names the supervisor')
+      contains(settings, `/agents/edit?id=${supAgentId}`, 'linking its form')
+      contains(settings, 'id="supervision-parked"', 'and lists the parked cases')
+      contains(settings, `/runs/${P}#run-case`, 'this one among them')
+      contains(settings, 'id="supervision-last-round"', 'and the last round')
       equal((await postForm(`/api/runs/${P}/case/unpark`, { back: `/runs/${P}#run-case` }, { asBrowser: true })).status, 303, 'un-parked')
       equal((await caseOf(P)).state.parked_at, null, 'no longer parked')
       isTrue((await supervise(ROUND4, ['cases', '--due', '--limit', '50'])).json.cases.some(x => x.run === P), 'and due again')
@@ -9528,6 +9534,25 @@ export default {
       ESC = esc.json?.escalation
       equal(esc.json?.announced, false, 'with a grace, an escalation is not announced when it is raised')
       isTrue((await flReport(ROUND4, ['done', 'parked one'])).ok, 'the round ends')
+    })
+
+    await check('Settings → Supervision saves its numbers, empty as the default, and refuses one out of range', async () => {
+      const keys = ['supervision_interval_minutes', 'supervision_cases_per_round', 'supervision_wait_minutes',
+        'supervision_nudge_limit', 'supervision_escalation_grace_minutes']
+      const stored = (k) => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value ?? null
+      const ok = await postForm('/settings/supervision', { supervision_interval_minutes: '', supervision_cases_per_round: '5',
+        supervision_wait_minutes: '45', supervision_nudge_limit: '2', supervision_escalation_grace_minutes: '30' }, { asBrowser: true })
+      equal(ok.status, 303, 'saved')
+      equal(keys.map(stored).join('|'), '|5|45|2|30', 'what was posted, empty kept empty')
+      const html = await (await fetchPath('/settings/supervision')).text()
+      contains(html, 'name="supervision_cases_per_round" type="number" min="1" max="50" step="1" value="5"', 'the page shows the stored value')
+      contains(html, 'Empty: 60. In effect: 60.', 'and what an empty field means')
+      const bad = await postForm('/settings/supervision', { supervision_interval_minutes: '2', supervision_cases_per_round: '7' }, { asBrowser: true })
+      equal(bad.status, 400, 'an interval under five minutes is refused')
+      contains(await bad.text(), 'Nothing was saved', 'saying so')
+      equal(stored('supervision_cases_per_round'), '5', 'and the valid field next to it was not saved either')
+      contains(await (await fetchPath('/settings')).text(), 'href="/settings/supervision"', 'the settings page links it')
+      for (const [k, v] of [['supervision_cases_per_round', ''], ['supervision_wait_minutes', ''], ['supervision_nudge_limit', '']]) sk.setSetting(k, v)
     })
 
     await check('unflagging the agent silences the clock and the platform rules', async () => {
@@ -9578,6 +9603,23 @@ export default {
       equal(evPayloads(B, 'schedule_skipped').length, 3, 'every skipped slot is still recorded')
       equal(db.prepare(`SELECT count(*) c FROM schedule_log WHERE agent_id=? AND outcome='skipped' AND reason='busy'`).get(ag.id).c, 3,
         'and logged')
+      // …and the way production gets there: the scheduler's own tick skips the
+      // slot of an agent due every minute whose run is stuck. The hub's tick may
+      // get there first; either way the slot is skipped and the run announced.
+      const ag2 = db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode, expected_minutes, schedule_kind, schedule, active)
+        VALUES(?, 'e2e-blocked-tick', 'claude', 'p', 'keiner', 45, 'cron', '* * * * *', 1) RETURNING *`).get(repoId)
+      const B2 = await freshRun('stuck for a day, met by the tick')
+      db.prepare('UPDATE runs SET agent_id=? WHERE id=?').run(ag2.id, B2)
+      makeWaiting(B2, 25 * 60)
+      await sched.tick()
+      try {
+        await waitFor(() => typesOf(B2, 'notified').includes('schedule_blocked'), { what: 'schedule_blocked from the tick', timeoutMs: 75_000, taktMs: 1000 })
+        isTrue(evPayloads(B2, 'schedule_skipped').length >= 1, 'the tick skipped the slot')
+        equal(lauf(B2).status, 'running', 'started nothing in its place')
+        equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(ag2.id).c, 1, 'no second run of the agent')
+      } finally {
+        db.prepare('UPDATE agents SET active = 0 WHERE id = ?').run(ag2.id)
+      }
     })
 
     // Back as the earlier groups left it: their agents on, the pipeline off.

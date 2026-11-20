@@ -2080,5 +2080,7 @@
   "case.action_unpark_operator": "Un-parked by you: due in the next round.",
   "case.action_unpark_hub": "Un-parked by the hub: something about the run changed, or somebody answered.",
   "case.reopened_news": "Reopened by the hub: an answer, reply or result came in after the closing.",
-  "case.reopened_changed": "Reopened by the hub: the run's state changed after the closing."
+  "case.reopened_changed": "Reopened by the hub: the run's state changed after the closing.",
+  "supervision.round_starting": "A supervisor round is being started right now; one runs at a time.",
+  "case.reopened_operator": "Reopened: you un-parked the closed case."
 }

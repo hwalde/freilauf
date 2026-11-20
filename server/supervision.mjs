@@ -655,6 +655,9 @@ export function unparkCase(runId, { by = 'operator', why = 'operator', nowMs = D
       look_again_at = CASE WHEN ? THEN ? ELSE look_again_at END WHERE run_id = ?`)
     .run(by === 'operator' ? 1 : 0, toDbUtc(nowMs), runId)
   addCaseEntry(runId, { kind: 'action', author: by === 'operator' ? 'operator' : 'hub', data: { op: 'unpark', why } })
+  // The operator's "look at it in the next round" holds for a closed case too:
+  // a look-again time is not read while the case is closed.
+  if (by === 'operator') reopenCase(runId, { why: 'operator' })
   return true
 }
 
@@ -1024,7 +1027,10 @@ registerSupervisorOp('bundle', {
     const moved = applyVerdict(target.id, bundle.due, nowMs)
     const look = recordLook(target.id, caller.id, bundle.due, nowMs)
     // The loop fence: the sixth look at the same state parks the case.
-    const park = look.looks_unchanged >= PARK_AFTER && !caseState(target.id)?.parked_at
+    // Only a case: one that is due, or due but for its interval or look-again
+    // time. A healthy run or a closed case looked at often is not "going nowhere".
+    const isCase = bundle.due.due || ['looked_recently', 'look_again_pending'].includes(bundle.due.exclusion)
+    const park = isCase && look.looks_unchanged >= PARK_AFTER && !caseState(target.id)?.parked_at
       ? await parkCase(target.id, { why: 'looks', count: look.looks_unchanged, fp: bundle.due.fp, nowMs }) : { parked: false }
     const notes = [
       moved.reopened ? 'The hub reopened this closed case because of what is said under "Why it is due".' : null,

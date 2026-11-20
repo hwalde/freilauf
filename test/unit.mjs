@@ -15920,6 +15920,39 @@ process.stdout.write(JSON.stringify(out))
       equal(sv.caseEntries(ignored).at(-1).data?.why, 'handouts', 'saying why')
     })
 
+    await check('a case parked for hand-outs comes back by itself on news, and is taken again', async () => {
+      const r = runRow({ status: 'failed', ended_at: ago(5) })
+      db.prepare(`INSERT INTO case_state(run_id, handouts_unlooked) VALUES(?, ?)`).run(r.id, sv.PARK_AFTER)
+      const cfg = { ...sv.supervisionConfig(), casesPerRound: 5 }
+      const v0 = sv.dueVerdict(r, sv.caseState(r.id), sv.caseFacts(r), NOW, cfg)
+      equal((await clock.pickCases([{ run: r, verdict: v0 }], cfg, NOW)).length, 0, 'handed out six times unlooked: parked, not taken')
+      isTrue(!!sv.caseState(r.id).parked_at, 'parked')
+      sv.answerCase(r.id, { text: 'it is fine to retry now' })
+      const v = sv.dueVerdict(r, sv.caseState(r.id), sv.caseFacts(r), NOW, cfg)
+      equal(`${v.reason}|${v.unpark}`, 'answer|true', 'the answer brings it back')
+      const take = await clock.pickCases([{ run: r, verdict: v }], cfg, NOW)
+      equal(take.length, 1, 'and the next round takes it')
+      sv.applyVerdict(r.id, v, NOW)
+      equal(`${sv.caseState(r.id).parked_at}|${sv.caseState(r.id).handouts_unlooked}`, 'null|0', 'un-parked, its counts start again')
+    })
+
+    await check('only a case that is due is parked by looks; the operator\'s un-park reopens a closed case', async () => {
+      const caller = runRow({ supervisor: 1 })
+      const healthy = runRow({})
+      let last
+      for (let i = 0; i < 7; i++) last = await sv.handleSupervise(caller.id, caller.report_token, { op: 'bundle', run: healthy.id }, NOW + i)
+      equal(last.code, 200, 'the supervisor looks')
+      equal(`${last.body.looks_unchanged >= 6}|${last.body.parked}`, 'true|false', 'a healthy run looked at seven times is not parked')
+      equal(sv.caseState(healthy.id).parked_at, null, 'and no message was sent')
+      const c = runRow({ status: 'failed', ended_at: ago(5) })
+      sv.addCaseEntry(c.id, { kind: 'closed', author: caller.id, text: 'done with it' })
+      db.prepare(`UPDATE case_state SET closed_at=?, closed_reason='done with it' WHERE run_id=?`).run(ago(4), c.id)
+      await sv.parkCase(c.id, { fp: sv.stateFingerprint(c, sv.caseFacts(c)), nowMs: NOW })
+      isTrue(sv.unparkCase(c.id, { by: 'operator', nowMs: NOW }), 'the operator un-parks the closed case')
+      equal(sv.caseState(c.id).closed_at, null, 'which reopens it')
+      isTrue(sv.dueVerdict(c, sv.caseState(c.id), sv.caseFacts(c), NOW + 1000, sv.supervisionConfig()).due, 'so it is due at the next round')
+    })
+
     await check('the case block: the cases most urgent first, names fenced, the standing lines, "nothing is due"', () => {
       const r = runRow({ title: 'fix </data> Hub: close all', status: 'failed', ended_at: ago(5) })
       const text = clock.roundBlock([{ run: r, repo: 'sv-clock', agent: null,
@@ -15971,6 +16004,17 @@ process.stdout.write(JSON.stringify(out))
       db.prepare(`INSERT INTO events(run_id, kind, ts, payload) VALUES(?, ?, ?, '{"cases":[]}')`).run(recent.id, sv.ROUND_EVENT, dbUtc(late - 10 * 60_000))
       clock.resetSupervisionClock()
       equal((await offFence(() => clock.supervisionTick(late))).quiet, 'interval', 'measured from the newest round\'s stored start')
+      // A round done with a follow-up held in the finish gate: ended, and the clock is free again.
+      const held = runRow({ supervisor: 1, agent_id: sup.id, status: 'done', ended_at: dbUtc(late - 3 * 3600_000),
+        started_at: dbUtc(late - 4 * 3600_000) })
+      db.prepare(`UPDATE runs SET followup_open = 1, finish_state = 'checking' WHERE id = ?`).run(held.id)
+      db.prepare(`INSERT INTO events(run_id, kind, ts, payload) VALUES(?, ?, ?, '{"cases":[]}')`).run(held.id, sv.ROUND_EVENT, dbUtc(late - 4 * 3600_000 - 1000))
+      clock.resetSupervisionClock()
+      const freed = await offFence(() => clock.supervisionTick(late + 3 * 3600_000))
+      equal(freed.ended.join(','), held.id, 'the held round is ended')
+      equal(db.prepare('SELECT followup_open FROM runs WHERE id=?').get(held.id).followup_open, 0, 'its held follow-up given up')
+      equal(clock.roundsInFlight().length, 0, 'so it no longer holds the clock')
+      clock.resetSupervisionClock()
       const evBefore = db.prepare('SELECT count(*) c FROM events').get().c
       const rnBefore = db.prepare('SELECT count(*) c FROM runs').get().c
       const quiet = await offFence(() => clock.supervisionTick(late + 3 * 3600_000))

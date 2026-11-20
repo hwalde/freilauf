@@ -2080,5 +2080,7 @@
   "case.action_unpark_operator": "Von dir entparkt: in der nächsten Runde fällig.",
   "case.action_unpark_hub": "Vom Hub entparkt: Am Lauf hat sich etwas geändert, oder jemand hat geantwortet.",
   "case.reopened_news": "Vom Hub wieder geöffnet: Nach dem Schließen kam eine Antwort, Rückmeldung oder ein Ergebnis.",
-  "case.reopened_changed": "Vom Hub wieder geöffnet: Der Zustand des Laufs hat sich nach dem Schließen geändert."
+  "case.reopened_changed": "Vom Hub wieder geöffnet: Der Zustand des Laufs hat sich nach dem Schließen geändert.",
+  "supervision.round_starting": "Gerade wird eine Supervisor-Runde gestartet; es läuft immer nur eine.",
+  "case.reopened_operator": "Wieder geöffnet: Du hast den geschlossenen Fall entparkt."
 }
