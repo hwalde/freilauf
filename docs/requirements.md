@@ -18,7 +18,7 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 [Notifications: deputy and daily digest](#notifications-deputy-and-daily-digest) ·
 [Attention](#attention) · [Watcher and incidents](#watcher-and-incidents) ·
 [Sessions](#sessions) · [Repos and archive](#repos-and-archive) ·
-[Skills](#skills) · [Tests](#tests)
+[Supervision](#supervision) · [Skills](#skills) · [Tests](#tests)
 
 ## Deploying and restarts
 
@@ -363,7 +363,8 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   re-renders the tbody; `#term` is never part of a fragment;
   `location.reload()` after a kill stays (it closes the WebSocket and its tmux
   client); the sidebar swap waits while `#run-edit` or a panel field has
-  focus; the run multi-select lives in a Set and is re-synced after every swap.
+  focus, and the run-detail swap while `#run-edit` or `#run-case` has focus;
+  the run multi-select lives in a Set and is re-synced after every swap.
 - `vpn-proxy.mjs` is HTTP/2 with `allowHTTP1` for the WebSocket upgrade,
   filters hop-by-hop headers in both directions, turns `:authority` into
   `host` for the allowlist, and destroys the upstream request when the client
@@ -724,8 +725,9 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
   up the rest; archiving closes the session by the `archive_session_*`
   settings on two paths; the watcher, the flows and the incidents keep their
   view of a run whether it is archived or not — only displays that promise
-  rows (the sidebar's overview-linked count, the read API's `archived` filter)
-  and the retention and title-retry passes read `archived_at`.
+  rows (the sidebar's overview-linked count, the read API's `archived` filter),
+  the retention and title-retry passes, and the supervisor's refusal (an
+  archived run is not a case) read `archived_at`.
 - `repos.active=0` removes the repo from every dropdown and starts nothing
   (manual path included) while history stays reachable through an explicit
   `?repo=`.
@@ -735,6 +737,46 @@ Sections: [Deploying and restarts](#deploying-and-restarts) ·
 - The read API is read-only; `?status=` selects by `displayStatus()` and an
   unknown word is a 400 naming the valid ones; every row carries
   `display_status`; `liveness.pane_alive` is tri-state.
+
+## Supervision
+
+- The supervisor flag exists on agents only and is copied to the run
+  (`runs.supervisor`): `runDefFromForm()` sets it only for the agent form,
+  `defFromFlowProps()` and a flow's `start_agent` (`asFlowStart()`) force it
+  off, so no request, favorite, Quick Run, conflict resolver or cleanup agent
+  starts a run that may act on other runs.
+- The scheduler's tick and catch-up never start a flagged agent; "Start now"
+  goes through `startSupervisorRound()`.
+- One supervisor per hub: `activeSupervisorAgent()` is the lowest id among
+  flagged, switched-on agents in active repos, and the agents page names the
+  others when there are several.
+- `runs.supervision_off` is a single-run start option (`runStartFromForm()`),
+  never a definition field; every change writes `supervision_off` or
+  `supervision_on`; the form checkbox and the run-page switch render only while
+  a supervisor agent is active, the route works regardless.
+- `server/supervision.mjs` is the only writer of `case_entries` and
+  `case_state`; `addCaseEntry()` bounds the text, accepts only the listed kinds
+  and authors, and announces the run, because an entry is not an event.
+- Both tables reference `runs(id) ON DELETE CASCADE`, and repository deletion
+  removes their rows explicitly in its transaction.
+- `POST /api/runs/<own id>/supervise` is one route on both listeners, served by
+  `handleSupervise()`, with the bearer required on both and matching the run in
+  the path; a new operation is a `registerSupervisorOp()` entry.
+- `supervisionRefusal()` is the one authorisation check: the caller is a
+  supervisor run that is still working (a finished round's token outlives it),
+  and the target is not the caller, another supervisor run, taken out of
+  supervision, archived or unknown; an ambiguous short id is refused with its
+  candidates.
+- `FL_RUN_TOKEN` reaches an unsandboxed run only when `runs.supervisor = 1`, so
+  every other run's environment stays as it was; `tmux show-environment` shows
+  that token to any local process of the same user.
+- What an agent reads (refusal sentences, answers) is an English literal; what
+  the operator reads goes through `t()`.
+- `GET /api/runs/<id>/case` is read-only and bounded (`limit`, ceiling 200);
+  only the supervisor route may record that a case was looked at.
+- The case section (`#run-case`) is always rendered and hidden when empty, and
+  is part of the run-detail fragment; the operator's answer needs a text or a
+  choice and is accepted with no question open.
 
 ## Skills
 

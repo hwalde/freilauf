@@ -119,6 +119,7 @@ only `PASS` ends the task.
 | The hub's own LLM calls, titles, alerts | `server/llm/`, `server/title.mjs` | LLM layer |
 | Usage, balances, OpenRouter routing | `server/usage.mjs`, `server/claude-usage.mjs`, `server/balances.mjs`, `server/providers/openrouter-routing.mjs` | Quota and gates |
 | Repos, archive, panels, read API | `server/web.mjs`, `server/panels.mjs`, `server/read-api.mjs`, `bin/fl-api` | Repos and archive; Panels |
+| Supervision: the flag, case files, the supervisor route | `server/supervision.mjs`, `server/supervision-pages.mjs`, `bin/fl-supervise` | Supervision |
 | Shipped agent skills | `skills/`, `server/skills.mjs` | Skills |
 | Sandbox | `server/sandbox/`, `sandbox/` | `SANDBOX.md` |
 | No-code flows | `server/flows/` | `server/flows/AGENTS.md` |

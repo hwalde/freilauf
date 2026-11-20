@@ -11,7 +11,7 @@ import { providerBalances } from './balances.mjs'
 import { enabledCodingAgents, saveCodingAgent, deleteCodingAgent } from './coding-agents.mjs'
 import {
   runDefFields, runDefFromForm, saveAgent, lastRunChoice, rememberRunChoice,
-  runTitleField, runStartTimeFields, runStartFromForm,
+  runTitleField, runStartTimeFields, runStartFromForm, supervisorField, runSupervisionField,
   runSetupFields, runSetupFromForm, branchFields, branchContext, notifyResultField,
   sandboxRunFields,
   agentNameTaken, moveAgent, deleteAgent, EMPTY_SCHEDULE,
@@ -28,6 +28,8 @@ import { readLogTail } from './run-log.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
   settledAnomalies, archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
+import { activeSupervisorAgent, startSupervisorRound } from './supervision.mjs'
+import { caseSection, supervisionSwitch, supervisorNotice } from './supervision-pages.mjs'
 import { getProvider, providerLabel } from './providers/index.mjs'
 // What a coding agent holds in its OWN credential store — asked of the plugin,
 // cached there, `null` when it cannot be established. See providerChoiceBlock().
@@ -1549,6 +1551,7 @@ export async function pageAgents(req, res, url) {
   <p><a class="btn" href="/agents/edit?repo=${sel.id}">${e(t('agents.create'))}</a>
      <a class="btn" href="/flows">${e(t('nav.flows'))}</a>
      <span class="dim">${e(t('agents.flows_hint'))}</span></p>
+  ${supervisorNotice()}
   ${agentsTable(agents, { repoId: sel.id })}`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(await layout(req, t('nav.agents'), '/agents', body, sel.id))
 }
@@ -1562,7 +1565,7 @@ export function agentRow(a, ctx) {
   return `
   <tr id="agent-${a.id}">
     <td><form method="post" action="/agents/toggle" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(a.active ? t('agents.on') : t('agents.off'))}</button></form></td>
-    <td>${e(a.name)}</td><td>${e(harnessLabel(a.harness))}</td><td>${e(a.model || '–')}</td>
+    <td>${e(a.name)}${a.supervisor === 1 ? ` <span class="dim">· ${e(t('supervisor.badge'))}</span>` : ''}</td><td>${e(harnessLabel(a.harness))}</td><td>${e(a.model || '–')}</td>
     <td>${e(scheduleText(a))}</td><td>${e(t('unit.minutes', { n: a.expected_minutes }))}</td>
     <td class="dim">${e(attachmentSummary(a.flows)) || '–'}</td>
     <td><form method="post" action="/agents/start" class="inline"><input type="hidden" name="id" value="${a.id}"><input type="hidden" name="repo" value="${repoId}"><button>${e(t('agents.start_now'))}</button></form>
@@ -1598,6 +1601,7 @@ export async function pageRunForm(req, res, url) {
   ${runTitleField({})}
   ${runDefFields(template, branchContext(sel.id))}
   ${runStartTimeFields({})}
+  ${activeSupervisorAgent() ? runSupervisionField({}) : ''}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="${e(t('runform.agent_name_ph'))}">)</label>`
   const body = `
@@ -1757,6 +1761,7 @@ export async function pageRun(req, res, url, id) {
   ${run.report_detail_md ? `<h3>${e(t('run.detail_report'))}</h3><pre>${e(run.report_detail_md)}</pre>` : ''}
   ${flowSection(run)}
   ${incidentSection(id, run)}
+  ${caseSection(run)}
   <h3>${e(t('run.metrics'))}</h3>
   ${runMetrics(run)}
   <h3>${e(t('run.events'))}</h3>${runEvents(id)}
@@ -1922,7 +1927,8 @@ export function runDetailHead(run, ctx) {
          <button>${e(t(run.archived_at ? 'run.restore' : 'run.archive'))}</button></form>
        ${run.archived_at ? `<span class="dim">${e(t('run.archived_since', { ts: run.archived_at }))}</span>`
          : `<span class="dim">${e(t('run.archive_hint'))}</span>`}</div>`
-    : ''}`
+    : ''}
+  ${supervisionSwitch(run)}`
 }
 
 /** A finish_state / merge_status as a word, falling back to the raw value. */
@@ -2405,6 +2411,10 @@ export async function repoDelete(req, res, url, formBody) {
   try {
     db.prepare('DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
     db.prepare('DELETE FROM incidents WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    // The case files (server/supervision.mjs). They cascade with the run too,
+    // but this transaction says every child it removes rather than relying on it.
+    db.prepare('DELETE FROM case_entries WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
+    db.prepare('DELETE FROM case_state WHERE run_id IN (SELECT id FROM runs WHERE repo_id=?)').run(repo.id)
     db.prepare('DELETE FROM runs WHERE repo_id=?').run(repo.id)
     db.prepare('DELETE FROM agents WHERE repo_id=?').run(repo.id)
     db.prepare('DELETE FROM repos WHERE id=?').run(repo.id)
@@ -3649,7 +3659,9 @@ function agentFields(a = {}, repoId) {
   ${runDefFields(a, branchContext(repoId))}
   <input type="hidden" name="repo_id" value="${repoId}">
   ${scheduleFields(a)}
-  <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>`
+  <label class="chk"><input type="checkbox" name="active" value="1" ${a.active ?? 1 ? 'checked' : ''}> ${e(t('agents.active'))}</label>
+  ${supervisorField(a)}
+  ${supervisorNotice()}`
 }
 
 export async function agentEdit(req, res, url) {
@@ -3695,7 +3707,7 @@ export async function agentSave(req, res, url, formBody) {
   // SQLite constraint that surfaces as a 500. The other repo is free to carry
   // the same name, which is what the move feature relies on.
   else if (agentNameTaken(+b.repo_id, name, id ? +id : null)) problems.push(t('agents.name_taken', { name }))
-  const def = await runDefFromForm(b, problems)
+  const def = await runDefFromForm(b, problems, { agentForm: true })
   const zp = scheduleFromForm(b, problems)
   if (problems.length) return problemPage(req, res, t('agentform.title_edit'), problems, back)
 
@@ -3851,7 +3863,9 @@ export async function agentStart(req, res, url, formBody) {
   // A manual start is allowed even with the pipeline switched off (planning
   // 4.8) — the switch only gates the SCHEDULED starts. Both branches used to
   // stand here, doing exactly the same thing.
-  const r = await startForAgent(agent)
+  // A supervisor agent goes through its own seam: the hub decides what its
+  // round looks at (server/supervision.mjs, startSupervisorRound).
+  const r = agent.supervisor === 1 ? await startSupervisorRound(agent) : await startForAgent(agent)
   redirect(res, r.runId ? `/runs/${r.runId}` : '/agents')
 }
 

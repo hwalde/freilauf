@@ -64,6 +64,9 @@ import { t } from './i18n.mjs'
 import { flowRoute, flowApi } from './flows/web.mjs'
 import { flowsTick } from './flows/triggers.mjs'
 import * as reportPages from './report-pages.mjs'
+import { handleSupervise, setSupervisionOff, answerCase } from './supervision.mjs'
+import { caseSection } from './supervision-pages.mjs'
+import { bearerToken } from './hub-socket.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -499,6 +502,39 @@ async function api(req, res, url) {
     try { b = JSON.parse(await readBody(req) || '{}') } catch {}
     const r = await handleReport(m[1], b, 'http')
     return json(res, r.ok ? 200 : 400, r)
+  }
+  // The supervisor's one channel (server/supervision.mjs). The SAME handler the
+  // unix socket calls; the bearer is required here too — this listener carries
+  // the hub's whole API, and the token is what says the caller is the run in
+  // the path. Not a report kind: a report is refused from a finished run and
+  // its follow-up path rejects unknown kinds.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/supervise$/))) {
+    let b = {}
+    try { b = JSON.parse(await readBody(req) || '{}') } catch { /* an unreadable body is an empty one */ }
+    const r = handleSupervise(m[1], bearerToken(req), b)
+    return json(res, r.code, r.body)
+  }
+  // Take a run out of supervision, or put it back (SPEC 4.1a). Works whether or
+  // not a supervisor is active — the decision is about the run. Each change is
+  // an event; the same value twice changes nothing.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/supervision$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const v = String(b.off ?? '').trim()
+    if (!['1', '0'].includes(v)) return answer(req, res, 400, { ok: false, error: t('supervision.err_off') }, `/runs/${run.id}`)
+    const changed = setSupervisionOff(run.id, v === '1', 'operator')
+    return answer(req, res, 200, { ok: true, supervision_off: v === '1' ? 1 : 0, changed }, b.back || `/runs/${run.id}`)
+  }
+  // The operator's answer in a run's case file: the form on the run page and
+  // this API alike. An `answer` entry by `operator`; it needs a text or a choice.
+  if (req.method === 'POST' && (m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/case\/answer$/))) {
+    const run = getRun(m[1])
+    if (!run) return answer(req, res, 404, { ok: false, error: t('api.unknown_run') }, `/runs/${m[1]}`)
+    const b = await form(req)
+    const r = answerCase(run.id, { text: b.text, choice: b.choice })
+    if (!r.ok) return answer(req, res, 400, { ok: false, error: t(r.error) }, `/runs/${run.id}#run-case`)
+    return answer(req, res, 200, { ok: true, entry: r.id }, b.back || `/runs/${run.id}#run-case`)
   }
   // Same definition, same validation and same start path as the run form
   // (pages.mjs) — this endpoint used to be its own third copy and saved an
@@ -1284,7 +1320,7 @@ async function fragmentApi(req, res, url) {
     const repo = getRepo(run.repo_id)
     return fragment(res, runDetailHead(run, { title })
       + runEditCard(run) + await sandboxCard(run, repo) + integrationSection(run, repo)
-      + runMetrics(run) + runEvents(run.id))
+      + caseSection(run) + runMetrics(run) + runEvents(run.id))
   }
 
   // There is deliberately no per-session fragment. The sessions page ends a

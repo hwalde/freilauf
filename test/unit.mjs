@@ -15004,6 +15004,158 @@ process.stdout.write(JSON.stringify(out))
     })
   }
 
+  group('Supervision: the flag, the case file and who may write it')
+  {
+    const rd = await import('../server/run-def.mjs')
+    const sv = await import('../server/supervision.mjs')
+    const { default: db } = await import('../server/db.mjs')
+    const repoId = db.prepare(`INSERT INTO repos(name, path) VALUES('sv-repo', '/tmp/sv-repo') RETURNING id`).get().id
+    const runRow = (id, extra = {}) => {
+      const r = { status: 'running', supervisor: 0, supervision_off: 0, archived_at: null, ...extra }
+      db.prepare(`INSERT INTO runs(id, repo_id, status, harness, prompt, branch_mode, expected_minutes, supervisor, supervision_off, archived_at)
+        VALUES(?, ?, ?, 'claude', 'p', 'keiner', 45, ?, ?, ?)`).run(id, repoId, r.status, r.supervisor, r.supervision_off, r.archived_at)
+      return db.prepare('SELECT * FROM runs WHERE id=?').get(id)
+    }
+
+    await check('the supervisor flag goes the whole way an agent field goes, and nowhere else', async () => {
+      const body = { harness: 'claude', prompt: 'p', branch_mode: 'keiner', supervisor: '1' }
+      equal((await rd.runDefFromForm(body, [], { agentForm: true })).supervisor, 1, 'the agent form sets it')
+      equal((await rd.runDefFromForm({ ...body, supervisor: '0' }, [], { agentForm: true })).supervisor, 0,
+        "'0' is off — compared, never coerced")
+      equal((await rd.runDefFromForm({ ...body, supervisor: undefined }, [], { agentForm: true })).supervisor, 0, 'absent is off')
+      equal((await rd.runDefFromForm(body, [])).supervisor, 0, 'any other caller of the form parser gets 0 whatever the body says')
+      const id = rd.saveAgent({ repoId, name: `sv-${Date.now()}`, def: await rd.runDefFromForm(body, [], { agentForm: true }) })
+      const row = db.prepare('SELECT * FROM agents WHERE id=?').get(id)
+      equal(row.supervisor, 1, 'saveAgent INSERT stores it')
+      equal(rd.defFromAgent(row).supervisor, 1, 'agent row → definition')
+      rd.saveAgent({ id, repoId, name: row.name, def: { ...rd.defFromAgent(row), supervisor: 0 } })
+      equal(db.prepare('SELECT supervisor FROM agents WHERE id=?').get(id).supervisor, 0, 'saveAgent UPDATE switches it off')
+      // The shared setup half (favorites, the conflict resolver, the cleanup
+      // agent) and the flow step never carry it.
+      isFalse('supervisor' in rd.setupToFormBody({ harness: 'claude', supervisor: 1 }), 'not in the setup half')
+      equal((await rd.runDefFromForm({ ...rd.setupToFormBody({ harness: 'claude' }), prompt: 'p', branch_mode: 'keiner', supervisor: '1' }, [])).supervisor, 0,
+        'a favorite / Quick Run body cannot smuggle it in')
+      isFalse(rd.RUN_DEF_FLOW_FIELDS.some(f => f.key === 'supervisor'), 'the flow designer has no such field')
+      equal(rd.defFromFlowProps({ harness: 'claude', prompt: 'p', supervisor: true }).supervisor, 0, 'a flow-started single run is never one')
+      const { asFlowStart } = await import('../server/flows/actions.mjs')
+      equal(asFlowStart({ id: 1, supervisor: 1 }).supervisor, 0, "a flow's start_agent starts a flagged agent without the flag")
+      equal(rd.defFromAgent(asFlowStart({ supervisor: 1, harness: 'claude', prompt: 'p' })).supervisor, 0, 'all the way to the definition')
+      contains(rd.supervisorField({ supervisor: 1 }), 'checked', 'the form field shows the stored value')
+    })
+
+    await check('taking a run out of supervision is a single-run start option, never a definition field', () => {
+      equal(rd.runStartFromForm({ supervision_off: '1' }, []).supervisionOff, 1, 'ticked')
+      equal(rd.runStartFromForm({ supervision_off: '0' }, []).supervisionOff, 0, "'0' is not ticked")
+      equal(rd.runStartFromForm({}, []).supervisionOff, 0, 'absent means supervised')
+      contains(rd.runSupervisionField({}), 'name="supervision_off"', 'the checkbox')
+    })
+
+    await check('the authorisation function, over a table of callers and targets', () => {
+      const sup = { id: 's', status: 'running', supervisor: 1 }
+      const op = { target: true }
+      const run = (x = {}) => ({ id: 't', status: 'failed', supervisor: 0, supervision_off: 0, archived_at: null, ...x })
+      const cases = [
+        ['no caller', null, run(), 404, 'does not know'],
+        ['not a supervisor', { ...sup, supervisor: 0 }, run(), 403, 'not a supervisor run'],
+        ['a finished round', { ...sup, status: 'done' }, run(), 403, 'round has ended'],
+        ['a finished round with an open follow-up', { ...sup, status: 'done', followup_since: '2026-01-01 00:00:00', followup_open: 1 }, run(), null, null],
+        ['waiting for help still acts', { ...sup, status: 'waiting_help' }, run(), null, null],
+        ['no run named', sup, undefined, 400, 'name the run'],
+        ['an unknown run', sup, null, 404, 'no run matches'],
+        ['itself', sup, run({ id: 's' }), 403, 'your own run'],
+        ['another supervisor', sup, run({ supervisor: 1 }), 403, 'supervisor run itself'],
+        ['taken out', sup, run({ supervision_off: 1 }), 403, 'took run'],
+        ['archived', sup, run({ archived_at: '2026-01-01 00:00:00' }), 403, 'archived'],
+        ['an ordinary target', sup, run(), null, null],
+      ]
+      for (const [what, caller, target, code, words] of cases) {
+        const r = sv.supervisionRefusal(caller, op, target, 'abcd')
+        if (code === null) { equal(r, null, `${what}: allowed`); continue }
+        equal(r?.code, code, `${what}: ${code}`)
+        contains(r?.error ?? '', words, `${what}: says so`)
+      }
+      equal(sv.supervisionRefusal(sup, { target: false }), null, 'an op without a target only judges the caller')
+      equal(sv.supervisionRefusal(sup, null), null, 'nor does the caller check alone')
+      equal(sv.supervisionRefusal({ ...sup, supervisor: '1' }, op, run())?.code, 403, "a '1' string is not the flag")
+    })
+
+    await check('ops are registered in a table, not an if-chain', () => {
+      equal(sv.supervisorOps().join(','), 'note,again,close', 'the ops of this stage')
+      sv.registerSupervisorOp('unit_probe', { target: false, handler: () => ({ probe: true }) })
+      isTrue(sv.supervisorOps().includes('unit_probe'), 'a registered op is known')
+      const caller = runRow('5e000000-0000-4000-8000-0000000000a1', { supervisor: 1 })
+      const r = sv.handleSupervise(caller.id, caller.report_token, { op: 'unit_probe' })
+      equal(r.code, 200, 'and served through the one handler')
+      equal(r.body.probe, true, 'with its own answer')
+      equal(sv.handleSupervise(caller.id, 'nope', { op: 'unit_probe' }).code, 401, 'behind the token')
+    })
+
+    await check('entries are bounded, typed and attributed', () => {
+      const long = sv.boundCaseText('x'.repeat(sv.CASE_TEXT_MAX + 50))
+      equal(long.text.length, sv.CASE_TEXT_MAX, 'cut at the bound')
+      isTrue(long.cut && long.text.endsWith('…'), 'and says so')
+      equal(sv.boundCaseText('  a\u001b[1mb\r\nc\u0007 ').text, 'a[1mb\nc', 'control characters and CR go, newlines stay')
+      for (const a of ['operator', 'run', 'hub', 'resolver:ops-box', '5e000000-0000-4000-8000-0000000000a1']) isTrue(sv.caseAuthorValid(a), `author ${a}`)
+      for (const a of ['', 'human', 'resolver:', 'resolver:a b', '5e000000']) isFalse(sv.caseAuthorValid(a), `not an author: '${a}'`)
+      equal(sv.lookAgainMinutes('30'), 30, 'minutes as a string')
+      for (const bad of ['', '0', '-5', '1.5', 'soon', String(sv.LOOK_AGAIN_MAX_MINUTES + 1), null]) equal(sv.lookAgainMinutes(bad), null, `refused: ${bad}`)
+      const t = runRow('5e000000-0000-4000-8000-0000000000b1')
+      const e = sv.addCaseEntry(t.id, { kind: 'note', author: 'hub', text: 'y'.repeat(sv.CASE_TEXT_MAX + 1), data: { a: 1 } })
+      isTrue(e.cut, 'the writer reports the cut')
+      const back = sv.caseEntries(t.id)
+      equal(back.length, 1, 'stored')
+      equal(back[0].text.length, sv.CASE_TEXT_MAX, 'bounded in the table')
+      equal(back[0].data.a, 1, 'data round-trips as JSON')
+      isTrue(!!sv.caseState(t.id), 'the first entry opens the case state')
+      let threw = 0
+      try { sv.addCaseEntry(t.id, { kind: 'gossip', author: 'hub' }) } catch { threw++ }
+      try { sv.addCaseEntry(t.id, { kind: 'note', author: 'somebody' }) } catch { threw++ }
+      equal(threw, 2, 'an unknown kind or author is refused')
+      for (let i = 0; i < 5; i++) sv.addCaseEntry(t.id, { kind: 'note', author: 'hub', text: `n${i}` })
+      equal(sv.caseEntries(t.id, { limit: 2 }).map(x => x.text).join(','), 'n3,n4', 'the newest n, oldest first')
+      equal(sv.caseEntries(t.id, { limit: 10_000 }).length, 6, 'a huge limit is held to the ceiling, not an error')
+      equal(sv.answerCase(t.id, { text: '  ' }).ok, false, 'an empty answer is refused')
+      equal(sv.answerCase(t.id, { choice: 'yes' }).ok, true, 'a choice alone is an answer')
+    })
+
+    await check('a short id resolves, an ambiguous one names its candidates', () => {
+      runRow('5e0fab01-0000-4000-8000-000000000001')
+      runRow('5e0fab02-0000-4000-8000-000000000002')
+      equal(sv.resolveRunRef('5e0fab01').run?.id, '5e0fab01-0000-4000-8000-000000000001', 'unique prefix')
+      equal(sv.resolveRunRef('5e0fab').ambiguous?.sort().join(','), '5e0fab01,5e0fab02', 'two candidates')
+      equal(sv.resolveRunRef('5e0').run, null, 'under four characters names nothing')
+      equal(sv.resolveRunRef('').run, undefined, 'no reference at all')
+      equal(sv.resolveRunRef(" 5E0FAB01;").run?.id, '5e0fab01-0000-4000-8000-000000000001', 'case and stray characters do not matter')
+    })
+
+    await check('taking a run out writes only on a change, with an event each time', () => {
+      const r = runRow('5e000000-0000-4000-8000-0000000000c1')
+      isTrue(sv.setSupervisionOff(r.id, true), 'off')
+      isFalse(sv.setSupervisionOff(r.id, true), 'off again changes nothing')
+      isTrue(sv.setSupervisionOff(r.id, false), 'on')
+      equal(db.prepare('SELECT kind FROM events WHERE run_id=? ORDER BY id').all(r.id).map(x => x.kind).join(','),
+        'supervision_off,supervision_on', 'one event per change')
+    })
+
+    await check('one supervisor per hub: the lowest id of the active, flagged agents', async () => {
+      const ins = (name, active, sup) => db.prepare(`INSERT INTO agents(repo_id, name, harness, prompt, branch_mode, active, supervisor)
+        VALUES(?, ?, 'claude', 'p', 'keiner', ?, ?) RETURNING id`).get(repoId, name, active, sup).id
+      db.prepare('UPDATE agents SET supervisor=0').run()
+      equal(sv.activeSupervisorAgent(), null, 'none flagged, none active')
+      ins('sv-off', 0, 1)
+      equal(sv.activeSupervisorAgent(), null, 'a switched-off one does not count')
+      const first = ins('sv-first', 1, 1)
+      ins('sv-second', 1, 1)
+      equal(sv.activeSupervisorAgent()?.id, first, 'the lowest id wins')
+      const { supervisorNotice } = await import('../server/supervision-pages.mjs')
+      const notice = supervisorNotice()
+      contains(notice, 'sv-first', 'the notice names the one in use')
+      contains(notice, 'sv-second', 'and the one that is not')
+      db.prepare('UPDATE agents SET supervisor=0').run()
+      equal(supervisorNotice(), '', 'no notice with one or none')
+    })
+  }
+
 } finally {
   rmSync(sandbox, { recursive: true, force: true })
 }

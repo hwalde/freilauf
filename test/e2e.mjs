@@ -3385,6 +3385,13 @@ try {
       branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'einmalig', run_at: gestern, active: '1',
     }, { asBrowser: true })
     equal(b.status, 303, 'agent B created')
+    // C: a supervisor agent with a schedule that fires every minute — the tick
+    // must never start it (SPEC 7.2; the hub starts it when cases are due).
+    const c = await postForm('/agents/edit', {
+      repo_id: repoId, name: 'e2e-supervisor-cron', harness: 'claude', prompt: 'E2E-Supervisor',
+      branch_mode: 'keiner', expected_minutes: '45', schedule_kind: 'cron', schedule: '* * * * *', active: '1', supervisor: '1',
+    }, { asBrowser: true })
+    equal(c.status, 303, 'agent C created')
     equal((await (await postForm('/api/settings/pipeline', { value: '1' })).json()).ok, true, 'pipeline on')
   })
   await check('one-off date fires exactly once and switches itself to manual', async () => {
@@ -3402,6 +3409,13 @@ try {
     await waitFor(() => ereignisse(belegt.id).includes('schedule_skipped'),
       { what: 'schedule_skipped', timeoutMs: 75_000, taktMs: 1000 })
     equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idA).c, 1, 'only one run')
+  })
+  await check('a supervisor agent is never started by its schedule', async () => {
+    // The skip above proves a tick has passed since the three agents were saved.
+    const idC = agent('e2e-supervisor-cron').id
+    equal(db.prepare('SELECT count(*) c FROM runs WHERE agent_id=?').get(idC).c, 0, 'no run of the flagged agent')
+    // Switched off again, so later groups do not see an active supervisor.
+    db.prepare('UPDATE agents SET active=0 WHERE id=?').run(idC)
   })
   await check('pipeline can be switched off again', async () => {
     equal((await (await postForm('/api/settings/pipeline', { value: '0' })).json()).ok, true, 'ok')
@@ -7893,6 +7907,9 @@ export default {
     db.prepare(`UPDATE runs SET agent_id=? WHERE id='e2e-del-run'`).run(agentId)
     db.prepare(`INSERT INTO events(run_id,kind) VALUES('e2e-del-run','started')`).run()
     db.prepare(`INSERT INTO incidents(run_id,typ,quelle) VALUES('e2e-del-run','rate_limit','log')`).run()
+    // A case file too (server/supervision.mjs): its two tables are children of the run.
+    db.prepare(`INSERT INTO case_entries(run_id,kind,author,text) VALUES('e2e-del-run','note','hub','x')`).run()
+    db.prepare(`INSERT INTO case_state(run_id) VALUES('e2e-del-run')`).run()
 
     // The dialog states the facts, and they are the real counts.
     const seite = await (await fetchPath('/repos')).text()
@@ -7906,6 +7923,8 @@ export default {
     equal(db.prepare(`SELECT count(*) c FROM runs WHERE id='e2e-del-run'`).get().c, 0, 'its runs')
     equal(db.prepare(`SELECT count(*) c FROM events WHERE run_id='e2e-del-run'`).get().c, 0, 'their events')
     equal(db.prepare(`SELECT count(*) c FROM incidents WHERE run_id='e2e-del-run'`).get().c, 0, 'and their incidents')
+    equal(db.prepare(`SELECT count(*) c FROM case_entries WHERE run_id='e2e-del-run'`).get().c, 0, 'their case entries')
+    equal(db.prepare(`SELECT count(*) c FROM case_state WHERE run_id='e2e-del-run'`).get().c, 0, 'and their case state')
     // The one thing it must never do.
     isTrue(existsSync(join(REPO, '.git')), 'the git checkout is untouched')
   })
@@ -8469,7 +8488,7 @@ export default {
   group('The report socket')
   {
     // The narrow channel of SANDBOX.md: a second listener carrying
-    // exactly two routes and a per-run bearer, so an agent can report without
+    // an allowlist of routes and a per-run bearer, so an agent can report without
     // being handed the whole API on 127.0.0.1 — and so a container, which cannot
     // reach the host's loopback at all, has a way home.
     //
@@ -8545,7 +8564,7 @@ export default {
       equal(lauf(fremd).branch_reported, null, 'nowhere')
     })
 
-    await check('the socket carries nothing but its two routes', async () => {
+    await check('the socket carries nothing but its allowlisted routes', async () => {
       const id = await laufFuerSocket('socket route allowlist')
       const token = lauf(id).report_token
       // Every one of these is a real route of the hub on 127.0.0.1, and none of
@@ -8631,6 +8650,255 @@ export default {
       // one pass and the report is a real event on the run.
       await watcherTick()
       isTrue(ereignisse(id).includes('progress'), 'the watcher collected it')
+    })
+  }
+
+  // ------------------------------------------------------------------
+  group('Supervision: the flag, the case file and the supervisor channel')
+  {
+    // Runs on the hub the report-socket group started, so the socket is in the
+    // sandbox and both listeners can be asked. Every write a supervisor makes goes
+    // through bin/fl-supervise of THIS checkout, the way an agent would call it.
+    const SOCK = join(SB, 'hub.sock')
+    const FL_SUPERVISE = join(PROJECT, 'bin', 'fl-supervise')
+    const shortIdOf = (id) => id.split('-')[0]
+    const http_ = await import('node:http')
+    const viaSocket = (pfad, { token = null, body: koerper = {} } = {}) =>
+      new Promise((resolve, reject) => {
+        const kopf = { 'content-type': 'application/json' }
+        if (token) kopf.authorization = `Bearer ${token}`
+        const req = http_.request({ socketPath: SOCK, path: pfad, method: 'POST', headers: kopf }, (res) => {
+          let d = ''
+          res.setEncoding('utf8')
+          res.on('data', (c) => { d += c })
+          res.on('end', () => { let j = null; try { j = JSON.parse(d) } catch {} resolve({ status: res.statusCode, json: j }) })
+        })
+        req.on('error', reject)
+        req.write(JSON.stringify(koerper))
+        req.end()
+      })
+    const viaLoopback = async (pfad, { token = null, body: koerper = {} } = {}) => {
+      const r = await fetchPath(pfad, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(koerper),
+      })
+      let j = null
+      try { j = await r.json() } catch {}
+      return { status: r.status, json: j }
+    }
+    /** fl-supervise as the run `asRun` would call it; `channel` 'http' or 'socket'. */
+    const supervise = (asRun, args, { channel = 'http', token } = {}) => new Promise((resolve) => {
+      const umgebung = { ...process.env, FL_RUN_ID: asRun, HOME: SB }
+      delete umgebung.FL_HUB_URL; delete umgebung.CC_HUB_URL; delete umgebung.FL_HUB_SOCKET; delete umgebung.FL_RUN_TOKEN
+      const tok = token === undefined ? lauf(asRun)?.report_token : token
+      if (tok) umgebung.FL_RUN_TOKEN = tok
+      if (channel === 'socket') { umgebung.FL_HUB_SOCKET = SOCK; umgebung.FL_HUB_URL = 'http://127.0.0.1:1' } else umgebung.FL_HUB_URL = BASE
+      execFile(FL_SUPERVISE, args, { env: umgebung, encoding: 'utf8', timeout: 30_000 }, (err, stdout, stderr) => {
+        let json = null
+        try { json = JSON.parse(stdout) } catch {}
+        resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr), json })
+      })
+    })
+    /** The variables a run's tmux session carries, as a { name: value } map. */
+    const sessionEnv = async (runId) => {
+      const s = await sessionMerken(runId)
+      const r = await sh('tmux', ['show-environment', '-t', `=${s}`])
+      const out = {}
+      for (const line of r.stdout.split('\n')) {
+        const eq = line.indexOf('=')
+        if (eq > 0 && !line.startsWith('-')) out[line.slice(0, eq)] = line.slice(eq + 1)
+      }
+      return out
+    }
+    const caseOf = async (runId, q = '') => (await fetchPath(`/api/runs/${runId}/case${q}`)).json()
+    const evPayloads = (runId, kind) => db.prepare('SELECT payload FROM events WHERE run_id=? AND kind=? ORDER BY id')
+      .all(runId, kind).map(r => JSON.parse(r.payload ?? 'null'))
+
+    let SUP = null      // the supervisor agent's run
+    let PLAIN = null    // an ordinary run, the case under supervision
+    let supAgentId = null
+
+    await check('an agent marked as supervisor starts a supervisor run, and only that run gets a token', async () => {
+      const r = await postForm('/agents/edit', {
+        repo_id: String(repoId), name: 'e2e-supervisor', harness: 'claude', prompt: 'look after the runs',
+        branch_mode: 'keiner', expected_minutes: '20', schedule_kind: 'manuell', active: '1', supervisor: '1',
+      }, { asBrowser: true })
+      equal(r.status, 303, 'saved')
+      const a = agent('e2e-supervisor')
+      supAgentId = a.id
+      equal(a.supervisor, 1, 'the flag is stored on the agent')
+      const form = await (await fetchPath(`/agents/edit?id=${a.id}&repo=${repoId}`)).text()
+      isTrue(/name="supervisor" value="1" checked/.test(form), 'and the form shows it ticked')
+      contains(form, 'The hub starts it by itself', 'with the sentence that says who starts it')
+      const start = await postForm('/agents/start', { id: String(a.id), repo: String(repoId) }, { asBrowser: true })
+      equal(start.status, 303, '"start now" goes through')
+      SUP = db.prepare('SELECT id FROM runs WHERE agent_id=? ORDER BY started_at DESC LIMIT 1').get(a.id).id
+      equal(lauf(SUP).supervisor, 1, 'the run carries the flag')
+      const env_ = await sessionEnv(SUP)
+      equal(env_.FL_RUN_TOKEN, lauf(SUP).report_token, 'the unsandboxed supervisor run has its bearer in the session')
+
+      PLAIN = (await laufStarten({ repo_id: repoId, prompt: 'an ordinary run under supervision' })).runId
+      equal(lauf(PLAIN).supervisor, 0, 'an ordinary run is no supervisor')
+      const plainEnv = await sessionEnv(PLAIN)
+      isFalse('FL_RUN_TOKEN' in plainEnv, 'an ordinary run gets no token')
+      // The whole set of hub variables, so a second addition cannot slip in either.
+      equal(Object.keys(plainEnv).filter(k => /^(FL|CC)_/.test(k) && k !== 'FL_PROMPTFILE').sort().join(','),
+        'CC_HUB_URL,CC_RUN_ID,FL_HUB_URL,FL_RUN_ID', 'its environment is exactly what it was before supervision existed')
+    })
+
+    await check('a request cannot make itself a supervisor outside the agent form', async () => {
+      const j = await laufStarten({ repo_id: repoId, prompt: 'pretends to supervise', supervisor: '1' })
+      equal(lauf(j.runId).supervisor, 0, 'POST /api/runs ignores the field')
+      isFalse('FL_RUN_TOKEN' in await sessionEnv(j.runId), 'and hands out no token')
+    })
+
+    await check('a run that is not a supervisor is refused, with the sentence, on both listeners', async () => {
+      const token = lauf(PLAIN).report_token
+      const body = { op: 'note', run: SUP, text: 'nope' }
+      const http = await viaLoopback(`/api/runs/${PLAIN}/supervise`, { token, body })
+      equal(http.status, 403, 'loopback: 403')
+      contains(http.json?.error ?? '', 'not a supervisor run', 'with the sentence')
+      const sock = await viaSocket(`/api/runs/${PLAIN}/supervise`, { token, body })
+      equal(sock.status, 403, 'socket: 403')
+      contains(sock.json?.error ?? '', 'not a supervisor run', 'with the same sentence')
+      const cli = await supervise(PLAIN, ['note', shortIdOf(SUP), 'nope'])
+      equal(cli.code, 1, 'fl-supervise exits 1')
+      contains(cli.stderr, 'not a supervisor run', 'and prints the hub\'s sentence on stderr')
+      equal((await caseOf(SUP)).total, 0, 'nothing was written')
+    })
+
+    await check('a missing or wrong bearer is refused on both listeners', async () => {
+      const body = { op: 'note', run: PLAIN, text: 'nope' }
+      for (const [what, token] of [['no token', null], ['a wrong token', 'f'.repeat(64)], ['another run\'s token', lauf(PLAIN).report_token]]) {
+        equal((await viaLoopback(`/api/runs/${SUP}/supervise`, { token, body })).status, 401, `loopback, ${what}`)
+        equal((await viaSocket(`/api/runs/${SUP}/supervise`, { token, body })).status, 401, `socket, ${what}`)
+      }
+      const cli = await supervise(SUP, ['note', PLAIN, 'nope'], { token: null })
+      equal(cli.code, 1, 'fl-supervise without FL_RUN_TOKEN is refused')
+      contains(cli.stderr, 'bearer token', 'and says why')
+      equal((await caseOf(PLAIN)).total, 0, 'nothing was written')
+    })
+
+    await check('a supervisor writes note, again and close, and the case file and the page show them', async () => {
+      const short = shortIdOf(PLAIN)
+      const n = await supervise(SUP, ['note', short, 'waits for input since the morning', '--again', '30'])
+      equal(n.code, 0, `note over loopback (${n.stderr.trim()})`)
+      equal(n.json?.run, PLAIN, 'the short id named the right run')
+      isTrue(!!n.json?.look_again_at, 'and --again set the time to look again')
+      const s = await supervise(SUP, ['note', PLAIN, 'second note, over the socket'], { channel: 'socket' })
+      equal(s.code, 0, `note over the socket (${s.stderr.trim()})`)
+      const a = await supervise(SUP, ['again', short, '45'])
+      equal(a.code, 0, 'again')
+      const bad = await supervise(SUP, ['again', short, '0'])
+      equal(bad.code, 1, 'zero minutes are refused')
+      contains(bad.stderr, 'whole minutes', 'with the range')
+      const c = await supervise(SUP, ['close', short, 'nothing left to do'])
+      equal(c.code, 0, 'close')
+      const c2 = await supervise(SUP, ['close', short, 'again'])
+      equal(c2.json?.already_closed, true, 'closing twice says it already is')
+
+      const k = await caseOf(PLAIN)
+      isTrue(k.ok, 'GET /api/runs/<id>/case answers')
+      equal(k.entries.map(e => e.kind).join(','), 'note,note,action,closed', 'four entries, oldest first')
+      isTrue(k.entries.every(e => e.author === SUP), 'all written by the supervisor run')
+      equal(k.entries[0].data?.again_minutes, 30, 'the note carries its look-again minutes')
+      equal(k.entries[2].data?.op, 'again', 'the action says what it was')
+      isTrue(!!k.state.closed_at, 'the case is closed')
+      equal(k.state.closed_reason, 'nothing left to do', 'with its reason')
+      isTrue(!!k.state.look_again_at, 'and the time to look again is kept')
+      equal((await caseOf(PLAIN, '?limit=2')).entries.map(e => e.kind).join(','), 'action,closed', 'limit keeps the newest')
+
+      const page = await (await fetchPath(`/runs/${PLAIN}`)).text()
+      const section = page.slice(page.indexOf('id="run-case"'), page.indexOf('</section>', page.indexOf('id="run-case"')))
+      isFalse(section.startsWith('id="run-case" hidden'), 'the section is visible')
+      contains(section, 'Case file', 'under its title')
+      contains(section, 'waits for input since the morning', 'with the note')
+      contains(section, `supervisor ${shortIdOf(SUP)}`, 'its author')
+      contains(section, 'ago', 'and its age')
+      contains(section, 'Look again in 45 min', 'the action in words')
+      contains(section, 'Closed since', 'and where the case stands')
+      const frag = await (await fetchPath(`/api/fragments/run-detail?id=${PLAIN}`)).text()
+      contains(frag, 'id="run-case"', 'the section is part of the run-detail fragment')
+    })
+
+    await check('the supervisor is refused for itself, another supervisor, an unknown, an ambiguous and an archived run', async () => {
+      contains((await supervise(SUP, ['note', SUP, 'x'])).stderr, 'your own run', 'its own run')
+      // A second supervisor run, written straight into the table.
+      const other = randomUUID()
+      db.prepare(`INSERT INTO runs(id, repo_id, harness, prompt, branch_mode, expected_minutes, status, supervisor)
+        VALUES(?, ?, 'claude', 'x', 'keiner', 10, 'running', 1)`).run(other, repoId)
+      contains((await supervise(SUP, ['note', other, 'x'])).stderr, 'is a supervisor run itself', 'another supervisor')
+      // Done, not left running without a session: a later watcher pass would try to resume it.
+      db.prepare(`UPDATE runs SET status='done' WHERE id=?`).run(other)
+      contains((await supervise(SUP, ['note', 'deadbeef', 'x'])).stderr, 'no run matches', 'an unknown run')
+      for (const id of ['abcd1111-0000-4000-8000-000000000001', 'abcd2222-0000-4000-8000-000000000002']) {
+        db.prepare(`INSERT INTO runs(id, repo_id, harness, prompt, branch_mode, expected_minutes, status)
+          VALUES(?, ?, 'claude', 'x', 'keiner', 10, 'done')`).run(id, repoId)
+      }
+      const amb = await viaLoopback(`/api/runs/${SUP}/supervise`, { token: lauf(SUP).report_token, body: { op: 'note', run: 'abcd', text: 'x' } })
+      equal(amb.status, 409, 'an ambiguous short id is a 409')
+      equal(amb.json?.candidates?.sort().join(','), 'abcd1111,abcd2222', 'naming the candidates')
+      db.prepare(`UPDATE runs SET archived_at=datetime('now') WHERE id='abcd1111-0000-4000-8000-000000000001'`).run()
+      contains((await supervise(SUP, ['note', 'abcd1111', 'x'])).stderr, 'is archived', 'an archived run')
+      const unknownOp = await viaLoopback(`/api/runs/${SUP}/supervise`, { token: lauf(SUP).report_token, body: { op: 'explode', run: PLAIN } })
+      equal(unknownOp.status, 400, 'an unknown op is a 400')
+      contains(unknownOp.json?.error ?? '', 'note, again, close', 'naming the ops there are')
+    })
+
+    await check('the operator answers in the case file, on the page and through the API', async () => {
+      const page = await (await fetchPath(`/runs/${PLAIN}`)).text()
+      contains(page, `action="/api/runs/${PLAIN}/case/answer"`, 'the page carries the answer form')
+      const j = await (await postForm(`/api/runs/${PLAIN}/case/answer`, { text: 'tell it to go ahead' })).json()
+      isTrue(j.ok, 'the API takes an answer')
+      const viaForm = await postForm(`/api/runs/${PLAIN}/case/answer`, { text: 'and merge', back: `/runs/${PLAIN}#run-case` }, { asBrowser: true })
+      equal(viaForm.status, 303, 'the page form redirects back')
+      equal((await postForm(`/api/runs/${PLAIN}/case/answer`, { choice: 'yes' })).status, 200, 'a choice alone is an answer')
+      equal((await postForm(`/api/runs/${PLAIN}/case/answer`, { text: '   ' })).status, 400, 'an empty one is refused')
+      equal((await postForm(`/api/runs/${randomUUID()}/case/answer`, { text: 'x' })).status, 404, 'an unknown run is a 404')
+      const last = (await caseOf(PLAIN)).entries.slice(-3)
+      equal(last.map(e => `${e.kind}:${e.author}`).join(','), 'answer:operator,answer:operator,answer:operator', 'three answers by the operator')
+      equal(last[0].text, 'tell it to go ahead', 'with the text')
+      equal(last[2].data?.choice, 'yes', 'and the chosen label')
+    })
+
+    await check('a run taken out of supervision: at the start, on the page, and the supervisor is refused', async () => {
+      const form = await (await fetchPath(`/runs/new?repo=${repoId}`)).text()
+      contains(form, 'name="supervision_off"', 'the single-run form offers it while a supervisor is active')
+      const j = await laufStarten({ repo_id: repoId, prompt: 'leave me alone', supervision_off: '1' })
+      const id = j.runId
+      equal(lauf(id).supervision_off, 1, 'set at the start')
+      equal(JSON.stringify(evPayloads(id, 'supervision_off')), JSON.stringify([{ by: 'operator', at_start: true }]), 'and recorded as an event')
+      const refused = await supervise(SUP, ['note', id, 'x'])
+      equal(refused.code, 1, 'the supervisor is refused')
+      contains(refused.stderr, 'took run', 'with the sentence that the operator took it out')
+
+      const page = await (await fetchPath(`/runs/${id}`)).text()
+      contains(page, `action="/api/runs/${id}/supervision"`, 'the run page carries the switch')
+      contains(page, 'Put back under supervision', 'saying which way it goes')
+      equal((await postForm(`/api/runs/${id}/supervision`, { off: '0', back: `/runs/${id}` }, { asBrowser: true })).status, 303, 'put back from the page')
+      equal(lauf(id).supervision_off, 0, 'back under supervision')
+      equal(evPayloads(id, 'supervision_on').length, 1, 'one event')
+      equal((await (await postForm(`/api/runs/${id}/supervision`, { off: '0' })).json()).changed, false, 'the same value twice changes nothing')
+      equal(evPayloads(id, 'supervision_on').length, 1, 'and writes no second event')
+      equal((await supervise(SUP, ['note', id, 'now I may'])).code, 0, 'the supervisor may write again')
+      equal((await postForm(`/api/runs/${id}/supervision`, { off: '1' })).status, 200, 'taken out through the API')
+      equal(evPayloads(id, 'supervision_off').length, 2, 'a second off event')
+      equal((await postForm(`/api/runs/${id}/supervision`, { off: 'yes' })).status, 400, 'anything but 1 or 0 is refused')
+      equal((await caseOf(id)).total, 1, 'the existing case file stays readable')
+      const supPage = await (await fetchPath(`/runs/${SUP}`)).text()
+      contains(supPage, 'id="run-supervision" hidden', 'a supervisor run has no switch: it is never a case')
+    })
+
+    await check('without an active supervisor agent the switch and the checkbox are gone, the route still works', async () => {
+      await postForm('/agents/toggle', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
+      equal(agent('e2e-supervisor').active, 0, 'the supervisor agent is switched off')
+      isFalse((await (await fetchPath(`/runs/new?repo=${repoId}`)).text()).includes('name="supervision_off"'), 'no checkbox in the form')
+      const page = await (await fetchPath(`/runs/${PLAIN}`)).text()
+      contains(page, 'id="run-supervision" hidden', 'the switch is hidden')
+      contains(page, 'Case file', 'but a case file with entries still shows')
+      equal((await postForm(`/api/runs/${PLAIN}/supervision`, { off: '1' })).status, 200, 'and the route works regardless')
+      equal(lauf(PLAIN).supervision_off, 1, 'it changed the run')
     })
   }
 

@@ -16,6 +16,15 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-11-20
+
+### Added
+
+- **Supervision, first part: the supervisor flag and the case file.** An agent can be marked as supervisor in its form. Its runs may write the case files of other runs through `fl-supervise` (`note`, `again`, `close`); every other run is refused with a sentence that says why. The scheduler never starts a supervisor agent by its schedule — the hub will start it when something is due (a later part); "Start now" starts it by hand.
+- Every run has a case file: a section on its page, oldest entry first with author and age, and `GET /api/runs/<id>/case`. The operator answers there, or through `POST /api/runs/<id>/case/answer` (`text`, optional `choice`).
+- A single run can be taken out of supervision: a checkbox in the single-run form and a switch on the run's page (both shown while a supervisor agent is active), and `POST /api/runs/<id>/supervision` with `off=1|0`. Each change is an event of the run.
+- `POST /api/runs/<own id>/supervise` on the loopback listener and on the report socket, bearer required on both. An unsandboxed supervisor run gets `FL_RUN_TOKEN` in its session for it; every other run's environment is unchanged.
+
 ## 2026-11-03
 
 ### Added

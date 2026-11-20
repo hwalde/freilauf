@@ -156,6 +156,16 @@ function logTail(runId) {
   return out.join('\n')
 }
 
+/**
+ * An agent as a flow may start it: never as a supervisor (SPEC 7.1). A flagged
+ * agent's runs may act on other runs, and only the hub starts those — a flow is
+ * an automatic start like the schedule, which skips such an agent altogether.
+ * Here the run still starts (the flow asked for its work), without the flag.
+ */
+export function asFlowStart(agent) {
+  return agent?.supervisor === 1 ? { ...agent, supervisor: 0 } : agent
+}
+
 export const actions = {
   now: () => Date.now(),
   runInfo: async (runId) => runInfo(runId),
@@ -238,7 +248,7 @@ export const actions = {
     const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId)
     if (!agent) return { ok: false, error: `agent ${agentId} does not exist` }
     if (agent.active === 0) return { ok: true, runId: null, inactive: true, name: agent.name }
-    const r = await startForAgent(agent, promptExtra)
+    const r = await startForAgent(asFlowStart(agent), promptExtra)
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
   },
@@ -292,7 +302,7 @@ export const actions = {
     const busy = db.prepare(`SELECT id FROM runs WHERE agent_id = ?
                              AND status IN ('running','waiting_help','deferred') LIMIT 1`).get(agentId)
     if (busy) return { ok: true, runId: null, busy: true }
-    const r = await startForAgent(agent)
+    const r = await startForAgent(asFlowStart(agent))
     if (r.runId) markStartedByFlow(r.runId, flowRunId)
     return r
   },

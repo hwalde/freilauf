@@ -201,6 +201,7 @@ try {
       equal(callCount('npm ci'), 1, 'npm ci ran exactly once')
       isTrue(existsSync(join(DEPLOY, '.deploy-lock-hash')), 'the lockfile hash is written down')
       isTrue(existsSync(join(HOME, '.local/bin/fl-report')), 'the fl-* scripts went into ~/.local/bin')
+      isTrue(existsSync(join(HOME, '.local/bin/fl-supervise')), 'fl-supervise among them')
       isTrue(existsSync(join(HOME, '.local/bin/freilauf-deploy')), 'including the deploy script itself')
       isTrue(existsSync(join(HOME, '.config/systemd/user/freilauf.service')), 'and the units are in place')
       equal(callCount('restart freilauf.service'), 1, 'the hub was restarted once')

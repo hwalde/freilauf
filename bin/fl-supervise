@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# fl-supervise — the command line of a Freilauf supervisor run.
+# Usage:
+#   fl-supervise note <run> "<text>" [--again <minutes>]
+#                                   Write a note into the run's case file;
+#                                   --again also says when to look again.
+#   fl-supervise again <run> <minutes>
+#                                   Look at this case again in <minutes> (1-10080).
+#   fl-supervise close <run> "<reason>"
+#                                   Close the case; it reopens only when
+#                                   something about the run changes.
+#   fl-supervise --help             This text.
+#
+# <run> is the run's full id or its short id (the first 8 characters).
+# Output: the hub's JSON answer on stdout, exit 0. A refusal: the hub's sentence
+# on stderr, exit 1 — it says what is the case; do not retry the same call.
+# Exit 2: wrong usage. Exit 3: the hub could not be reached.
+#
+# Works only inside a supervisor run (a run of an agent marked as supervisor):
+# the hub hands such a run FL_RUN_ID and FL_RUN_TOKEN and checks both, and the
+# supervisor flag, on every call. Anywhere else the hub refuses and says why.
+set -euo pipefail
+
+usage() {
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+[[ $# -ge 1 ]] || { usage >&2; exit 2; }
+CMD="$1"; shift
+
+die_usage() { printf 'fl-supervise: %s\n' "$1" >&2; printf 'Run "fl-supervise --help" for the commands.\n' >&2; exit 2; }
+
+# ------------------------------------------------------------ the subcommands
+# One branch per subcommand, each filling OP and the fields of the JSON body.
+# A new subcommand is one more branch here plus its lines in the usage text; the
+# hub decides everything else (server/supervision.mjs, the op table).
+RUN=""; TEXT=""; MINUTES=""; REASON=""; AGAIN=""
+case "$CMD" in
+    -h|--help|help) usage; exit 0 ;;
+    note)
+        [[ $# -ge 2 ]] || die_usage 'note needs a run and a text: fl-supervise note <run> "<text>" [--again <minutes>]'
+        RUN="$1"; TEXT="$2"; shift 2
+        if [[ $# -gt 0 ]]; then
+            [[ "$1" == "--again" && $# -eq 2 ]] || die_usage 'after the text only "--again <minutes>" is understood'
+            AGAIN="$2"
+        fi
+        ;;
+    again)
+        [[ $# -eq 2 ]] || die_usage 'again needs a run and minutes: fl-supervise again <run> <minutes>'
+        RUN="$1"; MINUTES="$2"
+        ;;
+    close)
+        [[ $# -eq 2 ]] || die_usage 'close needs a run and a reason: fl-supervise close <run> "<reason>"'
+        RUN="$1"; REASON="$2"
+        ;;
+    *) die_usage "unknown command: $CMD" ;;
+esac
+
+# The run this call comes FROM, and its bearer. Both set by the hub at launch;
+# the old CC_* names are read like fl-report reads them.
+RUN_ID="${FL_RUN_ID:-${CC_RUN_ID:-}}"
+HUB="${FL_HUB_URL:-${CC_HUB_URL:-http://127.0.0.1:8791}}"
+SOCKET="${FL_HUB_SOCKET:-}"
+TOKEN="${FL_RUN_TOKEN:-}"
+if [[ -z "$RUN_ID" ]]; then
+    echo "fl-supervise: FL_RUN_ID is not set — this command only works inside a Freilauf supervisor run." >&2
+    exit 2
+fi
+
+# The body as JSON, built by python3 so no text can break the quoting. Minutes
+# travel as the string they were typed as: the hub checks them, not this script.
+PAYLOAD="$(python3 - "$CMD" "$RUN" "$TEXT" "$MINUTES" "$REASON" "$AGAIN" <<'PY'
+import json, sys
+cmd, run, text, minutes, reason, again = sys.argv[1:7]
+body = {"op": cmd, "run": run}
+if cmd == "note":
+    body["text"] = text
+    if again:
+        body["again"] = again
+elif cmd == "again":
+    body["minutes"] = minutes
+elif cmd == "close":
+    body["reason"] = reason
+print(json.dumps(body))
+PY
+)"
+
+# An unset token sends no header at all; the hub then refuses with its sentence.
+AUTH=()
+[[ -n "$TOKEN" ]] && AUTH=(-H "authorization: Bearer $TOKEN")
+
+# Each transport prints the body followed by a line with the HTTP status. curl
+# exits non-zero only when it could not talk to the hub at all — a refusal is an
+# answer, and is never retried on the other transport.
+send_socket() {
+    [[ -n "$SOCKET" && -S "$SOCKET" ]] || return 1
+    curl -sS --max-time 15 -X POST --unix-socket "$SOCKET" \
+         -H 'content-type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
+         --data-binary "$PAYLOAD" -w '\n%{http_code}' \
+         "http://hub/api/runs/$RUN_ID/supervise"
+}
+send_http() {
+    curl -sS --max-time 15 -X POST \
+         -H 'content-type: application/json' ${AUTH[@]+"${AUTH[@]}"} \
+         --data-binary "$PAYLOAD" -w '\n%{http_code}' \
+         "$HUB/api/runs/$RUN_ID/supervise"
+}
+
+if ! OUT="$(send_socket 2>/dev/null)" && ! OUT="$(send_http 2>/dev/null)"; then
+    echo "fl-supervise: the hub is not reachable (socket: ${SOCKET:-none}, url: $HUB). Nothing was written." >&2
+    exit 3
+fi
+CODE="${OUT##*$'\n'}"
+BODY="${OUT%$'\n'*}"
+if [[ "$CODE" =~ ^2[0-9][0-9]$ ]]; then
+    printf '%s\n' "$BODY"
+    exit 0
+fi
+# The hub's own sentence, or the raw answer when it was not JSON.
+printf '%s' "$BODY" | python3 -c 'import json,sys
+raw = sys.stdin.read()
+try:
+    j = json.loads(raw)
+    msg = j.get("error") or raw
+except Exception:
+    msg = raw.strip() or "no answer"
+print("fl-supervise: " + msg, file=sys.stderr)' || true
+exit 1

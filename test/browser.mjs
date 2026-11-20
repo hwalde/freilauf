@@ -2056,6 +2056,29 @@ try {
     await p.close()
   })
 
+  await check('a half-typed answer in the case file survives a live update', async () => {
+    // The section shows once the run has a case file; one answer is enough.
+    await postForm(`/api/runs/${R_LIVE}/case/answer`, { text: 'an earlier remark' })
+    const p = await neueSeite(`/runs/${R_LIVE}`)
+    await wartePage(p, () => !!document.querySelector('#run-case:not([hidden]) textarea[name=text]'), null,
+      'the case section with its answer form')
+    await p.fill('#run-case textarea[name=text]', 'half an answer')
+    isTrue(await p.$eval('#run-case textarea[name=text]', el => el === document.activeElement), 'premise: the field has the focus')
+    // A new entry announces the run, and the open page asks for the fragment.
+    await postForm(`/api/runs/${R_LIVE}/case/answer`, { text: 'pushed from outside' })
+    await new Promise(r => setTimeout(r, 900))   // long enough for the swap to have happened
+    const feld = await p.$('#run-case textarea[name=text]')
+    equal(feld ? await feld.inputValue() : '(section was replaced)', 'half an answer', 'the typing survived')
+    isFalse((await p.textContent('#run-case')).includes('pushed from outside'), 'the swap waited')
+    // …and only waited: once the field is left, the next event brings the entry.
+    await p.evaluate(() => document.activeElement.blur())
+    await postForm(`/api/runs/${R_LIVE}/title`, { title: 'Case swap after blur' })
+    await wartePage(p, () => document.querySelector('#run-case')?.textContent.includes('pushed from outside'), null,
+      'the entry to arrive once the field is left')
+    sauber(p)
+    await p.close()
+  })
+
   await check('the channel reconnects by itself and keeps working', async () => {
     const p = await neueSeite(`/?repo=${repoId}`)
     // Drop the stream from the browser side; EventSource has to come back on its

@@ -135,7 +135,9 @@ async function catchUpMissed(now) {
   const last = parseDbUtc(getSetting('last_tick_at'))
   if (!(hours > 0) || !Number.isFinite(last)) return
   const from = Math.max(last, now.getTime() - hours * 3_600_000)
-  const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND schedule_kind IN ('cron','woechentlich')`).all()
+  // A supervisor agent is never started by its schedule (SPEC 7.2) — see tick().
+  const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND supervisor = 0
+    AND schedule_kind IN ('cron','woechentlich')`).all()
   for (const agent of agents) {
     const missed = lastMissedSlot(agent, from, now.getTime())
     if (!missed) continue
@@ -186,7 +188,12 @@ export async function tick() {
   if (!pipelineOn) { setSetting('last_tick_at', now.toISOString()); return }
   await catchUpMissed(now)
   setSetting('last_tick_at', now.toISOString())
-  const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND schedule_kind <> 'manuell'`).all()
+  // A supervisor agent (server/supervision.mjs) is never started by this tick,
+  // whatever schedule it carries: the hub starts it when cases are due, and a
+  // round started by the clock alone would have no case list and cost a full
+  // context for nothing (SPEC 7.2). Its form says so.
+  const agents = db.prepare(`SELECT * FROM agents WHERE active = 1 AND supervisor = 0
+    AND schedule_kind <> 'manuell'`).all()
   const slot = now.toISOString().slice(0, 16)
   for (const agent of agents) {
     if (!scheduleDue(agent, now)) continue
@@ -407,7 +414,7 @@ export async function budgetGate(harness, model = null, provider = null) {
  */
 export async function startRun(def, {
   repoId, agentId = null, promptExtra = null,
-  title = null, startMode = 'now', startAt = null, detached = false,
+  title = null, startMode = 'now', startAt = null, detached = false, supervisionOff = 0,
 } = {}) {
   // What the run is called: the operator's input first, then the agent's name —
   // an agent run needs no title of its own, one knows the agent. Only a single
@@ -457,6 +464,7 @@ export async function startRun(def, {
       ...resolved, repoId, agentId, promptExtra, title: startTitle || null,
       sandbox: sandboxPlan.sandbox, sandboxProfileId: sandboxPlan.profileId,
       sandboxOverrides: sandboxPlan.overrides, sandboxSpec: sandboxPlan.spec,
+      supervisionOff: supervisionOff === 1 ? 1 : 0,
     })
   } catch (e) {
     return { ok: false, error: e.message }
@@ -467,6 +475,10 @@ export async function startRun(def, {
   // that was going to be contained and is not carries `sandbox:bypassed {by,
   // reason}`, and the overview and the notification read it from there.
   for (const [kind, payload] of sandboxPlan.events) addEvent(runId, kind, payload)
+  // Taken out of supervision at the start (SPEC 4.1a): a decision about the
+  // run, so it is part of its history from the first moment, like every later
+  // switch on the run page.
+  if (supervisionOff === 1) addEvent(runId, 'supervision_off', { by: 'operator', at_start: true })
 
   // The row exists — say so, before the launch takes its seconds. Without this
   // the overview's first news of a run was its `started` event, which lands

@@ -42,6 +42,7 @@ import {
   skillsInstallOn, skillsAutoUpdate,
 } from './skills.mjs'
 import { t } from './i18n.mjs'
+import { caseEntries, caseEntryCount, caseState } from './supervision.mjs'
 
 const LIMIT_MAX = 200
 const LIMIT_DEFAULT = 50
@@ -267,6 +268,25 @@ export async function readApi(req, res, url) {
       files: runFiles(run),
       events,
       incidents: allIncidentsOf(run.id),
+    })
+    return true
+  }
+
+  // ---- a run's case file (server/supervision.mjs) -------------------------
+  // Read-only like everything here: looking at a case through this route writes
+  // no `look` entry (the supervisor's bundle does that, on its own route). The
+  // newest `limit` entries, oldest first, plus where the case stands.
+  if ((m = path.match(/^\/api\/runs\/([0-9a-f-]{36})\/case$/))) {
+    const run = getRun(m[1])
+    if (!run) { json(res, 404, { ok: false, error: t('api.unknown_run') }); return true }
+    const limit = limitOf(url)
+    json(res, 200, {
+      ok: true,
+      run: { id: run.id, short_id: shortId(run.id), supervisor: run.supervisor, supervision_off: run.supervision_off },
+      state: caseState(run.id),
+      total: caseEntryCount(run.id),
+      limit,
+      entries: caseEntries(run.id, { limit }),
     })
     return true
   }

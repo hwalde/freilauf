@@ -107,7 +107,7 @@ server.listen(PORT, HOST, () => {
   // after `loadExternalPlugins()` at the top of this file. Off by default, so on
   // an installation that never said yes this is one settings read and nothing else.
   syncSkillsQuiet('startup')
-  // The narrow channel next to the full API (server/hub-socket.mjs): two routes,
+  // The narrow channel next to the full API (server/hub-socket.mjs): three routes,
   // a per-run token, a unix socket a container can be handed. Deliberately
   // fail-soft and not awaited — a hub that did not come up because a socket file
   // could not be created would be a worse hub than one without the socket, and

@@ -809,6 +809,21 @@ export function notifyResultField(a = {}) {
 }
 
 /**
+ * The supervisor flag (server/supervision.mjs) as the agent form shows it. On the
+ * AGENT form only: a supervisor is a recurring job the hub starts when there is
+ * something to look at, so a single run, a favorite, Quick Run or a flow never
+ * carries it (SPEC 7.1). The sentence says what the switch grants and that the
+ * hub, not the schedule, starts such an agent.
+ */
+export function supervisorField(a = {}) {
+  return `<label class="chk"><input type="checkbox" name="supervisor" value="1"${a.supervisor === 1 ? ' checked' : ''}>
+    ${e(t('supervisor.flag'))} <span class="dim">${e(t('supervisor.flag_hint'))}</span></label>`
+}
+
+/** A checkbox value as the form sends it: present and ticked, or nothing. Never coerced. */
+function ticked(v) { return v === '1' || v === 'on' || v === 'true' }
+
+/**
  * The definition as form fields — embedded IDENTICALLY by the agent form and
  * the single-run form. `a` is an agent row, a remembered choice or {}.
  */
@@ -972,7 +987,7 @@ export async function runSetupFromForm(b, problems = []) {
  * in `problems`; a definition is returned in any case, so the caller decides
  * whether to show the problem page or answer with JSON.
  */
-export async function runDefFromForm(b, problems = []) {
+export async function runDefFromForm(b, problems = [], { agentForm = false } = {}) {
   const setup = await runSetupFromForm(b, problems)
   const prompt = String(b.prompt ?? '')
   if (!prompt.trim()) problems.push(t('form.prompt_missing'))
@@ -998,6 +1013,11 @@ export async function runDefFromForm(b, problems = []) {
     review,
     expectedMinutes: +b.expected_minutes || DEFAULT_EXPECTED_MINUTES,
     notifyResult: notifyResultOf(b.notify_result),
+    // Only the agent form may set it; every other caller of this function (the
+    // single-run form, POST /api/runs, Quick Run, the conflict resolver, the
+    // cleanup agent) gets 0 whatever the body says — a request cannot make
+    // itself a supervisor by adding a field.
+    supervisor: agentForm && ticked(b.supervisor) ? 1 : 0,
     skills: skillsAusFormular(b),
     flows: attachmentsFromForm(b),
   }
@@ -1089,6 +1109,7 @@ export function defFromAgent(agent) {
     sandboxOverrides: agent.sandbox_overrides ?? '{}',
     expectedMinutes: agent.expected_minutes,
     notifyResult: notifyResultOf(agent.notify_result),
+    supervisor: agent.supervisor === 1 ? 1 : 0,
     skills: agent.skills ?? null,
     flows: agent.flows ?? null,
   }
@@ -1117,25 +1138,25 @@ export function saveAgent({ id = null, repoId, name, def, schedule = null, activ
                 keep_on_branch=?, expected_minutes=?, schedule=?, schedule_kind=?, schedule_days=?, schedule_time=?,
                 schedule_slots=?, schedule_weeks=?, schedule_anchor=?, run_at=?, provider=?, or_provider=?, or_routing=?, effort=?,
                 skills=?, flows=?, sandbox=?, sandbox_profile_id=?, sandbox_overrides=?, review=?, notify_result=?,
-                active=?, updated_at=datetime('now') WHERE id=?`).run(
+                supervisor=?, active=?, updated_at=datetime('now') WHERE id=?`).run(
       name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode, def.branchPattern,
       def.keepOnBranch ? 1 : 0,
       def.expectedMinutes, zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
       def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
       sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', reviewOfDef(def),
-      notifyResultOf(def.notifyResult), active, id)
+      notifyResultOf(def.notifyResult), def.supervisor === 1 ? 1 : 0, active, id)
     return id
   }
   const r = db.prepare(`INSERT INTO agents(repo_id,name,harness,model,prompt,goal,branch_mode,branch_pattern,keep_on_branch,expected_minutes,
               schedule,schedule_kind,schedule_days,schedule_time,schedule_slots,schedule_weeks,schedule_anchor,run_at,
-              provider,or_provider,or_routing,effort,skills,flows,sandbox,sandbox_profile_id,sandbox_overrides,review,notify_result,active)
-              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+              provider,or_provider,or_routing,effort,skills,flows,sandbox,sandbox_profile_id,sandbox_overrides,review,notify_result,supervisor,active)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     repoId, name, def.harness, def.model, def.prompt, def.goal ?? null, def.branchMode,
     def.branchPattern, def.keepOnBranch ? 1 : 0, def.expectedMinutes,
     zp.schedule, zp.kind, zp.days, zp.time, zp.slots, zp.weeks, zp.anchor, zp.run_at,
     def.provider, def.orProvider, routingJson(def.orRouting), def.effort, def.skills, def.flows ?? null,
     sandboxOf(def), def.sandboxProfileId ?? null, def.sandboxOverrides ?? '{}', reviewOfDef(def),
-    notifyResultOf(def.notifyResult), active)
+    notifyResultOf(def.notifyResult), def.supervisor === 1 ? 1 : 0, active)
   return Number(r.lastInsertRowid)
 }
 
@@ -1214,6 +1235,18 @@ export function runTitleField(v = {}) {
   </label>`
 }
 
+/**
+ * "Leave this run alone": the single run is never a case for the supervisor
+ * (SPEC 4.1a). Single runs only — an operator who works in a run for hours does
+ * not want a supervisor cutting in, and an agent is a recurring job nobody sits
+ * in. Absent means "supervised like any run", so no hidden companion is needed.
+ * The caller renders it only while a supervisor agent is active.
+ */
+export function runSupervisionField(v = {}) {
+  return `<label class="chk"><input type="checkbox" name="supervision_off" value="1"${ticked(v.supervision_off) ? ' checked' : ''}>
+    ${e(t('supervision.off_at_start'))} <span class="dim">${e(t('supervision.off_at_start_hint'))}</span></label>`
+}
+
 export function runStartTimeFields(v = {}) {
   const mode = START_MODES.includes(v.start_mode) ? v.start_mode : 'now'
   const modes = [
@@ -1254,6 +1287,10 @@ export function runStartTimeFields(v = {}) {
  * time here.
  */
 export function runStartFromForm(b, problems = [], nowMs = Date.now()) {
+  return { ...startTimeFromForm(b, problems, nowMs), supervisionOff: ticked(b.supervision_off) ? 1 : 0 }
+}
+
+function startTimeFromForm(b, problems, nowMs) {
   const title = String(b.title ?? '').trim().slice(0, TITLE_MAX) || null
   const mode = String(b.start_mode ?? 'now')
   if (!START_MODES.includes(mode)) {
@@ -1546,6 +1583,9 @@ export function defFromFlowProps(props) {
     ...sandboxFromFlowProps(props),
     expectedMinutes: Number(props.expectedMinutes) || DEFAULT_EXPECTED_MINUTES,
     skills: null,
+    // Never a supervisor (SPEC 7.1): a flow is an automatic start, and a run
+    // that may act on other runs is started by the hub when cases are due.
+    supervisor: 0,
     // Deliberately no attached flows: a run a flow starts must not start flows
     // itself — that is the loop guard, and a flow that wants to react to its own
     // run uses "wait" on the start step instead.
