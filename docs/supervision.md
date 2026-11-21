@@ -307,9 +307,10 @@ POST /api/runs/<id>/supervision   off=1|0                           take the run
 ```
 
 `POST /api/runs` takes `supervision_off=1` to start a single run out of
-supervision. The operator hears, on the urgent route (each subject to the run's
-mute switch): a supervisor's question (`supervisor_question`), an escalation
-(`escalation`), a parked case (`supervision_parked`), a round the hub ended
+supervision. The checkbox and the switch are shown on every run but a
+supervisor run, also while no supervisor is active. The operator hears, on
+the urgent route (each subject to the run's mute switch): a supervisor's
+question (`supervisor_question`), an escalation (`escalation`), a parked case (`supervision_parked`), a round the hub ended
 (`supervision_round_stuck`), and — with or without a supervisor — a run that
 has blocked its agent's schedule for more than 24 hours (`schedule_blocked`, at
 most once a day).

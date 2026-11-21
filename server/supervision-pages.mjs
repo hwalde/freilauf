@@ -192,12 +192,12 @@ export function escalationNav() {
 /**
  * The switch that takes this run out of supervision or puts it back — a plain
  * POST form in the detail head, like the archive button, so a live swap
- * carries it and no client script is involved. Rendered (hidden) always, shown
- * only while a supervisor agent is active and never on a supervisor run, which
- * is never a case anyway. The route works regardless.
+ * carries it and no client script is involved. Shown on every run but a
+ * supervisor run (never a case anyway), also while no supervisor is active:
+ * the operator decides before a supervisor is switched on, not after it acted.
  */
 export function supervisionSwitch(run) {
-  const show = run.supervisor !== 1 && !!activeSupervisorAgent()
+  const show = run.supervisor !== 1
   const off = run.supervision_off === 1
   return `<div class="btn-row" id="run-supervision"${show ? '' : ' hidden'}>${show ? `
     <form method="post" action="/api/runs/${e(run.id)}/supervision" class="inline">

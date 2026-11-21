@@ -1956,7 +1956,7 @@
   "reports.max_tokens_hint": "思考也计入其中；只按实际使用量计费。留空 = {n}。",
   "reports.err_max_tokens": "Token 上限：{min} 到 {max} 之间的整数。",
   "supervisor.flag": "监督者",
-  "supervisor.flag_hint": "此代理可以读写其他运行的案卷、提醒它们、结束它们、就它们向你提问并提出升级。有事项到期时由中心自行启动它；它的计划会被忽略。",
+  "supervisor.flag_hint": "此代理可以照看其他运行：读写它们的案卷、提醒它们、结束它们、就它们向你提问并提出升级。它自己的提示词就是它作为监督者的全部任务；每一轮中心只在后面附上到期的运行和一轮的规则。有事项到期时由中心自行启动它；它的计划会被忽略。",
   "supervisor.badge": "监督者",
   "supervisor.several": "有多个代理被标记为监督者。只有一个监督此中心：{name}（最早创建的）。未使用：{others}。",
   "supervision.off_at_start": "不要打扰此运行",

@@ -796,8 +796,9 @@ resolver's routes).
   finished round is refused because its token outlives it.
 - `runs.supervision_off` is a single-run start option (`runStartFromForm()`),
   never a definition field; every change writes `supervision_off` or
-  `supervision_on`; the form checkbox and the run-page switch render only while
-  a supervisor agent is active, the route works regardless.
+  `supervision_on`; the form checkbox and the run-page switch render on every
+  run but a supervisor run, also while no supervisor is active, so a run is
+  taken out before a supervisor is switched on.
 
 **The channel**
 

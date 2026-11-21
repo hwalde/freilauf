@@ -99,8 +99,8 @@ das tut Freilauf, und es geht nur vorwärts.
   **Tagesbericht**, was los war — zuerst, was auf dich wartet, ein Routinetag in
   einem Satz. Rückfragen und blockierte Merges kommen weiterhin sofort.
   Standardmäßig aus (Einstellungen → Berichte).
-- **Ein Aufseher für die Läufe, die hängen bleiben, wenn du einen willst.**
-  Markiere einen Agenten als Supervisor, und der Hub startet ihn, sobald ein
+- **Ein Betreuer für die Läufe, die hängen bleiben, wenn du einen willst.**
+  Markiere einen Agenten als Betreuer, und der Hub startet ihn, sobald ein
   Lauf einen Blick braucht — ein Agent, der auf eine Eingabe wartet, die
   niemand gibt, ein Lauf, der gescheitert ist, ohne Report endete oder nicht
   gemergt werden kann — und nie, wenn nichts ansteht. Er liest in einem Zug
@@ -300,10 +300,10 @@ Der Hub kann tmux steuern. **Das ist Shell-Zugriff.** Deshalb:
   nach draußen. Lies [SANDBOX.md](SANDBOX.md); der Abschnitt „What this sandbox
   does not do" ist der wichtige.
 
-- **Ein Anstoß des Supervisors trägt deine Autorität, deshalb steht seine
+- **Ein Anstoß des Betreuers trägt deine Autorität, deshalb steht seine
   Grenze hier:** Außerhalb einer Sandbox kann jeder lokale Prozess deines
   Benutzers in die tmux-Session eines Agenten tippen, und `tmux
-  show-environment` zeigt das Token eines Supervisor-Laufs; der Kopf
+  show-environment` zeigt das Token eines Betreuer-Laufs; der Kopf
   `<freilauf-supervisor>` ist also nur so weit beglaubigt, wie dieses Token
   reicht. In der Sandbox macht der schmale Report-Socket ihn zu einer Grenze
   ([docs/supervision.md](docs/supervision.md)).
