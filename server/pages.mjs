@@ -28,7 +28,6 @@ import { readLogTail } from './run-log.mjs'
 import { followUpActive, displayStatus, displayStatusSql, WORK_STATUSES,
   archivable, resumable, agentWaiting, runtimeClock, sessionPending } from './run-state.mjs'
 import { harnessLabel } from './harnesses/index.mjs'
-import { activeSupervisorAgent } from './supervision.mjs'
 import { startSupervisorRound } from './supervision-clock.mjs'
 import { caseSection, supervisionSwitch, supervisorNotice, escalationsPageBody, escalationNav,
   supervisionSettingsBody, supervisionSettingsFromForm, supervisionSettingsSummary } from './supervision-pages.mjs'
@@ -1581,7 +1580,7 @@ export async function pageRunForm(req, res, url) {
   ${runTitleField({})}
   ${runDefFields(template, branchContext(sel.id))}
   ${runStartTimeFields({})}
-  ${activeSupervisorAgent() ? runSupervisionField({}) : ''}
+  ${runSupervisionField({})}
   <input type="hidden" name="repo_id" value="${sel.id}">
   <label class="chk"><input type="checkbox" name="save_agent" value="1"> ${e(t('runform.save_agent'))} (<input name="agent_name" placeholder="${e(t('runform.agent_name_ph'))}">)</label>`
   const body = `

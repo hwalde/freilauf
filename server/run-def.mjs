@@ -1240,7 +1240,8 @@ export function runTitleField(v = {}) {
  * Single runs only — an operator who works in a run for hours does
  * not want a supervisor cutting in, and an agent is a recurring job nobody sits
  * in. Absent means "supervised like any run", so no hidden companion is needed.
- * The caller renders it only while a supervisor agent is active.
+ * Offered also while no supervisor is active, so a long session is taken out
+ * before one is switched on.
  */
 export function runSupervisionField(v = {}) {
   return `<label class="chk"><input type="checkbox" name="supervision_off" value="1"${ticked(v.supervision_off) ? ' checked' : ''}>

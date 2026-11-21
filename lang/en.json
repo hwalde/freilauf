@@ -1956,7 +1956,7 @@
   "reports.max_tokens_hint": "Thinking counts against it; only what is used is paid. Empty = {n}.",
   "reports.err_max_tokens": "Token limit: a whole number from {min} to {max}.",
   "supervisor.flag": "Supervisor",
-  "supervisor.flag_hint": "This agent may read and write the case files of other runs, nudge them, end them, ask you about them and raise escalations. The hub starts it by itself when something is due; its schedule is ignored.",
+  "supervisor.flag_hint": "This agent may look after other runs: read and write their case files, nudge them, end them, ask you about them and raise escalations. Its prompt is its whole brief as supervisor; on each round the hub only appends the runs that are due and its rules for a round. The hub starts it by itself when something is due; its schedule is ignored.",
   "supervisor.badge": "supervisor",
   "supervisor.several": "Several agents are marked as supervisor. Only one supervises this hub: {name} (the oldest). Not used: {others}.",
   "supervision.off_at_start": "Leave this run alone",

@@ -9005,12 +9005,16 @@ export default {
       equal(j.json?.git?.dirty, null, 'and the dirt of a missing worktree is unknown, not clean')
     })
 
-    await check('without an active supervisor agent the switch and the checkbox are gone, the route still works', async () => {
+    await check('without an active supervisor agent the switch and the checkbox stay, so a run is taken out before one is switched on', async () => {
       await postForm('/agents/toggle', { id: String(supAgentId), repo: String(repoId) }, { asBrowser: true })
       equal(agent('e2e-supervisor').active, 0, 'the supervisor agent is switched off')
-      isFalse((await (await fetchPath(`/runs/new?repo=${repoId}`)).text()).includes('name="supervision_off"'), 'no checkbox in the form')
+      contains(await (await fetchPath(`/runs/new?repo=${repoId}`)).text(), 'name="supervision_off"', 'the checkbox is in the form')
       const page = await (await fetchPath(`/runs/${PLAIN}`)).text()
-      contains(page, 'id="run-supervision" hidden', 'the switch is hidden')
+      isFalse(page.includes('id="run-supervision" hidden'), 'the switch is shown')
+      contains(page, `action="/api/runs/${PLAIN}/supervision"`, 'as a form posting to the route')
+      contains(await (await fetchPath(`/runs/${SUP}`)).text(), 'id="run-supervision" hidden', 'a supervisor run still has none')
+      const early = (await laufStarten({ repo_id: repoId, prompt: 'taken out before any supervisor', supervision_off: '1' })).runId
+      equal(lauf(early).supervision_off, 1, 'a run started out of supervision now stays out of it')
       contains(page, 'Case file', 'but a case file with entries still shows')
       equal((await postForm(`/api/runs/${PLAIN}/supervision`, { off: '1' })).status, 200, 'and the route works regardless')
       equal(lauf(PLAIN).supervision_off, 1, 'it changed the run')

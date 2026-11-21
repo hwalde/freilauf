@@ -16,6 +16,14 @@ day at the top — the same shape a Keep-a-Changelog release section has, with t
 date doing the work the version number does elsewhere. A day with no section is
 a day on which nothing was released.
 
+## 2026-11-21
+
+### Changed
+
+- **Taking a run out of supervision is always offered**: the checkbox in the single-run form and the switch on a run's page show also while no supervisor agent is active, so a long session is taken out before a supervisor is switched on.
+- The supervisor checkbox on the agent form says what the agent's prompt is for: it is the supervisor's whole brief, and the hub only appends the list of runs that are due.
+- German UI: the supervisor is called **Betreuer**, supervision **Betreuung**.
+
 ## 2026-11-20
 
 ### Added
